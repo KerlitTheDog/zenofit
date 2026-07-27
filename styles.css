@@ -5,6 +5,9 @@
 button { background: none; border: none; cursor: pointer; font: inherit; color: inherit; text-align: inherit; }
 input, textarea, select { font: inherit; }
 html, body { height: 100%; }
+/* no double-tap-to-zoom (still allows tapping and scrolling); pinch-zoom is
+   blocked by the viewport tag + the gesture handlers in app.js */
+html { touch-action: manipulation; -webkit-text-size-adjust: 100%; }
 body { background: var(--outer); }
 
 /* ── THEMES ────────────────────────────────────────────────────────────

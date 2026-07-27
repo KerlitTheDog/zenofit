@@ -2207,6 +2207,12 @@ function handleFile(el) {
   el.value = ""; // let the same file be re-picked later
 }
 
+/* Lock zoom on mobile. iOS Safari ignores user-scalable=no in the viewport tag,
+   but it does honour a prevented pinch gesture, so block those explicitly.
+   (Double-tap zoom is killed by touch-action:manipulation in the CSS.) */
+["gesturestart", "gesturechange", "gestureend"].forEach((evt) =>
+  document.addEventListener(evt, (e) => e.preventDefault(), { passive: false }));
+
 /* ─────────────────────────────── GO ────────────────────────────────── */
 
 applyTheme(state.settings.theme);

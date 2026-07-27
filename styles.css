@@ -52,6 +52,18 @@ body { background: var(--outer); }
 .pb-input:focus{ border-color:var(--gold); }
 .pb-input::placeholder{ color:var(--faint); }
 select.pb-input{ appearance:none; }
+
+/* iPhone Safari renders <input type="date"> as a fixed intrinsic-width native
+   control that ignores width:100% and can spill off the right edge of the
+   screen. Normalizing the appearance turns it into a plain, box-sized field
+   that shrinks to whatever phone it's on (iPhone or Android, any width). */
+input[type="date"].pb-input{
+  -webkit-appearance:none; appearance:none;
+  min-width:0; max-width:100%; min-height:42px; text-align:center;
+}
+input[type="date"].pb-input::-webkit-date-and-time-value{
+  text-align:center; min-width:0; margin:0;
+}
 .pb-label{ font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
   color:var(--muted); }
 .pb-hairline{ height:1px; background:var(--border-soft); }
@@ -83,4 +95,21 @@ select.pb-input{ appearance:none; }
 @media (prefers-reduced-motion: reduce){
   .pb-fade-in,.pb-sheet{ animation:none; }
   .pb-acc-body,.pb-acc-inner,.pb-acc-chevron{ transition:none; }
+}
+
+/* Portrait-only. This is a phone app; a page can't take an OS-level orientation
+   lock on iOS, so when a phone is turned landscape (short viewport) we hide the
+   app and ask for portrait. Rotating back restores it instantly, state intact.
+   The max-height gate keeps tablets/desktop in landscape unaffected. */
+@media (orientation: landscape) and (max-height: 500px){
+  #app{ display:none; }
+  body::after{
+    content:"📱  Turn your phone upright to keep going";
+    position:fixed; inset:0; z-index:99999;
+    display:flex; align-items:center; justify-content:center;
+    padding:24px; text-align:center;
+    background:var(--bg); color:var(--text);
+    font-family:'Barlow',system-ui,-apple-system,sans-serif;
+    font-size:18px; font-weight:600; letter-spacing:.01em; line-height:1.4;
+  }
 }

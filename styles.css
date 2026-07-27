@@ -1,0 +1,86 @@
+@import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600;700&display=swap');
+
+/* minimal reset (matches the artifact environment the JSX ran in) */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+button { background: none; border: none; cursor: pointer; font: inherit; color: inherit; text-align: inherit; }
+input, textarea, select { font: inherit; }
+html, body { height: 100%; }
+body { background: var(--outer); }
+
+/* ── THEMES ────────────────────────────────────────────────────────────
+   Every color the app draws with comes from these variables, so a theme
+   is just a different set of values. `data-theme` is stamped on <html> by
+   app.js (and by the anti-flash inline script in index.html).            */
+
+:root,
+:root[data-theme="dark"]{
+  color-scheme:dark;
+  /* Discord-style dark — shades of neutral grey, gold accent */
+  --outer:#131417;
+  --bg:#1e1f22; --surface:#2b2d31; --surface2:#313338; --raise:#3a3d44;
+  --border:#3f4248; --border-soft:#292b2f;
+  --nav-bg:rgba(30,31,34,.96);
+  --text:#f2f3f5; --muted:#b5bac1; --faint:#80848e;
+  --gold:#e9b949; --gold-ink:#1a1507;
+  --red:#d05a50; --blue:#5d8bcc; --green:#6aa465; --steel:#aab4c0;
+}
+:root[data-theme="light"]{
+  color-scheme:light;
+  /* Clean light — grey base, white cards, deeper gold for contrast */
+  --outer:#c7cbd1;
+  --bg:#dddddd; --surface:#ececec; --surface2:#e8eaed; --raise:#dcdfe4;
+  --border:#d0d4da; --border-soft:#e4e6ea;
+  --nav-bg:rgba(255,255,255,.94);
+  --text:#1f2124; --muted:#5b5f66; --faint:#868b93;
+  --gold:#a9761a; --gold-ink:#ffffff;
+  --red:#c23b32; --blue:#3f74c4; --green:#4f8a46; --steel:#5f6b78;
+}
+.pb-root{ background:var(--bg); color:var(--text);
+  font-family:'Barlow',system-ui,-apple-system,sans-serif; }
+.pb-num{ font-family:'Barlow Condensed','Barlow',sans-serif; letter-spacing:.01em; }
+.pb-card{ background:var(--surface); border:1px solid var(--border-soft); border-radius:12px; }
+.pb-card2{ background:var(--surface2); border:1px solid var(--border); border-radius:10px; }
+.pb-chip{ display:inline-flex; align-items:center; gap:4px; border-radius:999px;
+  padding:2px 9px; font-size:11.5px; font-weight:600; border:1px solid var(--border); }
+.pb-btn{ border-radius:10px; font-weight:600; display:flex; align-items:center;
+  justify-content:center; gap:8px; transition:transform .05s ease, opacity .15s; }
+.pb-btn:active{ transform:scale(.98); }
+.pb-gold{ background:var(--gold); color:var(--gold-ink); }
+.pb-ghost{ background:var(--surface2); color:var(--text); border:1px solid var(--border); }
+.pb-input{ background:var(--surface2); border:1px solid var(--border); color:var(--text);
+  border-radius:10px; padding:10px 12px; font-size:15px; width:100%; outline:none; }
+.pb-input:focus{ border-color:var(--gold); }
+.pb-input::placeholder{ color:var(--faint); }
+select.pb-input{ appearance:none; }
+.pb-label{ font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
+  color:var(--muted); }
+.pb-hairline{ height:1px; background:var(--border-soft); }
+.pb-placeholder{ border:1.5px dashed var(--border); border-radius:12px; color:var(--faint);
+  display:flex; align-items:center; justify-content:center; text-align:center;
+  font-size:11px; letter-spacing:.06em; text-transform:uppercase; font-weight:600; }
+.pb-fade-in{ animation:pbfade .18s ease; }
+@keyframes pbfade{ from{opacity:0; transform:translateY(6px);} to{opacity:1; transform:none;} }
+.pb-sheet{ animation:pbsheet .22s cubic-bezier(.2,.8,.3,1); }
+@keyframes pbsheet{ from{transform:translateY(30px); opacity:.6;} to{transform:none; opacity:1;} }
+
+/* one-shot exit animations, applied inline by the transition engine in app.js
+   to the outgoing (detached) overlay while it slides/fades away */
+@keyframes pbFadeOut{ from{opacity:1;} to{opacity:0;} }
+@keyframes pbSheetOut{ from{opacity:1; transform:none;} to{opacity:0; transform:translateY(26px);} }
+.pb-trans{ pointer-events:none; }
+.pb-scroll::-webkit-scrollbar{ width:0; height:0; }
+
+/* smooth accordion expand / collapse. the body's height is animated between 0
+   and its measured content height by setAccordion() in JS, which is rock-solid
+   across browsers; the class just carries the open/closed styling. */
+.pb-acc-body{ height:0; overflow:hidden; transition:height .28s cubic-bezier(.4,0,.2,1); }
+.pb-acc.is-open .pb-acc-body{ height:auto; }
+.pb-acc-inner{ opacity:0; transition:opacity .22s ease; }
+.pb-acc.is-open .pb-acc-inner{ opacity:1; }
+.pb-acc-chevron{ display:inline-flex; flex-shrink:0; transition:transform .25s cubic-bezier(.4,0,.2,1); }
+.pb-acc.is-open .pb-acc-chevron{ transform:rotate(180deg); }
+
+@media (prefers-reduced-motion: reduce){
+  .pb-fade-in,.pb-sheet{ animation:none; }
+  .pb-acc-body,.pb-acc-inner,.pb-acc-chevron{ transition:none; }
+}

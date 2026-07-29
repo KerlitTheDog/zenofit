@@ -1,0 +1,14 @@
+{
+  "name": "Zenofit Tracker",
+  "short_name": "Zenofit",
+  "description": "Powerbuilding progressive-overload tracker: workouts, weekly volume, PRs and body measurements.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#131417",
+  "theme_color": "#131417",
+  "icons": [
+    { "src": "logoC.png", "sizes": "374x368", "type": "image/png", "purpose": "any" }
+  ]
+}

@@ -122,10 +122,60 @@ const chronoSort = (log) =>
 const metricOf = (e) =>
   e.kind === "cardio" ? cardioScore(+e.minutes, +e.intensity) : epley1RM(+e.weight, +e.reps);
 
+/* ───────────────────── DETAILED MODE: PER-SET LOGGING ────────────────
+   An entry logged in Detailed mode carries a `setList`: one row per set,
+   each with its own reps / weight / RPE. An entry logged in FSBS mode has
+   no setList at all — it's a total-set count plus the numbers of the top set.
+
+   Either way every entry keeps the same four headline fields filled in
+   (sets / reps / weight / rpe). For a detailed entry those are DERIVED from
+   its best set, the one with the highest estimated 1RM. That single rule is
+   what makes the two modes interchangeable: flip back to FSBS and a detailed
+   entry simply shows its best set, while weekly volume, PR badges, the
+   dashboard and the charts all keep reading the fields they always read.
+   Nothing is ever thrown away — the setList stays on the entry. */
+
+const newSet = (reps = "", weight = "", rpe = "") => ({ id: uid(), reps, weight, rpe });
+const isDetailed = (e) => Array.isArray(e && e.setList);
+const setHasData = (s) => +s.reps > 0 && +s.weight > 0;
+const filledSets = (e) => (e.setList || []).filter(setHasData);
+
+/* The set with the highest estimated 1RM — the one that speaks for the whole
+   exercise everywhere the app shows a single number. */
+function bestSet(list) {
+  let best = null, bestM = -Infinity;
+  for (const s of list || []) {
+    const m = epley1RM(+s.weight, +s.reps);
+    if (m != null && m > bestM) { bestM = m; best = s; }
+  }
+  return best;
+}
+
+/* Refresh a detailed entry's headline fields from its sets. Call this after
+   any change to setList. No-op for FSBS and cardio entries. */
+function syncEntry(e) {
+  if (!isDetailed(e) || e.kind === "cardio") return e;
+  const filled = filledSets(e);
+  const b = bestSet(filled);
+  return { ...e, sets: filled.length, reps: b ? b.reps : "", weight: b ? b.weight : "", rpe: b ? b.rpe : "" };
+}
+
 /* Does a draft entry carry logged numbers yet? Entries dropped in from a preset
    start blank, they need sets/reps/weight (or minutes/intensity) filled in. */
 const entryHasData = (e) =>
-  e.kind === "cardio" ? +e.minutes > 0 && +e.intensity > 0 : +e.sets > 0 && +e.reps > 0 && +e.weight > 0;
+  e.kind === "cardio" ? +e.minutes > 0 && +e.intensity > 0
+    : isDetailed(e) ? filledSets(e).length > 0
+    : +e.sets > 0 && +e.reps > 0 && +e.weight > 0;
+
+/* One-line summary of an entry, shared by the history list and the draft cards.
+   "top" for a single logged top set, "best" when it's the pick of a full set
+   list — same number either way, but the word tells you where it came from. */
+function entrySummary(e, unit, withRpe = false) {
+  if (e.kind === "cardio") return `${esc(e.minutes)} min × RPE ${esc(e.intensity)}`;
+  const label = isDetailed(e) ? "best" : "top";
+  return `${esc(e.sets)} sets · ${label} ${esc(e.reps)} × ${esc(e.weight)} ${unit}` +
+    (withRpe && e.rpe ? ` · RPE ${esc(e.rpe)}` : "");
+}
 
 /* "vs. Your Best" — compares against strictly earlier entries of the same
    exercise, exactly like the sheet's row-above MAXIFS window. */
@@ -232,14 +282,16 @@ function bodyTrend(body) {
 
 const STORE_KEY = "powerbuild-tracker:v1";
 const defaultState = () => ({
-  version: 2,
-  settings: { name: "", units: "kg", startDate: todayStr(), daysPerWeek: 4, theme: "dark" },
+  version: 3,
+  settings: { name: "", units: "kg", startDate: todayStr(), daysPerWeek: 4, theme: "dark", loggingMode: "fsbs" },
   library: DEFAULT_LIBRARY,
-  log: [],        // {id,date,exercise,muscle,kind,sets,reps,weight,rpe,minutes,intensity,notes,createdAt}
+  log: [],        // {id,date,exercise,muscle,kind,sets,reps,weight,rpe,minutes,intensity,notes,createdAt,setList?}
   body: [],       // {id,date,weight,waist,chest,arm,thigh,glutes,notes}
   goals: {},      // { [exerciseName]: number }
   volumeGoals: {},// { [muscleGroup]: targetSetsPerWeek } — user's own weekly set target
   presets: [],    // [{id,name,description,exercises:[{exercise,muscle,kind}],createdAt}] — reusable exercise bundles
+  timers: [],     // [{id,name,duration,endsAt,remaining,doneAt,createdAt}] — Timer tab
+  drafts: {},     // half-finished forms, restored after a crash/lock — see snapshotDrafts()
 });
 
 /* Bring an older saved state up to the current shape. Idempotent. */
@@ -254,6 +306,16 @@ function migrate(s) {
     s.library = (s.library || []).map((ex) =>
       !ex.custom && byId[ex.id] ? { ...byId[ex.id] } : { image: "", video: "", ...ex });
     s.version = 2;
+  }
+  if (v < 3) {
+    /* v3 added Detailed (per-set) logging, the Timer tab and crash-proof
+       drafts. Existing logs have no setList, so they stay FSBS entries and
+       keep rendering exactly as before. */
+    if (!s.settings) s.settings = {};
+    if (!s.settings.loggingMode) s.settings.loggingMode = "fsbs";
+    if (!Array.isArray(s.timers)) s.timers = [];
+    if (!s.drafts || typeof s.drafts !== "object") s.drafts = {};
+    s.version = 3;
   }
   return s;
 }
@@ -272,14 +334,46 @@ function loadState() {
 
 let state = loadState();
 let saveTimer = null;
+
+/* ── CHECKPOINTING HALF-FINISHED WORK ───────────────────────────────────
+   Anything you're in the middle of typing lives in `ui`, which is memory
+   only. A phone locking the screen can evict the page at any moment, so
+   before every write we copy the open forms into state.drafts. Reopening
+   the app puts you back exactly where you were, mid-exercise, mid-set,
+   nothing retyped. The drafts are cleared the moment a form is closed or
+   committed, because snapshotDrafts() always mirrors the *current* ui.  */
+const clone = (o) => (o == null ? null : JSON.parse(JSON.stringify(o)));
+
+function snapshotDrafts() {
+  state.drafts = {
+    workout: clone(ui.workoutSheet),
+    entry: clone(ui.entryForm),
+    set: clone(ui.setForm),
+    body: clone(ui.bodyForm),
+    bodyWasNew: ui.bodyFormWasNew,
+    savedAt: Date.now(),
+  };
+}
+
+/* write straight through — used when the page is about to go away */
+function writeNow() {
+  clearTimeout(saveTimer); saveTimer = null;
+  snapshotDrafts();
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
+  catch (e) { console.error("save failed", e); }
+}
+
 function persist() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => {
-    try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
-    catch (e) { console.error("save failed", e); }
-  }, 500);
+  saveTimer = setTimeout(writeNow, 400);
 }
 function patch(p) { state = { ...state, ...p }; persist(); render(); }
+
+/* The screen turning off, the app being swiped away, or the browser
+   reclaiming memory all fire one of these first. Flush synchronously. */
+document.addEventListener("visibilitychange", () => { if (document.hidden) writeNow(); });
+window.addEventListener("pagehide", writeNow);
+window.addEventListener("beforeunload", writeNow);
 
 /* Stamp the active theme onto <html> so the CSS variable blocks apply. */
 function applyTheme(theme) {
@@ -303,6 +397,9 @@ const ui = {
   pickerQuick: null,    // {name, muscle}
   pickerSeg: "exercises", // exercises | presets — picker mode
   entryForm: null,      // {f, isDraft}
+  setForm: null,        // {s, isNew} — the single-set editor inside a Detailed entry
+  timerForm: null,      // {t, isNew} — the custom-timer editor
+  timerToast: null,     // {id,name} — "time's up" banner, shown on any tab
   exWin: null,          // exercise detail window: {name} for an existing lift, or {isNew:true}
   exWinEdit: false,     // false = read-only view, true = editable
   exWinDraft: null,     // working copy while editing/creating
@@ -487,7 +584,7 @@ function render() {
   chartState = { line: null, bar: null };
 
   const tab = ui.tab;
-  const titles = { log: "Workout Log", progress: "Progress", library: "Exercise Library", body: "Body Measurements" };
+  const titles = { log: "Workout Log", progress: "Progress", library: "Exercise Library", body: "Body Measurements", timer: "Timers" };
 
   /* the frame is locked to exactly one viewport height (100dvh tracks mobile
      browser chrome) so the content area scrolls internally and the bottom nav
@@ -512,7 +609,24 @@ function render() {
   if (tab === "progress") html += renderProgress(log, library, goals, badges, settings, unit);
   if (tab === "library") html += renderLibrary(library);
   if (tab === "body") html += renderBody(body, unit);
+  if (tab === "timer") html += renderTimers();
   html += `</div>`;
+
+  /* "time's up" banner — floats above the nav on whatever tab you're on, so a
+     rest timer finishing while you're logging a set still gets your attention */
+  if (ui.timerToast) {
+    html += `<div class="pb-sheet" style="position:absolute;left:12px;right:12px;bottom:86px;z-index:40">
+      <div class="pb-card pb-timer-done" style="display:flex;align-items:center;gap:11px;padding:13px 14px;border-color:rgba(233,185,73,.55);background:var(--surface)">
+        ${icon("bell-ring", 20, 'style="color:var(--gold);flex-shrink:0"')}
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:700;font-size:14px;color:var(--gold)">Time's up</div>
+          <div style="font-size:12.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(ui.timerToast.name)}</div>
+        </div>
+        <button data-action="toast-open" class="pb-btn pb-ghost" style="padding:7px 12px;font-size:12.5px">Open</button>
+        <button data-action="toast-dismiss" style="color:var(--muted);padding:6px">${icon("x", 18)}</button>
+      </div>
+    </div>`;
+  }
 
   /* FAB — always-visible overlay on Log & Body */
   if ((tab === "log" || tab === "body") && !ui.workoutSheet) {
@@ -521,15 +635,19 @@ function render() {
 
   /* bottom nav */
   const NAV = [
-    ["home", "home", "Home"], ["log", "clipboard-list", "Log"], ["progress", "trending-up", "Progress"],
-    ["library", "book-open", "Library"], ["body", "ruler", "Body"],
+    ["home", "home", "Home"], ["log", "clipboard-list", "Log"], ["timer", "timer", "Timer"],
+    ["progress", "trending-up", "Progress"], ["library", "book-open", "Library"], ["body", "ruler", "Body"],
   ];
-  html += `<div style="position:absolute;bottom:0;left:0;right:0;background:var(--nav-bg);backdrop-filter:blur(10px);border-top:1px solid var(--border-soft);display:flex;padding:8px 6px 14px;z-index:25">`;
+  /* a running timer puts a live dot on its nav icon from anywhere in the app */
+  const timersRunning = (state.timers || []).some((t) => t.endsAt || t.doneAt);
+  html += `<div style="position:absolute;bottom:0;left:0;right:0;background:var(--nav-bg);backdrop-filter:blur(10px);border-top:1px solid var(--border-soft);display:flex;padding:8px 2px 14px;z-index:25">`;
   for (const [id, ic, label] of NAV) {
     const active = tab === id;
-    html += `<button data-action="nav" data-id="${id}" style="flex:1;display:flex;flex-direction:column;align-items:center;gap:3px;color:${active ? "var(--gold)" : "var(--faint)"};padding:4px 0">
-      ${icon(ic, 21, `stroke-width="${active ? 2.4 : 2}"`)}
-      <span style="font-size:10px;font-weight:700;letter-spacing:.04em">${label}</span>
+    const dot = id === "timer" && timersRunning
+      ? `<span style="position:absolute;top:1px;right:50%;margin-right:-14px;width:7px;height:7px;border-radius:4px;background:var(--gold)"></span>` : "";
+    html += `<button data-action="nav" data-id="${id}" style="position:relative;flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;gap:3px;color:${active ? "var(--gold)" : "var(--faint)"};padding:4px 0">
+      ${dot}${icon(ic, 21, `stroke-width="${active ? 2.4 : 2}"`)}
+      <span style="font-size:9.5px;font-weight:700;letter-spacing:.02em">${label}</span>
     </button>`;
   }
   html += `</div>`;
@@ -538,6 +656,8 @@ function render() {
   if (ui.workoutSheet) html += renderWorkoutSheet(ui.workoutSheet, library, log, settings, unit);
   if (ui.picking) html += renderExercisePicker(library);
   if (ui.entryForm) html += renderEntryFields(ui.entryForm, unit);
+  if (ui.setForm) html += renderSetForm(ui.setForm, unit);
+  if (ui.timerForm) html += renderTimerForm(ui.timerForm);
   if (ui.exWin) html += renderExerciseWindow(library);
   if (ui.bodyForm) html += renderBodyFormSheet(ui.bodyForm, unit);
   if (ui.presetForm) html += renderPresetForm();
@@ -582,6 +702,9 @@ function render() {
   /* focus the live content, never an element inside a fading transition layer */
   const af = [...app.querySelectorAll("[data-autofocus]")].find((e) => !e.closest(".pb-trans"));
   if (af) af.focus();
+
+  paintTimers();   // put the freshly mounted rings/digits at the right position
+  persist();       // every frame is a save point — see snapshotDrafts()
 }
 
 /* ───────────────────────────── HOME ───────────────────────────────── */
@@ -652,7 +775,8 @@ function renderHome(settings, log, radar, currentWeek, unit, badges) {
 
       ${accordion("fsbs", "First set, best set (FSBS)", icon("flame", 16, 'style="color:var(--red)"'), `
         This tracker logs ${B("one weight and one rep number per exercise per session: your TOP set.")} On purpose. Go into every working set intending to empty the tank on the <i>first</i> one, that top set is the true measure of your strength that day, set before fatigue has a say. If your numbers drop on sets two, three, four, that's expected and it doesn't count against you. What counts is whether you beat your top set from last time.<br><br>
-        Why not log every set? Because a mix of four different rep/weight combos per exercise makes "did I improve?" impossible to answer at a glance. One clean number, logged consistently, beats five messy ones. That's what ${B("Total Sets")} is for, it still feeds your weekly volume, but your strength progress is judged on the set that actually reflects your strength: the first one.
+        Why not log every set? Because a mix of four different rep/weight combos per exercise makes "did I improve?" impossible to answer at a glance. One clean number, logged consistently, beats five messy ones. That's what ${B("Total Sets")} is for, it still feeds your weekly volume, but your strength progress is judged on the set that actually reflects your strength: the first one.<br><br>
+        ${B("Not your philosophy?")} Fair. Open ${B("Profile → Logging mode")} and switch to ${B("Detailed")}: you then add sets one at a time inside an exercise, each with its own reps and weight, and your 1RM comes from whichever set scores highest. Switch back whenever, nothing gets deleted.
       `)}
 
       ${accordion("epley", "A note on the 1RM estimate", icon("trending-up", 16, 'style="color:var(--green)"'), `
@@ -715,9 +839,7 @@ function renderHistory(log, library, badges, settings, unit) {
           <div style="flex:1;min-width:0">
             <div style="font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(e.exercise)}</div>
             <div style="font-size:12.5px;color:var(--muted);margin-top:1px">
-              ${e.kind === "cardio"
-                ? `${esc(e.minutes)} min × RPE ${esc(e.intensity)}`
-                : `${esc(e.sets)} sets · top ${esc(e.reps)} × ${esc(e.weight)} ${unit}${e.rpe ? ` · RPE ${esc(e.rpe)}` : ""}`}
+              ${entrySummary(e, unit, true)}
             </div>
             ${e.notes ? `<div style="font-size:11.5px;color:var(--faint);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">“${esc(e.notes)}”</div>` : ""}
           </div>
@@ -788,7 +910,7 @@ function renderVolume(log, library, settings, currentWeek) {
           <button data-action="save-vol-goal" data-g="${esc(g)}" class="pb-btn pb-gold" style="width:30px;height:30px;border-radius:8px">${icon("check", 15)}</button>
         </span>`
       : `<button data-action="edit-vol-goal" data-g="${esc(g)}" class="pb-chip" style="color:var(--gold);border-color:rgba(233,185,73,.35);background:rgba(233,185,73,.08)">
-          ${icon("pencil", 11)} Target${target ? ` · ${target}` : ""}
+          ${icon("pencil", 11)} Target${target ? ` · ${target} ${unit}` : ""}
         </button>`;
 
     return `<div style="padding:11px 0;border-bottom:${i < groups.length - 1 ? "1px solid var(--border-soft)" : "none"}">
@@ -1022,14 +1144,22 @@ function renderExercisesLibrary(library) {
    one from a workout day (Log → Save as Preset), reuse it any time to drop the
    whole bundle into a new day, then just fill in the sets and reps.        */
 
+/* A fresh, blank draft entry. In Detailed mode a strength entry starts with an
+   empty setList, which is the flag that makes it log set by set. */
+function newEntry(name, muscle, kind, createdAt = Date.now()) {
+  const e = {
+    id: uid(), exercise: name, muscle, kind: kind || "strength",
+    sets: "", reps: "", weight: "", rpe: "", minutes: "", intensity: "", notes: "",
+    createdAt,
+  };
+  if (e.kind !== "cardio" && state.settings.loggingMode === "detailed") e.setList = [];
+  return e;
+}
+
 /* Turn a preset's exercises into fresh, blank draft entries. */
 function presetToEntries(p) {
   const base = Date.now();
-  return (p.exercises || []).map((ex, i) => ({
-    id: uid(), exercise: ex.exercise, muscle: ex.muscle, kind: ex.kind || "strength",
-    sets: "", reps: "", weight: "", rpe: "", minutes: "", intensity: "", notes: "",
-    createdAt: base + i,
-  }));
+  return (p.exercises || []).map((ex, i) => newEntry(ex.exercise, ex.muscle, ex.kind, base + i));
 }
 
 const presetCountLabel = (n) => `${n} ${n === 1 ? "move" : "moves"}`;
@@ -1296,8 +1426,10 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
           <div style="font-weight:600;font-size:14px">${esc(e.exercise)}</div>
           <div style="font-size:12px;color:${empty ? "var(--gold)" : "var(--muted)"}">
             ${empty
-              ? (e.kind === "cardio" ? "No data yet · tap to add time & intensity" : "No data yet · tap to add sets, reps & weight")
-              : (e.kind === "cardio" ? `${esc(e.minutes)} min × RPE ${esc(e.intensity)}` : `${esc(e.sets)} sets · top ${esc(e.reps)} × ${esc(e.weight)} ${unit}`)}
+              ? (e.kind === "cardio" ? "No data yet · tap to add time & intensity"
+                : isDetailed(e) ? "No sets yet · tap to log them one by one"
+                : "No data yet · tap to add sets, reps & weight")
+              : entrySummary(e, unit)}
           </div>
         </div>
         ${b.metric != null ? `<div class="pb-num" style="font-weight:700;font-size:16px;color:${b.badge === "pr" ? "var(--gold)" : "var(--text)"}">${b.metric}</div>` : ""}
@@ -1320,7 +1452,9 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
 
       ${sectionTitle("Exercises this session")}
       ${draft.entries.length === 0 ? `<div class="pb-card" style="padding:20px;text-align:center;color:var(--faint);font-size:13px;line-height:1.5;margin-bottom:10px">
-        One entry per exercise. Log your <b style="color:var(--muted)">top set</b>, first set, best set.
+        ${state.settings.loggingMode === "detailed"
+          ? `One entry per exercise, then log <b style="color:var(--muted)">every set</b> inside it.`
+          : `One entry per exercise. Log your <b style="color:var(--muted)">top set</b>, first set, best set.`}
       </div>` : ""}
       ${entries}
 
@@ -1452,19 +1586,61 @@ function entryComputed() {
     const prev = earlier.reduce((m, e) => { const v = metricOf(e); return v == null ? m : Math.max(m, v); }, -Infinity);
     preview = prev === -Infinity ? "first" : metric > prev ? "pr" : metric === prev ? "match" : "below";
   }
-  const valid = cardio ? +f.minutes > 0 && +f.intensity > 0 : +f.sets > 0 && +f.reps > 0 && +f.weight > 0;
+  const valid = entryHasData(f);
   return { cardio, metric, preview, valid };
+}
+
+/* ── the set list inside a Detailed entry ──────────────────────────────
+   Deliberately the same shape as the exercise list on the workout day: an
+   "Add set" button on top, then one tappable card per set that opens the
+   little editor. Add as many as you want, edit or drop any of them. */
+function renderSetList(f, unit) {
+  const list = f.setList || [];
+  const filled = filledSets(f);
+  const top = bestSet(filled);
+
+  const rows = list.map((s, i) => {
+    const m = epley1RM(+s.weight, +s.reps);
+    const isBest = top && s.id === top.id && filled.length > 1;
+    const blank = !setHasData(s);
+    return `<div class="pb-card" style="display:flex;align-items:center;margin-bottom:8px;overflow:hidden${blank ? ";border:1px dashed rgba(233,185,73,.55)" : ""}">
+      <button data-action="edit-set" data-id="${s.id}" style="flex:1;min-width:0;display:flex;align-items:center;gap:11px;padding:11px 4px 11px 12px;text-align:left;color:var(--text)">
+        <div class="pb-num" style="width:24px;height:24px;border-radius:7px;background:var(--surface2);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:700;color:var(--muted);flex-shrink:0">${i + 1}</div>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600;font-size:14.5px;color:${blank ? "var(--gold)" : "var(--text)"}">
+            ${blank ? "Tap to fill in reps &amp; weight" : `${esc(s.reps)} × ${esc(s.weight)} ${unit}`}
+          </div>
+          ${!blank ? `<div style="font-size:11.5px;color:var(--faint)">est. 1RM ${m}${s.rpe ? ` · RPE ${esc(s.rpe)}` : ""}</div>` : ""}
+        </div>
+        ${isBest ? chip("Best", "var(--gold)") : ""}
+        ${icon("pencil", 14, 'style="color:var(--faint);flex-shrink:0"')}
+      </button>
+      <button data-action="remove-set" data-id="${s.id}" title="Remove set" style="flex-shrink:0;padding:12px 13px;color:var(--red);align-self:stretch;border-left:1px solid var(--border-soft)">${icon("x", 16)}</button>
+    </div>`;
+  }).join("");
+
+  return `
+    ${sectionTitle(`Sets${filled.length ? ` · ${filled.length}` : ""}`, list.length ? `<span style="font-size:11px;color:var(--faint)">tap a set to edit it</span>` : "")}
+    <button data-action="add-set" class="pb-btn pb-ghost" style="width:100%;padding:13px 0;border-style:dashed;margin-bottom:10px">
+      ${icon("plus", 17)} Add set
+    </button>
+    ${list.length ? rows : `<div class="pb-card" style="padding:20px;text-align:center;color:var(--faint);font-size:13px;line-height:1.55;margin-bottom:10px">
+      No sets yet. Tap <b style="color:var(--gold)">Add set</b> after each one you finish, reps and weight, as many as you do.
+    </div>`}`;
 }
 
 function renderEntryFields(form, unit) {
   const { f, isDraft } = form;
   const { cardio, metric, preview, valid } = entryComputed();
+  const detailed = isDetailed(f);
 
   const inputs = cardio
     ? `<div style="display:flex;gap:10px">
         <div style="flex:1">${field("Time (minutes)", `<input class="pb-input" type="number" inputmode="decimal" data-bind="entry.minutes" value="${esc(f.minutes)}" placeholder="30">`)}</div>
         <div style="flex:1">${field("Intensity (RPE 1–10)", `<input class="pb-input" type="number" inputmode="decimal" min="1" max="10" data-bind="entry.intensity" value="${esc(f.intensity)}" placeholder="6">`)}</div>
       </div>`
+    : detailed
+    ? renderSetList(f, unit)
     : `<div style="display:flex;gap:10px">
         <div style="flex:1">${field("Total sets", `<input class="pb-input" type="number" inputmode="numeric" data-bind="entry.sets" value="${esc(f.sets)}" placeholder="3">`)}</div>
         <div style="flex:1">${field("Top set reps", `<input class="pb-input" type="number" inputmode="numeric" data-bind="entry.reps" value="${esc(f.reps)}" placeholder="8">`)}</div>
@@ -1474,31 +1650,46 @@ function renderEntryFields(form, unit) {
         <div style="flex:1">${field("RPE (1–10)", `<input class="pb-input" type="number" inputmode="decimal" min="1" max="10" step="0.5" data-bind="entry.rpe" value="${esc(f.rpe)}" placeholder="8">`, "10 = nothing left")}</div>
       </div>`;
 
+  /* An entry keeps whatever shape it was logged in, so nothing is ever lost by
+     flipping the setting. This is the one-way door out of a single top set, and
+     only offered while Detailed mode is on. */
+  const convert = !cardio && !detailed && state.settings.loggingMode === "detailed"
+    ? `<button data-action="entry-to-detailed" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;font-size:13.5px;margin-bottom:14px;border-style:dashed;color:var(--gold);border-color:rgba(233,185,73,.45)">
+        ${icon("list-plus", 15)} Log this one set by set
+      </button>
+      <div style="font-size:11.5px;color:var(--faint);margin:-8px 2px 14px;line-height:1.5">Logged before you switched modes. Converting keeps the top set as set 1, then you add the rest.</div>`
+    : "";
+
   return fullScreen(70, `
     <div style="display:flex;align-items:center;gap:10px;padding:14px 16px 6px">
       <button data-action="close-entry" style="color:var(--muted);padding:4px">${icon("arrow-left", 21)}</button>
       <div style="flex:1">
         <div class="pb-num" style="font-size:18px;font-weight:700;line-height:1.15">${esc(f.exercise)}</div>
-        <div style="font-size:11.5px;color:var(--faint)">${cardio ? "Cardio · time × intensity" : "Strength · top set"}</div>
+        <div style="font-size:11.5px;color:var(--faint)">${cardio ? "Cardio · time × intensity" : detailed ? "Strength · every set" : "Strength · top set"}</div>
       </div>
       <button data-action="delete-entry-form" style="color:var(--red);padding:6px">${icon("trash-2", 18)}</button>
     </div>
 
     <div class="pb-scroll" data-scrollkey="entryform" style="flex:1;overflow-y:auto;padding:10px 16px 120px">
       ${!isDraft ? field("Date", `<input type="date" class="pb-input" data-bind="entry.date" value="${esc(f.date)}">`) : ""}
+      ${convert}
       ${inputs}
-      ${field("Personal notes", `<textarea class="pb-input" rows="2" data-bind="entry.notes" placeholder="Felt strong · slow eccentric · new grip…" style="resize:none">${esc(f.notes)}</textarea>`)}
+      ${field("Personal notes", `<textarea class="pb-input" rows="2" data-bind="entry.notes" placeholder="Felt strong · slow eccentric · new grip…" style="resize:none">${esc(f.notes)}</textarea>`,
+        detailed ? "One note for the whole exercise, it covers every set above." : "")}
 
       <!-- live computed row — the sheet's Est. 1RM + "vs. Your Best" -->
       <div class="pb-card2" style="padding:12px 14px;display:flex;align-items:center;gap:12px;margin-top:4px">
         <div>
-          <div class="pb-label">${cardio ? "Session load" : `Est. 1RM (${unit})`}</div>
+          <div class="pb-label">${cardio ? "Session load" : detailed ? `Est. 1RM · best set (${unit})` : `Est. 1RM (${unit})`}</div>
           <div id="entryMetric" class="pb-num" style="font-size:30px;font-weight:700;color:var(--gold);line-height:1.05">${metric ?? "—"}</div>
         </div>
         <div id="entryBadge" style="flex:1;text-align:right;font-size:13px;font-weight:700;color:${preview === "pr" ? "var(--gold)" : preview === "first" ? "var(--blue)" : "var(--muted)"}">
           ${preview ? BADGE_TEXT[preview] : cardio ? "minutes × RPE" : "weight × (1 + reps/30)"}
         </div>
       </div>
+      ${detailed ? `<div style="font-size:11.5px;color:var(--faint);margin:8px 2px 0;line-height:1.5">
+        Your <b style="color:var(--muted)">highest</b> estimated 1RM across every set above is what counts toward PRs and the Progress graph. All the sets stay saved either way.
+      </div>` : ""}
     </div>
 
     <div style="position:absolute;bottom:0;left:0;right:0;padding:12px 16px 18px;background:linear-gradient(transparent, var(--bg) 30%)">
@@ -1507,6 +1698,46 @@ function renderEntryFields(form, unit) {
       </button>
     </div>
   `, "entryForm");
+}
+
+/* the single-set editor — same idea as the entry form, one level down */
+function renderSetForm(form, unit) {
+  const { s, isNew, index } = form;
+  const m = epley1RM(+s.weight, +s.reps);
+  const ok = setHasData(s);
+  return sheet(isNew ? `Add set ${index + 1}` : `Edit set ${index + 1}`, "setForm", `
+    <div style="display:flex;gap:10px">
+      <div style="flex:1">${field("Reps", `<input class="pb-input" type="number" inputmode="numeric" min="1" data-bind="set.reps" value="${esc(s.reps)}" placeholder="8" data-autofocus>`)}</div>
+      <div style="flex:1">${field(`Weight (${unit})`, `<input class="pb-input" type="number" inputmode="decimal" min="0" step="0.5" data-bind="set.weight" value="${esc(s.weight)}" placeholder="80">`)}</div>
+    </div>
+    ${field("RPE (1–10)", `<input class="pb-input" type="number" inputmode="decimal" min="1" max="10" step="0.5" data-bind="set.rpe" value="${esc(s.rpe)}" placeholder="8">`, "Optional. 10 = nothing left in the tank.")}
+
+    <div class="pb-card2" style="padding:11px 14px;display:flex;align-items:center;gap:12px;margin-bottom:14px">
+      <div>
+        <div class="pb-label">Est. 1RM (${unit})</div>
+        <div id="setMetric" class="pb-num" style="font-size:26px;font-weight:700;color:var(--gold);line-height:1.05">${m ?? "—"}</div>
+      </div>
+      <div style="flex:1;text-align:right;font-size:12px;color:var(--faint)">weight × (1 + reps/30)</div>
+    </div>
+
+    <button id="setSaveBtn" data-action="save-set" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:14px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
+      ${icon("check", 17)} ${isNew ? "Add set" : "Save set"}
+    </button>
+    ${!isNew ? `<button data-action="delete-set" class="pb-btn" style="width:100%;padding:12px 0;margin-top:8px;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">
+      ${icon("trash-2", 15)} Remove this set
+    </button>` : ""}
+  `, 100);
+}
+
+/* live 1RM + save-button state while typing in the set editor */
+function updateSetPreview() {
+  if (!ui.setForm) return;
+  const s = ui.setForm.s;
+  const m = epley1RM(+s.weight, +s.reps);
+  const el = document.getElementById("setMetric");
+  const btn = document.getElementById("setSaveBtn");
+  if (el) el.textContent = m ?? "—";
+  if (btn) { const ok = setHasData(s); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
 }
 
 function updateEntryPreview() {
@@ -1584,6 +1815,257 @@ function renderBodyFormSheet(f, unit) {
   `);
 }
 
+/* ═══════════════════════════ TIMERS ════════════════════════════════
+   A timer is {id,name,duration,endsAt,remaining,doneAt}. `endsAt` is an
+   absolute timestamp rather than a ticking countdown, so a running timer
+   stays honest through a re-render, a backgrounded tab, or the app being
+   closed and reopened: anything that ran out while you were away is caught
+   the moment you come back. Saved timers are reusable — start, pause,
+   reset, start again — and any number can run at once.               */
+
+const QUICK_TIMERS = [30, 60, 90, 120, 180, 300];
+const RING_C = 326.73;   /* 2πr for the r=52 progress ring below */
+
+function fmtClock(sec) {
+  sec = Math.max(0, Math.ceil(sec));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  return h ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`
+           : `${m}:${String(s).padStart(2, "0")}`;
+}
+
+const timerRemaining = (t) =>
+  t.endsAt ? Math.max(0, (t.endsAt - Date.now()) / 1000)
+    : t.remaining != null ? t.remaining
+    : t.duration;
+
+const timerPhase = (t) =>
+  t.endsAt ? "running" : t.doneAt ? "done" : t.remaining != null ? "paused" : "idle";
+
+/* ── the alert: sound, buzz, system notification, in-app banner ─────── */
+
+let audioCtx = null;
+function unlockAudio() {
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    if (!audioCtx) audioCtx = new AC();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+  } catch { /* audio is a nicety, never a blocker */ }
+}
+
+function chime() {
+  unlockAudio();
+  if (!audioCtx) return;
+  try {
+    const t0 = audioCtx.currentTime;
+    for (let i = 0; i < 3; i++) {
+      const at = t0 + i * 0.34;
+      const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(i === 2 ? 1175 : 880, at);
+      gain.gain.setValueAtTime(0.0001, at);
+      gain.gain.exponentialRampToValueAtTime(0.32, at + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.3);
+      osc.connect(gain); gain.connect(audioCtx.destination);
+      osc.start(at); osc.stop(at + 0.32);
+    }
+  } catch { /* ignore */ }
+}
+
+/* Asked for on the first Start — a permission prompt needs a user gesture. */
+function askNotifyPermission() {
+  try {
+    if (window.Notification && Notification.permission === "default") Notification.requestPermission();
+  } catch { /* unsupported */ }
+}
+
+function notifyDone(t) {
+  try {
+    if (window.Notification && Notification.permission === "granted") {
+      const n = new Notification(t.name || "Timer", {
+        body: `${fmtClock(t.duration)} is up.`,
+        icon: "logoC.png", badge: "logoC.png", tag: "pbt-" + t.id, renotify: true,
+      });
+      n.onclick = () => { try { window.focus(); } catch { /* ignore */ } n.close(); };
+    }
+  } catch { /* some browsers only allow notifications from a service worker */ }
+}
+
+function fireTimer(t) {
+  t.endsAt = null; t.remaining = null; t.doneAt = Date.now();
+  try { if (navigator.vibrate) navigator.vibrate([250, 120, 250, 120, 400]); } catch { /* ignore */ }
+  chime();
+  notifyDone(t);
+  ui.timerToast = { id: t.id, name: t.name || "Timer" };
+}
+
+/* Fire anything that has run out. Returns true when something changed, so the
+   caller knows a re-render is due. */
+function sweepTimers() {
+  const due = (state.timers || []).filter((t) => t.endsAt && t.endsAt <= Date.now());
+  if (!due.length) return false;
+  due.forEach(fireTimer);
+  writeNow();
+  return true;
+}
+
+/* Repaint running cards in place — never a full render, so the countdown can't
+   flicker the page or steal focus from a field you're typing in. */
+function paintTimers() {
+  for (const t of state.timers || []) {
+    if (!t.endsAt) continue;
+    const left = timerRemaining(t);
+    const digits = document.getElementById("tmr-time-" + t.id);
+    if (digits) digits.textContent = fmtClock(left);
+    const ring = document.getElementById("tmr-ring-" + t.id);
+    if (ring) {
+      const frac = t.duration > 0 ? Math.max(0, Math.min(1, left / t.duration)) : 0;
+      ring.setAttribute("stroke-dashoffset", (RING_C * (1 - frac)).toFixed(2));
+    }
+  }
+}
+
+let timerEngine = null;
+function startTimerEngine() {
+  if (timerEngine) return;
+  timerEngine = setInterval(() => {
+    if (sweepTimers()) { render(); return; }
+    paintTimers();
+  }, 250);
+}
+/* Background tabs get throttled hard, so also sweep the instant we're back. */
+document.addEventListener("visibilitychange", () => { if (!document.hidden && sweepTimers()) render(); });
+window.addEventListener("focus", () => { if (sweepTimers()) render(); });
+
+function startTimer(t) {
+  unlockAudio();          // both need the user gesture that got us here
+  askNotifyPermission();
+  const secs = t.remaining != null ? t.remaining : t.duration;
+  t.endsAt = Date.now() + Math.max(1, secs) * 1000;
+  t.remaining = null; t.doneAt = null;
+  if (ui.timerToast && ui.timerToast.id === t.id) ui.timerToast = null;
+  writeNow(); render();
+}
+
+/* ── the tab ───────────────────────────────────────────────────────── */
+
+function timerActiveCard(t) {
+  const phase = timerPhase(t);
+  const left = timerRemaining(t);
+  const done = phase === "done";
+  const frac = t.duration > 0 ? Math.max(0, Math.min(1, left / t.duration)) : 0;
+  const ringColor = done ? "var(--green)" : phase === "paused" ? "var(--steel)" : "var(--gold)";
+
+  const controls = done
+    ? `<button data-action="timer-start" data-id="${t.id}" class="pb-btn pb-gold" style="flex:1;padding:9px 0;font-size:13px">${icon("rotate-ccw", 14)} Again</button>
+       <button data-action="timer-reset" data-id="${t.id}" class="pb-btn pb-ghost" style="flex:1;padding:9px 0;font-size:13px">${icon("check", 14)} Done</button>`
+    : phase === "paused"
+    ? `<button data-action="timer-start" data-id="${t.id}" class="pb-btn pb-gold" style="flex:1;padding:9px 0;font-size:13px">${icon("play", 14)} Resume</button>
+       <button data-action="timer-reset" data-id="${t.id}" class="pb-btn pb-ghost" style="flex:1;padding:9px 0;font-size:13px">${icon("rotate-ccw", 14)} Reset</button>`
+    : `<button data-action="timer-pause" data-id="${t.id}" class="pb-btn pb-ghost" style="flex:1;padding:9px 0;font-size:13px">${icon("pause", 14)} Pause</button>
+       <button data-action="timer-reset" data-id="${t.id}" class="pb-btn pb-ghost" style="flex:1;padding:9px 0;font-size:13px">${icon("square", 13)} Stop</button>`;
+
+  return `<div class="pb-card${done ? " pb-timer-done" : ""}" style="padding:15px 14px;margin-bottom:10px;display:flex;align-items:center;gap:15px;${done ? "border-color:rgba(106,164,101,.55)" : phase === "running" ? "border-color:rgba(233,185,73,.4)" : ""}">
+    <div style="position:relative;width:108px;height:108px;flex-shrink:0">
+      <svg width="108" height="108" viewBox="0 0 120 120" style="display:block;transform:rotate(-90deg)">
+        <circle cx="60" cy="60" r="52" fill="none" stroke="var(--surface2)" stroke-width="9"/>
+        <circle id="tmr-ring-${t.id}" cx="60" cy="60" r="52" fill="none" stroke="${ringColor}" stroke-width="9"
+                stroke-linecap="round" stroke-dasharray="${RING_C}" stroke-dashoffset="${(RING_C * (1 - frac)).toFixed(2)}"
+                style="transition:stroke-dashoffset .25s linear"/>
+      </svg>
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center">
+        <div id="tmr-time-${t.id}" class="pb-num" style="font-size:${done ? 19 : 25}px;font-weight:700;line-height:1;color:${done ? "var(--green)" : "var(--text)"}">${done ? "DONE" : fmtClock(left)}</div>
+        <div style="font-size:9px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);margin-top:3px">${done ? "time's up" : phase === "paused" ? "paused" : "remaining"}</div>
+      </div>
+    </div>
+    <div style="flex:1;min-width:0">
+      <div style="font-weight:700;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.name)}</div>
+      <div style="font-size:12px;color:var(--faint);margin-top:2px">${fmtClock(t.duration)} timer</div>
+      <div style="display:flex;gap:7px;margin-top:12px">${controls}</div>
+    </div>
+  </div>`;
+}
+
+function timerIdleRow(t, last) {
+  return `<div style="display:flex;align-items:center;border-bottom:${last ? "none" : "1px solid var(--border-soft)"}">
+    <button data-action="timer-start" data-id="${t.id}" style="flex:1;min-width:0;display:flex;align-items:center;gap:11px;padding:12px 4px 12px 14px;text-align:left;color:var(--text)">
+      <span style="width:34px;height:34px;border-radius:11px;background:rgba(233,185,73,.12);border:1px solid rgba(233,185,73,.3);display:flex;align-items:center;justify-content:center;color:var(--gold);flex-shrink:0">${icon("play", 15, 'fill="currentColor"')}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.name)}</div>
+        <div class="pb-num" style="font-size:12.5px;color:var(--muted)">${fmtClock(t.duration)}</div>
+      </div>
+    </button>
+    <button data-action="timer-edit" data-id="${t.id}" title="Edit timer" style="flex-shrink:0;padding:12px 14px;color:var(--faint);align-self:stretch">${icon("pencil", 16)}</button>
+  </div>`;
+}
+
+function renderTimers() {
+  const timers = state.timers || [];
+  const active = timers.filter((t) => timerPhase(t) !== "idle");
+  const idle = timers.filter((t) => timerPhase(t) === "idle");
+
+  return `<div class="" style="padding:14px 16px 0">
+    ${sectionTitle("Quick start")}
+    <div style="display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px">
+      ${QUICK_TIMERS.map((s) => `<button data-action="quick-timer" data-s="${s}" class="pb-chip pb-num" style="padding:9px 15px;font-size:14px;font-weight:700;color:var(--gold);border-color:rgba(233,185,73,.35);background:rgba(233,185,73,.08)">${fmtClock(s)}</button>`).join("")}
+    </div>
+
+    ${active.length ? `${sectionTitle(`Running · ${active.length}`)}${active.map(timerActiveCard).join("")}<div style="height:12px"></div>` : ""}
+
+    ${sectionTitle("Your timers")}
+    ${idle.length
+      ? `<div class="pb-card" style="overflow:hidden;margin-bottom:12px">${idle.map((t, i) => timerIdleRow(t, i === idle.length - 1)).join("")}</div>`
+      : `<div class="pb-card" style="padding:${timers.length ? "16px" : "26px"};text-align:center;color:var(--muted);font-size:13.5px;line-height:1.6;margin-bottom:12px">
+          ${timers.length ? "Every timer you've saved is running right now." : `${icon("timer", 26, 'style="margin:0 auto 10px;display:block;color:var(--faint)"')}No timers saved yet. Tap a quick-start time above, or build your own with the button below, rest between sets, a plank hold, an interval, whatever you need.`}
+        </div>`}
+
+    <button data-action="timer-add" class="pb-btn pb-ghost" style="width:100%;padding:13px 0;font-size:14px;border-style:dashed;margin-bottom:14px">
+      ${icon("plus", 17)} New timer
+    </button>
+
+    <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 4px 10px">
+      Run as many at once as you like, each keeps its own countdown. When one finishes you get a notification, a buzz and a chime. Timers count in real time, so one that runs out while you're on another tab still lands the moment it's up, and one that ends while the app is closed alerts you as soon as you open it again.
+    </div>
+    <div style="height:8px"></div>
+  </div>`;
+}
+
+function renderTimerForm(form) {
+  const { t, isNew } = form;
+  const total = Math.max(0, (+t.min || 0) * 60 + (+t.sec || 0));
+  const ok = total > 0;
+  return sheet(isNew ? "New timer" : "Edit timer", "timerForm", `
+    ${field("Name", `<input class="pb-input" data-bind="timer.name" value="${esc(t.name)}" placeholder="Rest between sets" ${isNew ? "data-autofocus" : ""}>`, "Optional. It's what the notification says.")}
+    <div style="display:flex;gap:10px">
+      <div style="flex:1">${field("Minutes", `<input class="pb-input" type="number" inputmode="numeric" min="0" max="180" data-bind="timer.min" value="${esc(t.min)}" placeholder="2">`)}</div>
+      <div style="flex:1">${field("Seconds", `<input class="pb-input" type="number" inputmode="numeric" min="0" max="59" data-bind="timer.sec" value="${esc(t.sec)}" placeholder="30">`)}</div>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:7px;margin:-4px 0 16px">
+      ${QUICK_TIMERS.map((s) => `<button data-action="timer-preset" data-s="${s}" class="pb-chip pb-num" style="padding:7px 13px;font-size:13px;font-weight:700;color:var(--muted)">${fmtClock(s)}</button>`).join("")}
+    </div>
+    <div class="pb-card2" style="padding:11px 14px;margin-bottom:14px;display:flex;align-items:baseline;gap:10px">
+      <div class="pb-label">Total</div>
+      <div id="timerTotal" class="pb-num" style="font-size:24px;font-weight:700;color:${ok ? "var(--gold)" : "var(--faint)"};line-height:1">${ok ? fmtClock(total) : "—"}</div>
+    </div>
+    <button id="timerSaveBtn" data-action="timer-save" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:14px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">${icon("check", 17)} ${isNew ? "Save timer" : "Save changes"}</button>
+    ${!isNew ? `<button data-action="timer-delete" class="pb-btn" style="width:100%;padding:12px 0;margin-top:8px;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">
+      ${icon("trash-2", 15)} Delete timer
+    </button>` : ""}
+  `);
+}
+
+/* live total + save-button state while typing a duration */
+function updateTimerPreview() {
+  if (!ui.timerForm) return;
+  const t = ui.timerForm.t;
+  const total = Math.max(0, (+t.min || 0) * 60 + (+t.sec || 0));
+  const ok = total > 0;
+  const el = document.getElementById("timerTotal");
+  const btn = document.getElementById("timerSaveBtn");
+  if (el) { el.textContent = ok ? fmtClock(total) : "—"; el.style.color = ok ? "var(--gold)" : "var(--faint)"; }
+  if (btn) { btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
+}
+
 /* ─────────────────────────── PROFILE ──────────────────────────────── */
 
 function renderProfile(f) {
@@ -1606,6 +2088,20 @@ function renderProfile(f) {
       </div>`, "Dark is a Discord-style grey palette (default). Light is easier in a bright room.")}
       ${field("Program start date", `<input type="date" class="pb-input" data-bind="profile.startDate" value="${esc(f.startDate)}">`, "Week numbers count from this date.")}
       ${field("Training days / week", `<input class="pb-input" type="number" inputmode="numeric" min="1" max="7" data-bind="profile.daysPerWeek" value="${esc(f.daysPerWeek)}">`)}
+
+      <div class="pb-hairline" style="margin:18px 0"></div>
+      ${sectionTitle("How you log")}
+      ${field("Logging mode", `<div style="display:flex;gap:8px">
+        ${[["fsbs", "FSBS", "flame"], ["detailed", "Detailed", "list-checks"]].map(([m, label, ic]) => {
+          const on = (f.loggingMode || "fsbs") === m;
+          return `<button data-action="profile-mode" data-m="${m}" class="pb-btn" style="flex:1;padding:11px 0;background:${on ? "var(--gold)" : "var(--surface2)"};color:${on ? "var(--gold-ink)" : "var(--muted)"};border:1px solid ${on ? "var(--gold)" : "var(--border)"}">${icon(ic, 15)} ${label}</button>`;
+        }).join("")}
+      </div>`)}
+      <div class="pb-card2" style="padding:12px 13px;font-size:12.5px;color:var(--muted);line-height:1.6;margin:-4px 0 12px">
+        <b style="color:var(--text)">FSBS, first set best set.</b> Fast and simple. Per exercise you log one top set plus how many sets you did in total. In and out, minimum typing.<br><br>
+        <b style="color:var(--text)">Detailed, every set.</b> For the thorough. Add sets one at a time inside an exercise, each with its own reps and weight, exactly the way you add exercises to a day. Your estimated 1RM comes from your <b style="color:var(--text)">best</b> set.<br><br>
+        Switching is safe and you can do it whenever. Nothing is deleted: workouts you logged set by set keep every set in storage and just show their best one while you're in FSBS. Flip back and they're all still there.
+      </div>
 
       <div class="pb-hairline" style="margin:18px 0"></div>
 
@@ -1635,9 +2131,9 @@ function fullScreen(z, children, key) {
   return `<div class="${enter}" data-overlay="${key || ""}" data-layer="fs" style="position:absolute;inset:0;z-index:${z};background:var(--bg);display:flex;flex-direction:column">${children}</div>`;
 }
 
-function sheet(title, target, children) {
+function sheet(title, target, children, z = 60) {
   const enter = !_lastOverlayKeys.has(target) ? " pb-sheet" : "";
-  return `<div data-overlay="${target}" data-layer="sheet" data-action="overlay-close" data-target="${target}" style="position:absolute;inset:0;z-index:60;display:flex;flex-direction:column;justify-content:flex-end;background:rgba(0,0,0,.55)">
+  return `<div data-overlay="${target}" data-layer="sheet" data-action="overlay-close" data-target="${target}" style="position:absolute;inset:0;z-index:${z};display:flex;flex-direction:column;justify-content:flex-end;background:rgba(0,0,0,.55)">
     <div class="pb-sheet-card pb-scroll${enter}" data-stopprop style="background:var(--surface);border-top:1px solid var(--border);border-radius:18px 18px 0 0;padding:16px 18px 26px;max-height:88%;overflow-y:auto">
       <div style="display:flex;align-items:center;margin-bottom:14px">
         <div class="pb-num" style="font-size:18.5px;font-weight:700;flex:1">${title}</div>
@@ -1829,7 +2325,7 @@ const newBodyRow = () => ({ id: uid(), date: todayStr(), weight: "", waist: "", 
 function commitWorkout(draft) {
   /* only real, filled-in entries get logged — blank preset placeholders are
      dropped so they never pollute the history with empty rows. */
-  const filled = draft.entries.filter(entryHasData);
+  const filled = draft.entries.filter(entryHasData).map(syncEntry);
   if (!filled.length) return;   // nothing to save yet — leave the sheet open
   if (draft.editing) {
     /* editing a logged day: replace that day's old rows with the current set,
@@ -1863,6 +2359,7 @@ const actions = {
   "save-profile": () => { const f = ui.profileDraft; ui.showProfile = false; ui.profileDraft = null; applyTheme(f.theme); patch({ settings: f }); },
   "profile-units": (el) => { ui.profileDraft.units = el.dataset.u; render(); },
   "profile-theme": (el) => { ui.profileDraft.theme = el.dataset.t; applyTheme(el.dataset.t); render(); },
+  "profile-mode": (el) => { ui.profileDraft.loggingMode = el.dataset.m; render(); },
   "reset-all": () => {
     if (confirm("Reset ALL data, workouts, library changes, goals, measurements and settings? This cannot be undone.")) {
       ui.showProfile = false; ui.profileDraft = null;
@@ -1966,7 +2463,7 @@ const actions = {
       patch({ library: state.library.filter((x) => (id ? x.id !== id : x.name !== name)) });
     }
   },
-  "close-worksheet": () => { ui.workoutSheet = null; ui.picking = false; ui.entryForm = null; render(); },
+  "close-worksheet": () => { ui.workoutSheet = null; ui.picking = false; ui.entryForm = null; ui.setForm = null; render(); },
   "commit-workout": () => commitWorkout(ui.workoutSheet),
   /* reopen a logged day in the full workout window so the whole session can be
      edited (fix a mistake, add/remove a lift, or save it as a preset). */
@@ -2054,56 +2551,178 @@ const actions = {
     const g = el.dataset.g;
     const ex = { id: uid(), name: ui.pickerQuick.name, muscle: g, type: g === "Cardio" ? "Cardio" : "Compound", equipment: "", alternatives: "", note: "", custom: true };
     ui.picking = false; ui.pickerQ = ""; ui.pickerQuick = null;
-    ui.entryForm = {
-      f: {
-        id: uid(), exercise: ex.name, muscle: ex.muscle,
-        kind: isCardioEx(ex) ? "cardio" : "strength",
-        sets: "", reps: "", weight: "", rpe: "", minutes: "", intensity: "", notes: "", createdAt: Date.now(),
-      }, isDraft: true,
-    };
+    ui.entryForm = { f: newEntry(ex.name, ex.muscle, isCardioEx(ex) ? "cardio" : "strength"), isDraft: true };
     patch({ library: [...state.library, ex] });
   },
   "pick-exercise": (el) => {
     const ex = state.library.find((x) => x.id === el.dataset.id);
     if (!ex) return;
     ui.picking = false; ui.pickerQ = ""; ui.pickerQuick = null;
-    ui.entryForm = {
-      f: {
-        id: uid(), exercise: ex.name, muscle: ex.muscle,
-        kind: isCardioEx(ex) ? "cardio" : "strength",
-        sets: "", reps: "", weight: "", rpe: "", minutes: "", intensity: "", notes: "", createdAt: Date.now(),
-      }, isDraft: true,
-    };
+    ui.entryForm = { f: newEntry(ex.name, ex.muscle, isCardioEx(ex) ? "cardio" : "strength"), isDraft: true };
     render();
   },
   "edit-draft-entry": (el) => {
     const e = ui.workoutSheet.entries.find((x) => x.id === el.dataset.id);
     if (e) { ui.entryForm = { f: { ...e }, isDraft: true }; render(); }
   },
-  "close-entry": () => { ui.entryForm = null; render(); },
+  "close-entry": () => {
+    const { f, isDraft } = ui.entryForm;
+    /* backing out of an exercise you've filled in but never added to the day
+       throws real work away — in Detailed mode that can be a whole set list */
+    const orphan = isDraft && entryHasData(f) && !ui.workoutSheet.entries.some((x) => x.id === f.id);
+    if (orphan && !confirm("Discard this exercise? It hasn't been added to the workout yet.")) return;
+    ui.entryForm = null; ui.setForm = null; render();
+  },
+
+  /* ── per-set logging (Detailed mode) ──────────────────────────────── */
+  "add-set": () => {
+    const f = ui.entryForm && ui.entryForm.f;
+    if (!f || !isDetailed(f)) return;
+    /* prefill from the previous set — most people repeat the weight and adjust */
+    const prev = f.setList[f.setList.length - 1];
+    ui.setForm = { s: newSet(prev ? prev.reps : "", prev ? prev.weight : "", prev ? prev.rpe : ""), isNew: true, index: f.setList.length };
+    render();
+  },
+  "edit-set": (el) => {
+    const f = ui.entryForm && ui.entryForm.f;
+    if (!f || !isDetailed(f)) return;
+    const i = f.setList.findIndex((x) => x.id === el.dataset.id);
+    if (i < 0) return;
+    ui.setForm = { s: { ...f.setList[i] }, isNew: false, index: i };
+    render();
+  },
+  "save-set": () => {
+    const form = ui.setForm, f = ui.entryForm && ui.entryForm.f;
+    if (!form || !f || !setHasData(form.s)) return;
+    const list = form.isNew
+      ? [...f.setList, form.s]
+      : f.setList.map((x) => (x.id === form.s.id ? form.s : x));
+    ui.entryForm.f = syncEntry({ ...f, setList: list });
+    ui.setForm = null;
+    render();
+  },
+  "delete-set": () => {
+    const form = ui.setForm, f = ui.entryForm && ui.entryForm.f;
+    if (!form || !f) return;
+    ui.entryForm.f = syncEntry({ ...f, setList: f.setList.filter((x) => x.id !== form.s.id) });
+    ui.setForm = null;
+    render();
+  },
+  "remove-set": (el) => {
+    const f = ui.entryForm && ui.entryForm.f;
+    if (!f || !isDetailed(f)) return;
+    ui.entryForm.f = syncEntry({ ...f, setList: f.setList.filter((x) => x.id !== el.dataset.id) });
+    render();
+  },
+  /* one-way, opt-in upgrade of an older single-top-set entry */
+  "entry-to-detailed": () => {
+    const f = ui.entryForm && ui.entryForm.f;
+    if (!f || isDetailed(f) || f.kind === "cardio") return;
+    const seed = +f.reps > 0 && +f.weight > 0 ? [newSet(f.reps, f.weight, f.rpe)] : [];
+    ui.entryForm.f = syncEntry({ ...f, setList: seed });
+    render();
+  },
+
+  /* ── timers ───────────────────────────────────────────────────────── */
+  "quick-timer": (el) => {
+    const secs = +el.dataset.s;
+    const name = "Rest " + fmtClock(secs);
+    let t = (state.timers || []).find((x) => x.duration === secs && x.name === name);
+    if (!t) {
+      t = { id: uid(), name, duration: secs, endsAt: null, remaining: null, doneAt: null, createdAt: Date.now() };
+      state.timers = [...(state.timers || []), t];
+    }
+    startTimer(t);
+  },
+  "timer-add": () => { ui.timerForm = { t: { id: uid(), name: "", min: "", sec: "" }, isNew: true }; render(); },
+  "timer-edit": (el) => {
+    const t = (state.timers || []).find((x) => x.id === el.dataset.id);
+    if (!t) return;
+    ui.timerForm = { t: { id: t.id, name: t.name, min: Math.floor(t.duration / 60) || "", sec: t.duration % 60 || "" }, isNew: false };
+    render();
+  },
+  "timer-preset": (el) => {
+    if (!ui.timerForm) return;
+    const s = +el.dataset.s;
+    ui.timerForm.t.min = Math.floor(s / 60) || "";
+    ui.timerForm.t.sec = s % 60 || "";
+    render();
+  },
+  "timer-save": () => {
+    const form = ui.timerForm;
+    if (!form) return;
+    const duration = Math.max(0, (+form.t.min || 0) * 60 + (+form.t.sec || 0));
+    if (!duration) return;
+    const name = (form.t.name || "").trim() || fmtClock(duration) + " timer";
+    const existing = (state.timers || []).find((x) => x.id === form.t.id);
+    /* editing the length of a running timer restarts it cleanly rather than
+       leaving a countdown that no longer matches its own dial */
+    const row = existing
+      ? { ...existing, name, duration, endsAt: null, remaining: null, doneAt: null }
+      : { id: form.t.id, name, duration, endsAt: null, remaining: null, doneAt: null, createdAt: Date.now() };
+    ui.timerForm = null;
+    patch({ timers: existing ? state.timers.map((x) => (x.id === row.id ? row : x)) : [...(state.timers || []), row] });
+  },
+  "timer-delete": () => {
+    const form = ui.timerForm;
+    if (!form || !confirm("Delete this timer?")) return;
+    const id = form.t.id;
+    ui.timerForm = null;
+    if (ui.timerToast && ui.timerToast.id === id) ui.timerToast = null;
+    patch({ timers: (state.timers || []).filter((x) => x.id !== id) });
+  },
+  "timer-start": (el) => {
+    const t = (state.timers || []).find((x) => x.id === el.dataset.id);
+    if (t) startTimer(t);
+  },
+  "timer-pause": (el) => {
+    const t = (state.timers || []).find((x) => x.id === el.dataset.id);
+    if (!t || !t.endsAt) return;
+    t.remaining = Math.ceil(timerRemaining(t));
+    t.endsAt = null;
+    writeNow(); render();
+  },
+  "timer-reset": (el) => {
+    const t = (state.timers || []).find((x) => x.id === el.dataset.id);
+    if (!t) return;
+    t.endsAt = null; t.remaining = null; t.doneAt = null;
+    if (ui.timerToast && ui.timerToast.id === t.id) ui.timerToast = null;
+    writeNow(); render();
+  },
+  "toast-dismiss": () => {
+    const id = ui.timerToast && ui.timerToast.id;
+    const t = (state.timers || []).find((x) => x.id === id);
+    if (t) { t.doneAt = null; t.remaining = null; }
+    ui.timerToast = null;
+    writeNow(); render();
+  },
+  "toast-open": () => { ui.timerToast = null; ui.tab = "timer"; resetTransient(); render(); },
   "delete-entry-form": () => {
     const { f, isDraft } = ui.entryForm;
     if (isDraft) {
       ui.workoutSheet.entries = ui.workoutSheet.entries.filter((x) => x.id !== f.id);
-      ui.entryForm = null; render();
+      ui.entryForm = null; ui.setForm = null; render();
     } else if (confirm("Delete this entry?")) {
-      ui.entryForm = null;
+      ui.entryForm = null; ui.setForm = null;
       patch({ log: state.log.filter((e) => e.id !== f.id) });
     }
   },
   "save-entry-form": () => {
-    const { f, isDraft } = ui.entryForm;
-    const cardio = f.kind === "cardio";
-    const valid = cardio ? +f.minutes > 0 && +f.intensity > 0 : +f.sets > 0 && +f.reps > 0 && +f.weight > 0;
-    if (!valid) return;
+    const { isDraft } = ui.entryForm;
+    /* drop half-typed placeholder sets and refresh the headline numbers before
+       anything leaves the form */
+    const f = syncEntry(isDetailed(ui.entryForm.f)
+      ? { ...ui.entryForm.f, setList: filledSets(ui.entryForm.f) }
+      : ui.entryForm.f);
+    if (!entryHasData(f)) return;
     if (isDraft) {
       const exists = ui.workoutSheet.entries.some((x) => x.id === f.id);
       ui.workoutSheet.entries = exists
         ? ui.workoutSheet.entries.map((x) => (x.id === f.id ? f : x))
         : [...ui.workoutSheet.entries, f];
-      ui.entryForm = null; render();
+      ui.entryForm = null; ui.setForm = null; render();
     } else {
-      ui.entryForm = null;
+      ui.entryForm = null; ui.setForm = null;
       patch({ log: state.log.map((e) => (e.id === f.id ? f : e)) });
     }
   },
@@ -2128,6 +2747,8 @@ const actions = {
     if (t === "bodyForm") ui.bodyForm = null;
     else if (t === "presetForm") ui.presetForm = null;
     else if (t === "presetView") ui.presetView = null;
+    else if (t === "setForm") ui.setForm = null;
+    else if (t === "timerForm") ui.timerForm = null;
     render();
   },
 };
@@ -2177,6 +2798,10 @@ function handleBind(el) {
     else { ui.exWinDraft.muscle = v; render(); }
   } else if (bind.startsWith("entry.")) {
     ui.entryForm.f[bind.slice(6)] = v; updateEntryPreview();
+  } else if (bind.startsWith("set.")) {
+    ui.setForm.s[bind.slice(4)] = v; updateSetPreview();
+  } else if (bind.startsWith("timer.")) {
+    ui.timerForm.t[bind.slice(6)] = v; updateTimerPreview();
   } else if (bind.startsWith("exwin.")) {
     ui.exWinDraft[bind.slice(6)] = v;
     const btn = document.getElementById("exwinSaveBtn");
@@ -2186,6 +2811,8 @@ function handleBind(el) {
   } else if (bind.startsWith("profile.")) {
     ui.profileDraft[bind.slice(8)] = v;
   }
+  /* every field is a checkpoint — nothing typed is ever only in memory */
+  persist();
 }
 
 document.addEventListener("input", (e) => {
@@ -2213,7 +2840,44 @@ function handleFile(el) {
 ["gesturestart", "gesturechange", "gestureend"].forEach((evt) =>
   document.addEventListener(evt, (e) => e.preventDefault(), { passive: false }));
 
+/* ─────────────────────── ORIENTATION: PORTRAIT ─────────────────────────
+   Best effort at a real lock, in order of how well it actually works:
+
+   1. manifest.webmanifest declares "orientation": "portrait". Install the app
+      to the home screen on Android and the OS genuinely refuses to rotate it —
+      this is the only true lock a web app can get, and it needs no code.
+   2. The Screen Orientation API below. Chrome/Android honours it once the
+      document is fullscreen; everywhere else it throws and we move on.
+   3. iOS Safari supports neither, for any web page, installed or not. There
+      the portrait notice in styles.css remains the fallback.               */
+function lockPortrait() {
+  try {
+    const so = screen.orientation;
+    if (so && so.lock) so.lock("portrait").catch(() => { /* not permitted here */ });
+  } catch { /* API absent */ }
+}
+lockPortrait();
+/* the lock is only granted from a user gesture on some builds, so retry once */
+window.addEventListener("click", function once() {
+  window.removeEventListener("click", once);
+  lockPortrait();
+}, { once: true });
+
 /* ─────────────────────────────── GO ────────────────────────────────── */
 
+/* Put back whatever was half-finished when the app last went away — the open
+   workout, the exercise you were mid-way through, even the set editor. */
+(function restoreDrafts() {
+  const d = state.drafts || {};
+  if (d.workout) ui.workoutSheet = d.workout;
+  if (d.entry) ui.entryForm = d.entry;
+  if (d.set && ui.entryForm) ui.setForm = d.set;
+  if (d.body) { ui.bodyForm = d.body; ui.bodyFormWasNew = !!d.bodyWasNew; }
+  if (ui.workoutSheet || ui.entryForm) ui.tab = "log";
+  else if (ui.bodyForm) ui.tab = "body";
+})();
+
 applyTheme(state.settings.theme);
+sweepTimers();          // anything that ran out while the app was closed
 render();
+startTimerEngine();

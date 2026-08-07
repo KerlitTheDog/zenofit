@@ -56,6 +56,26 @@ body { background: var(--outer); }
 .pb-input::placeholder{ color:var(--faint); }
 select.pb-input{ appearance:none; }
 
+/* The unit picker that sits inside a weight field's own label. It has to read
+   as part of the label (small, uppercase, quiet) while still looking obviously
+   tappable — gold text in a bordered pill with a chevron. The unit is per
+   exercise because gyms mix kg and lbs machines under one roof. */
+.pb-unit-select{
+  -webkit-appearance:none; appearance:none;
+  background:var(--surface2); border:1px solid var(--border); border-radius:7px;
+  color:var(--gold); font-family:inherit; font-size:11.5px; font-weight:700;
+  letter-spacing:.06em; text-transform:uppercase;
+  padding:4px 20px 4px 9px; min-height:26px; line-height:1;
+  outline:none; cursor:pointer;
+  background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23e9b949' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat:no-repeat; background-position:right 7px center;
+}
+/* the chevron is a data URI, so its colour can't follow --gold; restate it */
+:root[data-theme="light"] .pb-unit-select{
+  background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%23a9761a' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+.pb-unit-select:focus{ border-color:var(--gold); }
+
 /* iPhone Safari renders <input type="date"> as a fixed intrinsic-width native
    control that ignores width:100% and can spill off the right edge of the
    screen. Normalizing the appearance turns it into a plain, box-sized field

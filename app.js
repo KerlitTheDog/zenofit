@@ -119,8 +119,32 @@ const fmtShort = (s) => fmtDate(s, { day: "numeric", month: "short" });
 const chronoSort = (log) =>
   [...log].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : a.createdAt - b.createdAt));
 
+/* ─────────────────────────── UNITS ──────────────────────────────────
+   Gyms are inconsistent: the leg press is stamped in kg, the dumbbell rack
+   is in lbs. So the unit lives on the ENTRY, picked right above the weight
+   field, and you type whatever the machine says, no mental arithmetic.
+
+   Profile → Default unit is only the starting pick for a new entry and the
+   unit every comparison happens in: est. 1RM, PRs, goals and the progress
+   graph all convert to that one unit so the numbers stay comparable no
+   matter which plate stack they came from. Entries logged before units
+   went per-exercise are stamped with the then-current default by migrate(),
+   so nothing on record ever changes meaning. */
+
+const UNITS = ["kg", "lbs"];
+const LB_PER_KG = 2.2046226218;
+
+const convertWeight = (w, from, to) =>
+  !(w > 0) || from === to ? w : from === "kg" ? w * LB_PER_KG : w / LB_PER_KG;
+
+/* the unit an entry was logged in — older entries fall back to the default */
+const unitOf = (e) => (e && e.unit) || state.settings.units;
+
+/* an entry's weight expressed in the default unit, for comparisons only */
+const baseWeight = (e) => convertWeight(+e.weight, unitOf(e), state.settings.units);
+
 const metricOf = (e) =>
-  e.kind === "cardio" ? cardioScore(+e.minutes, +e.intensity) : epley1RM(+e.weight, +e.reps);
+  e.kind === "cardio" ? cardioScore(+e.minutes, +e.intensity) : epley1RM(baseWeight(e), +e.reps);
 
 /* ───────────────────── DETAILED MODE: PER-SET LOGGING ────────────────
    An entry logged in Detailed mode carries a `setList`: one row per set,
@@ -173,7 +197,9 @@ const entryHasData = (e) =>
 function entrySummary(e, unit, withRpe = false) {
   if (e.kind === "cardio") return `${esc(e.minutes)} min × RPE ${esc(e.intensity)}`;
   const label = isDetailed(e) ? "best" : "top";
-  return `${esc(e.sets)} sets · ${label} ${esc(e.reps)} × ${esc(e.weight)} ${unit}` +
+  /* always in the unit the set was actually logged in, never converted —
+     what you typed is what you read back */
+  return `${esc(e.sets)} sets · ${label} ${esc(e.reps)} × ${esc(e.weight)} ${unitOf(e)}` +
     (withRpe && e.rpe ? ` · RPE ${esc(e.rpe)}` : "");
 }
 
@@ -282,10 +308,10 @@ function bodyTrend(body) {
 
 const STORE_KEY = "powerbuild-tracker:v1";
 const defaultState = () => ({
-  version: 3,
+  version: 4,
   settings: { name: "", units: "kg", startDate: todayStr(), daysPerWeek: 4, theme: "dark", loggingMode: "fsbs" },
   library: DEFAULT_LIBRARY,
-  log: [],        // {id,date,exercise,muscle,kind,sets,reps,weight,rpe,minutes,intensity,notes,createdAt,setList?}
+  log: [],        // {id,date,exercise,muscle,kind,sets,reps,weight,rpe,unit,minutes,intensity,notes,createdAt,setList?}
   body: [],       // {id,date,weight,waist,chest,arm,thigh,glutes,notes}
   goals: {},      // { [exerciseName]: number }
   volumeGoals: {},// { [muscleGroup]: targetSetsPerWeek } — user's own weekly set target
@@ -316,6 +342,22 @@ function migrate(s) {
     if (!Array.isArray(s.timers)) s.timers = [];
     if (!s.drafts || typeof s.drafts !== "object") s.drafts = {};
     s.version = 3;
+  }
+  if (v < 4) {
+    /* v4 moved the unit from a single global setting onto each entry. Every
+       weight already on record was typed in the then-current default, so
+       stamp that unit on it — otherwise switching the default later would
+       silently reinterpret old numbers. Drafts get the same treatment. */
+    if (!s.settings) s.settings = {};
+    const u = s.settings.units || "kg";
+    const stamp = (e) => (!e || e.kind === "cardio" || e.unit ? e : { ...e, unit: u });
+    s.log = (s.log || []).map(stamp);
+    if (s.drafts && typeof s.drafts === "object") {
+      if (s.drafts.entry && s.drafts.entry.f) s.drafts.entry.f = stamp(s.drafts.entry.f);
+      if (s.drafts.workout && Array.isArray(s.drafts.workout.entries))
+        s.drafts.workout.entries = s.drafts.workout.entries.map(stamp);
+    }
+    s.version = 4;
   }
   return s;
 }
@@ -447,6 +489,19 @@ const sectionTitle = (children, right = "") =>
 
 const placeholder = (token, height, children = "") =>
   `<div class="pb-placeholder" style="height:${height}px"><div style="padding:8px">${children || token}<div style="font-size:9px;margin-top:2px;opacity:.7">${children ? token : "swap me in code"}</div></div></div>`;
+
+/* The unit dropdown that lives inside a weight field's label — tap "kg" and
+   pick whatever the machine in front of you is stamped in. */
+const unitSelect = (value) =>
+  `<select class="pb-unit-select" data-bind="entryUnit" aria-label="Unit for this exercise">${
+    UNITS.map((u) => `<option value="${u}"${value === u ? " selected" : ""}>${u}</option>`).join("")
+  }</select>`;
+
+/* A label with a control tucked into it. The fixed min-height keeps it level
+   with the plain label of the field sitting next to it in the same row, so the
+   two inputs still line up. */
+const labelWith = (text, control = "") =>
+  `<span style="display:inline-flex;align-items:center;gap:7px;min-height:26px">${text}${control}</span>`;
 
 const field = (label, inner, hint = "") =>
   `<div style="margin-bottom:12px"><div class="pb-label" style="margin-bottom:6px">${label}</div>${inner}${hint ? `<div style="font-size:11.5px;color:var(--faint);margin-top:4px">${hint}</div>` : ""}</div>`;
@@ -656,7 +711,8 @@ function render() {
   if (ui.workoutSheet) html += renderWorkoutSheet(ui.workoutSheet, library, log, settings, unit);
   if (ui.picking) html += renderExercisePicker(library);
   if (ui.entryForm) html += renderEntryFields(ui.entryForm, unit);
-  if (ui.setForm) html += renderSetForm(ui.setForm, unit);
+  /* the set editor speaks the unit of the exercise it belongs to, not the default */
+  if (ui.setForm) html += renderSetForm(ui.setForm, ui.entryForm ? unitOf(ui.entryForm.f) : unit);
   if (ui.timerForm) html += renderTimerForm(ui.timerForm);
   if (ui.exWin) html += renderExerciseWindow(library);
   if (ui.bodyForm) html += renderBodyFormSheet(ui.bodyForm, unit);
@@ -765,12 +821,20 @@ function renderHome(settings, log, radar, currentWeek, unit, badges) {
       ${sectionTitle("How this works")}
 
       ${accordion("howto", "How to use this (2 minutes)", icon("info", 16, 'style="color:var(--blue)"'), `
-        ${B("1.")} Set your name, units and program start date in ${B("Profile")} (gear icon). Every weight label follows your choice.<br>
+        ${B("1.")} Set your name, default unit and program start date in ${B("Profile")} (gear icon). The default is just where each new exercise starts, you can switch kg/lbs on any individual lift as you log it.<br>
         ${B("2.")} Each time you train, tap ${B("+")} and add one entry per exercise: the exercise, the ${B("weight and reps of your top set")}, how many ${B("total sets")} you did, and RPE. The top set drives your progress; total sets feed your weekly volume.<br>
         ${B("3.")} The app does the thinking: it estimates your 1-rep max, tells you if you beat your best, adds up weekly volume per muscle group, keeps your PRs on the Progress tab, and tracks any Goal 1RM you set.<br>
         ${B("4.")} Can't (or won't) do a lift? Open the ${B("Library")}. Squat, deadlift and the other "must-do" lifts all have real alternatives listed, with the reason you'd swap: bad back, bad knees, bad shoulders, we've got you.<br>
         ${B("5.")} Every week or two, glance at ${B("Volume")} (any muscle groups getting ignored?) and ${B("Progress")} (are the numbers creeping up?). Slow progress is still progress.<br>
         ${B("6.")} When the app flags five hard weeks in a row on the home screen, take the deload, a few weeks pushing strength, a few pushing size, and an easy week when your joints start writing complaint letters.
+      `)}
+
+      ${accordion("presets", "Preset workouts: save a day, reuse it forever", icon("layers", 16, 'style="color:var(--gold)"'), `
+        A ${B("preset")} is a bundle of exercises saved under one name, ${B("“Back day”")}, “Push A”, “Legs (bad knee)”, so you never have to hunt down the same eight lifts one at a time again.<br><br>
+        ${B("1. Build it.")} Start a workout and add the exercises you want in the bundle, then tap ${B("Save as Preset")} at the bottom of the day. Name it (a one-line description is optional) and it's saved. Already logged a day you'd happily repeat? Open it from ${B("Log → History")} and save it as a preset from there.<br><br>
+        ${B("2. Use it.")} Two ways. From ${B("Library → Presets")}, tap ${B("Start workout")} and the whole bundle opens as a fresh day. Or, inside a workout you're already in, tap ${B("Add exercise")} and switch to the ${B("Presets")} tab to drop the bundle in next to whatever's already there, mix as many presets into one day as you like.<br><br>
+        ${B("3. Fill it in.")} A preset saves the ${B("exercises, never the numbers")}. Every move arrives ${B("blank")} and outlined in gold, waiting for today's sets, reps and weight. That's on purpose, a preset is your plan, not last week's performance. Anything you leave blank is simply dropped when you save the day, so an untouched move never pollutes your history.<br><br>
+        ${B("4. Keep it tidy.")} ${B("Library → Presets → Edit")} renames a bundle, trims exercises out of it, or deletes it. Editing or deleting a preset never touches the workouts you've already logged.
       `)}
 
       ${accordion("fsbs", "First set, best set (FSBS)", icon("flame", 16, 'style="color:var(--red)"'), `
@@ -793,7 +857,8 @@ function renderHome(settings, log, radar, currentWeek, unit, badges) {
       `)}
 
       ${accordion("units", "A note on units", icon("ruler", 16, 'style="color:var(--steel)"'), `
-        The kg/lbs setting updates every weight label in the app. Enter weights in the unit you picked; if you switch later, new labels apply but old numbers stay as typed, so pick your unit once, at the start.
+        Gyms mix their gear: the leg press is stamped in kg, the dumbbell rack is in lbs. So the unit lives on ${B("each exercise")}, not on the whole app. When you log a lift, tap the little ${B("kg / lbs")} pill sitting in the ${B("weight")} label and pick whatever the machine actually says, then type the number off the plate. No converting in your head, no calculator.<br><br>
+        ${B("What the setting does:")} ${B("Profile → Default unit")} is just the unit each new exercise starts on, plus the one every ${B("comparison")} is shown in, your estimated 1RM, PRs, goals and the progress graph. The app converts behind the scenes so a lbs machine and a kg machine can still be compared honestly. Your logged numbers are never rewritten: history always reads back exactly what you typed, in the unit you typed it in.
       `)}
     </div>
 
@@ -989,7 +1054,7 @@ function renderProgress(log, library, goals, badges, settings, unit) {
     ? `<div class="pb-card pb-scroll" data-scrollkey="prog-detail" style="margin-bottom:20px;max-height:210px;overflow-y:auto">
         ${[...series].reverse().map((e) => `<div style="display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--border-soft);font-size:13px">
           <span style="color:var(--muted);width:84px;flex-shrink:0">${fmtShort(e.date)}</span>
-          <span style="flex:1;color:var(--faint);font-size:12px">${e.kind === "cardio" ? `${esc(e.minutes)} min × RPE ${esc(e.intensity)}` : `${esc(e.reps)} × ${esc(e.weight)} ${unit}`}</span>
+          <span style="flex:1;color:var(--faint);font-size:12px">${e.kind === "cardio" ? `${esc(e.minutes)} min × RPE ${esc(e.intensity)}` : `${esc(e.reps)} × ${esc(e.weight)} ${unitOf(e)}`}</span>
           <span class="pb-num" style="font-weight:700;font-size:15.5px;color:${badges[e.id]?.badge === "pr" ? "var(--gold)" : "var(--text)"}">${e.m}</span>
         </div>`).join("")}
       </div>`
@@ -1073,6 +1138,17 @@ function libraryGroups(library) {
   const g = []; for (const ex of library) if (!g.includes(ex.muscle)) g.push(ex.muscle); return g;
 }
 
+/* An exercise you added on the fly while logging (quick-add from the picker)
+   arrives with nothing but a name and a muscle group. That, and only that, is
+   what earns the blue NEW flag: it's a to-do, not a badge. Fill in equipment,
+   alternatives or details and the flag disappears, at which point the exercise
+   is indistinguishable from the built-in ones, which is the point. */
+const needsDetails = (ex) => !!(ex && ex.custom) && !ex.equipment && !ex.alternatives && !ex.note;
+
+const newFlag = (ex) => needsDetails(ex)
+  ? '<span style="font-size:10px;color:var(--blue);margin-left:6px;font-weight:700;letter-spacing:.06em">NEW</span>'
+  : "";
+
 function renderLibraryList(library) {
   const q = ui.libraryQ, filter = ui.libraryFilter;
   const groups = libraryGroups(library);
@@ -1086,7 +1162,7 @@ function renderLibraryList(library) {
       ${shown.filter((x) => x.muscle === g).map((ex, i, arr) => `<button data-action="open-exercise-window" data-name="${esc(ex.name)}" style="width:100%;display:flex;align-items:center;gap:10px;padding:11px 14px;text-align:left;color:var(--text);border-bottom:${i < arr.length - 1 ? "1px solid var(--border-soft)" : "none"}">
         ${ex.image ? `<img src="${esc(ex.image)}" alt="" style="width:38px;height:38px;border-radius:8px;object-fit:cover;flex-shrink:0;border:1px solid var(--border)">` : ""}
         <div style="flex:1;min-width:0">
-          <div style="font-weight:600;font-size:14px">${esc(ex.name)}${ex.custom ? '<span style="font-size:10px;color:var(--gold);margin-left:6px;font-weight:700">CUSTOM</span>' : ""}</div>
+          <div style="font-weight:600;font-size:14px">${esc(ex.name)}${newFlag(ex)}</div>
           <div style="font-size:11.5px;color:var(--faint)">${esc(ex.type)}${ex.equipment ? ` · ${esc(ex.equipment)}` : ""}</div>
         </div>
         ${ex.video ? icon("youtube", 15, 'style="color:var(--red);flex-shrink:0"') : ""}
@@ -1114,7 +1190,7 @@ function renderLibrary(library) {
 
 function renderExercisesLibrary(library) {
   const groups = libraryGroups(library);
-  const incomplete = library.filter((ex) => ex.custom && (!ex.equipment && !ex.alternatives && !ex.note));
+  const incomplete = library.filter(needsDetails);
 
   return `
     <div style="position:relative;margin-bottom:10px">
@@ -1125,8 +1201,16 @@ function renderExercisesLibrary(library) {
       ${["All", ...groups].map((g) => `<button data-action="lib-filter" data-id="${esc(g)}" class="pb-chip" style="flex-shrink:0;padding:6px 12px;font-size:12.5px;color:${ui.libraryFilter === g ? "var(--gold-ink)" : "var(--muted)"};background:${ui.libraryFilter === g ? "var(--gold)" : "var(--surface2)"};border-color:${ui.libraryFilter === g ? "var(--gold)" : "var(--border)"}">${esc(g)}</button>`).join("")}
     </div>
 
-    ${incomplete.length > 0 ? `<div class="pb-card" style="border-color:rgba(93,139,204,.35);background:rgba(93,139,204,.06);padding:10px 12px;margin-bottom:10px;font-size:12.5px;color:var(--muted);line-height:1.5">
-      <b style="color:var(--blue)">Added from your log, details missing:</b> ${incomplete.map((x) => esc(x.name)).join(", ")}. Tap them to fill in equipment &amp; alternatives when ready.
+    ${incomplete.length > 0 ? `<div class="pb-card" style="border-color:rgba(93,139,204,.35);background:rgba(93,139,204,.06);padding:11px 12px 9px;margin-bottom:10px;font-size:12.5px;color:var(--muted);line-height:1.5">
+      <b style="color:var(--blue)">Added from your log, details missing:</b>
+      <div style="margin:7px 0 8px">
+        ${incomplete.map((x) => `<button data-action="open-exercise-window" data-name="${esc(x.name)}" style="display:flex;align-items:center;gap:8px;width:100%;padding:4px 0;color:var(--text);font-size:13px;font-weight:600;text-align:left">
+          <span style="width:5px;height:5px;border-radius:3px;background:var(--blue);flex-shrink:0"></span>
+          <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(x.name)}</span>
+          ${icon("chevron-right", 14, 'style="color:var(--faint);flex-shrink:0"')}
+        </button>`).join("")}
+      </div>
+      Tap one to fill in its equipment &amp; alternatives when you're ready.
     </div>` : ""}
 
     <button data-action="add-exercise" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:14px;margin-bottom:12px;border-style:dashed;border-color:var(--border)">
@@ -1150,6 +1234,7 @@ function newEntry(name, muscle, kind, createdAt = Date.now()) {
   const e = {
     id: uid(), exercise: name, muscle, kind: kind || "strength",
     sets: "", reps: "", weight: "", rpe: "", minutes: "", intensity: "", notes: "",
+    unit: state.settings.units,   // starting pick, changeable per exercise
     createdAt,
   };
   if (e.kind !== "cardio" && state.settings.loggingMode === "detailed") e.setList = [];
@@ -1324,7 +1409,7 @@ function exWindowViewBody(ex) {
     <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px">
       ${chip(esc(ex.muscle), colorFor(ex.muscle))}
       ${ex.type ? chip(esc(ex.type)) : ""}
-      ${ex.custom ? chip("Custom", "var(--gold)") : ""}
+      ${needsDetails(ex) ? chip("NEW", "var(--blue)") : ""}
     </div>
 
     ${ex.image
@@ -1569,7 +1654,9 @@ function renderExercisePicker(library) {
 function entryComputed() {
   const { f, isDraft } = ui.entryForm;
   const cardio = f.kind === "cardio";
-  const metric = cardio ? cardioScore(+f.minutes, +f.intensity) : epley1RM(+f.weight, +f.reps);
+  /* metricOf converts the entry's own unit to the default one, so the live
+     "vs your best" below compares like with like */
+  const metric = metricOf(f);
 
   /* live "vs your best" preview against everything chronologically earlier */
   let preview = null;
@@ -1633,6 +1720,7 @@ function renderEntryFields(form, unit) {
   const { f, isDraft } = form;
   const { cardio, metric, preview, valid } = entryComputed();
   const detailed = isDetailed(f);
+  const eUnit = unitOf(f);
 
   const inputs = cardio
     ? `<div style="display:flex;gap:10px">
@@ -1640,14 +1728,15 @@ function renderEntryFields(form, unit) {
         <div style="flex:1">${field("Intensity (RPE 1–10)", `<input class="pb-input" type="number" inputmode="decimal" min="1" max="10" data-bind="entry.intensity" value="${esc(f.intensity)}" placeholder="6">`)}</div>
       </div>`
     : detailed
-    ? renderSetList(f, unit)
+    ? renderSetList(f, eUnit)
     : `<div style="display:flex;gap:10px">
         <div style="flex:1">${field("Total sets", `<input class="pb-input" type="number" inputmode="numeric" data-bind="entry.sets" value="${esc(f.sets)}" placeholder="3">`)}</div>
         <div style="flex:1">${field("Top set reps", `<input class="pb-input" type="number" inputmode="numeric" data-bind="entry.reps" value="${esc(f.reps)}" placeholder="8">`)}</div>
       </div>
       <div style="display:flex;gap:10px">
-        <div style="flex:1">${field(`Top set weight (${unit})`, `<input class="pb-input" type="number" inputmode="decimal" data-bind="entry.weight" value="${esc(f.weight)}" placeholder="80">`)}</div>
-        <div style="flex:1">${field("RPE (1–10)", `<input class="pb-input" type="number" inputmode="decimal" min="1" max="10" step="0.5" data-bind="entry.rpe" value="${esc(f.rpe)}" placeholder="8">`, "10 = nothing left")}</div>
+        <div style="flex:1">${field(labelWith("Top set weight", unitSelect(eUnit)), `<input class="pb-input" type="number" inputmode="decimal" data-bind="entry.weight" value="${esc(f.weight)}" placeholder="80">`,
+          "Log what the machine says, the unit is per exercise.")}</div>
+        <div style="flex:1">${field(labelWith("RPE (1–10)"), `<input class="pb-input" type="number" inputmode="decimal" min="1" max="10" step="0.5" data-bind="entry.rpe" value="${esc(f.rpe)}" placeholder="8">`, "10 = nothing left")}</div>
       </div>`;
 
   /* An entry keeps whatever shape it was logged in, so nothing is ever lost by
@@ -1687,6 +1776,9 @@ function renderEntryFields(form, unit) {
           ${preview ? BADGE_TEXT[preview] : cardio ? "minutes × RPE" : "weight × (1 + reps/30)"}
         </div>
       </div>
+      ${!cardio && eUnit !== unit ? `<div style="font-size:11.5px;color:var(--faint);margin:8px 2px 0;line-height:1.5">
+        Logged in <b style="color:var(--muted)">${eUnit}</b>, converted to <b style="color:var(--muted)">${unit}</b> here so PRs, goals and the graph stay comparable. Your typed numbers are kept exactly as entered.
+      </div>` : ""}
       ${detailed ? `<div style="font-size:11.5px;color:var(--faint);margin:8px 2px 0;line-height:1.5">
         Your <b style="color:var(--muted)">highest</b> estimated 1RM across every set above is what counts toward PRs and the Progress graph. All the sets stay saved either way.
       </div>` : ""}
@@ -1707,8 +1799,9 @@ function renderSetForm(form, unit) {
   const ok = setHasData(s);
   return sheet(isNew ? `Add set ${index + 1}` : `Edit set ${index + 1}`, "setForm", `
     <div style="display:flex;gap:10px">
-      <div style="flex:1">${field("Reps", `<input class="pb-input" type="number" inputmode="numeric" min="1" data-bind="set.reps" value="${esc(s.reps)}" placeholder="8" data-autofocus>`)}</div>
-      <div style="flex:1">${field(`Weight (${unit})`, `<input class="pb-input" type="number" inputmode="decimal" min="0" step="0.5" data-bind="set.weight" value="${esc(s.weight)}" placeholder="80">`)}</div>
+      <div style="flex:1">${field(labelWith("Reps"), `<input class="pb-input" type="number" inputmode="numeric" min="1" data-bind="set.reps" value="${esc(s.reps)}" placeholder="8" data-autofocus>`)}</div>
+      <div style="flex:1">${field(labelWith("Weight", unitSelect(unit)), `<input class="pb-input" type="number" inputmode="decimal" min="0" step="0.5" data-bind="set.weight" value="${esc(s.weight)}" placeholder="80">`,
+        "Applies to every set of this exercise.")}</div>
     </div>
     ${field("RPE (1–10)", `<input class="pb-input" type="number" inputmode="decimal" min="1" max="10" step="0.5" data-bind="set.rpe" value="${esc(s.rpe)}" placeholder="8">`, "Optional. 10 = nothing left in the tank.")}
 
@@ -2077,9 +2170,9 @@ function renderProfile(f) {
     </div>
     <div class="pb-scroll" data-scrollkey="profile" style="flex:1;overflow-y:auto;padding:16px 16px 40px">
       ${field("Your name", `<input class="pb-input" data-bind="profile.name" value="${esc(f.name)}" placeholder="John Lifter">`)}
-      ${field("Units", `<div style="display:flex;gap:8px">
-        ${["kg", "lbs"].map((u) => `<button data-action="profile-units" data-u="${u}" class="pb-btn" style="flex:1;padding:11px 0;background:${f.units === u ? "var(--gold)" : "var(--surface2)"};color:${f.units === u ? "var(--gold-ink)" : "var(--muted)"};border:1px solid ${f.units === u ? "var(--gold)" : "var(--border)"}">${u}</button>`).join("")}
-      </div>`, "Updates every weight label in the app. If you switch later, new labels apply but old numbers stay as typed, pick once, at the start.")}
+      ${field("Default unit", `<div style="display:flex;gap:8px">
+        ${UNITS.map((u) => `<button data-action="profile-units" data-u="${u}" class="pb-btn" style="flex:1;padding:11px 0;background:${f.units === u ? "var(--gold)" : "var(--surface2)"};color:${f.units === u ? "var(--gold-ink)" : "var(--muted)"};border:1px solid ${f.units === u ? "var(--gold)" : "var(--border)"}">${u}</button>`).join("")}
+      </div>`, "The unit each new exercise starts on, and the one all your est. 1RMs, PRs, goals and graphs are shown in. You can still switch the unit on any individual exercise while you log it, right above the weight field.")}
       ${field("Theme", `<div style="display:flex;gap:8px">
         ${[["dark", "Dark", "moon"], ["light", "Light", "sun"]].map(([t, label, ic]) => {
           const on = (f.theme || "dark") === t;
@@ -2796,6 +2889,12 @@ function handleBind(el) {
   } else if (bind === "exwinMuscle") {
     if (v === "__new") { ui.exWinNewGroup = true; ui.exWinDraft.muscle = ""; render(); }
     else { ui.exWinDraft.muscle = v; render(); }
+  } else if (bind === "entryUnit") {
+    /* the unit belongs to the whole exercise, so it can be changed from the
+       entry form or from any of its set editors. A discrete tap, not typing —
+       a full render keeps the set list, the 1RM card and the workout card
+       behind it all speaking the same unit. */
+    if (ui.entryForm) { ui.entryForm.f.unit = v; render(); }
   } else if (bind.startsWith("entry.")) {
     ui.entryForm.f[bind.slice(6)] = v; updateEntryPreview();
   } else if (bind.startsWith("set.")) {

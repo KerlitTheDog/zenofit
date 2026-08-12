@@ -81,13 +81,54 @@ const DEFAULT_LIBRARY = [
   image: "", video: "", custom: false,
 }));
 
-const MUSCLE_COLORS = {
-  Chest: "#d05a50", Back: "#5d8bcc", Shoulders: "#e9b949", Arms: "#6aa465",
-  Legs: "#aab4c0", Core: "#8fa39a", Cardio: "#a07ec2",
-};
+/* ───────────────────────── MUSCLE GROUPS ────────────────────────────
+   The seven groups below are only the SEEDS. Every group the app knows
+   about lives in `state.groups` as {name, color}, which the user can
+   recolour, rename or extend from the Library (the ＋ chip next to the
+   last category) and from the muscle picker inside a workout. Colours
+   are read back through colorFor(), so a recoloured group repaints
+   everywhere at once: library sections, the stripe down the left of each
+   logged exercise, volume bars, preset dots, progress dots.          */
+
+const DEFAULT_GROUPS = [
+  { name: "Chest", color: "#d05a50" }, { name: "Back", color: "#5d8bcc" },
+  { name: "Shoulders", color: "#e9b949" }, { name: "Arms", color: "#6aa465" },
+  { name: "Legs", color: "#aab4c0" }, { name: "Core", color: "#8fa39a" },
+  { name: "Cardio", color: "#a07ec2" },
+];
+/* fallback ring for a muscle that somehow isn't a registered group */
 const EXTRA_COLORS = ["#c98f5a", "#7ea0b8", "#b0a06a", "#9a8fb8"];
+/* the palette offered when picking a group colour (a custom one is also allowed) */
+const GROUP_SWATCHES = [
+  "#d05a50", "#c98f5a", "#e9b949", "#b0a06a", "#6aa465", "#8fa39a",
+  "#5d8bcc", "#7ea0b8", "#a07ec2", "#9a8fb8", "#aab4c0", "#8a8f97",
+];
+
+/* ── THE UNCATEGORIZED BUCKET ──────────────────────────────────────────
+   Deleting a group used to be blocked while anything was still in it,
+   which made a group you'd outgrown permanent. Now its exercises are
+   tipped into "Uncategorized" instead.
+
+   It is not a group the user owns: it is never in state.groups, never
+   offered as something to pick, never listed in the group manager, never
+   a filter chip, and it can't be renamed, recoloured or deleted. It only
+   ever appears as the last section of the library, holding the exercises
+   that are waiting to be re-filed. Give one of them a real group and the
+   bucket empties itself out of existence. */
+const UNCATEGORIZED = "Uncategorized";
+const UNCAT_COLOR = "#6f747c";
+
+const groupList = () =>
+  (state && Array.isArray(state.groups) && state.groups.length ? state.groups : DEFAULT_GROUPS)
+    .filter((g) => g.name !== UNCATEGORIZED);
+const groupNames = () => groupList().map((g) => g.name);
+const groupColor = (name) => {
+  if (name === UNCATEGORIZED) return UNCAT_COLOR;
+  const g = groupList().find((x) => x.name === name);
+  return g ? g.color : null;
+};
 const colorFor = (muscle, i = 0) =>
-  MUSCLE_COLORS[muscle] || EXTRA_COLORS[i % EXTRA_COLORS.length];
+  groupColor(muscle) || EXTRA_COLORS[i % EXTRA_COLORS.length];
 
 /* ─────────────────────────── FORMULA HELPERS ────────────────────────── */
 
@@ -146,18 +187,23 @@ const baseWeight = (e) => convertWeight(+e.weight, unitOf(e), state.settings.uni
 const metricOf = (e) =>
   e.kind === "cardio" ? cardioScore(+e.minutes, +e.intensity) : epley1RM(baseWeight(e), +e.reps);
 
-/* ───────────────────── DETAILED MODE: PER-SET LOGGING ────────────────
-   An entry logged in Detailed mode carries a `setList`: one row per set,
-   each with its own reps / weight / RPE. An entry logged in FSBS mode has
-   no setList at all — it's a total-set count plus the numbers of the top set.
+/* ─────────────────────── PER-SET LOGGING ────────────────────────────
+   Every new entry carries a `setList`: one row per set, each with its own
+   reps / weight / RPE. It is the only way the app logs now.
 
-   Either way every entry keeps the same four headline fields filled in
-   (sets / reps / weight / rpe). For a detailed entry those are DERIVED from
-   its best set, the one with the highest estimated 1RM. That single rule is
-   what makes the two modes interchangeable: flip back to FSBS and a detailed
-   entry simply shows its best set, while weekly volume, PR badges, the
-   dashboard and the charts all keep reading the fields they always read.
-   Nothing is ever thrown away — the setList stays on the entry. */
+   A handful of entries on record predate that — they were logged as a
+   total-set count plus the numbers of one top set, and they have no
+   setList. They are left exactly as they were rather than rewritten
+   (guessing four sets out of one would invent history), so `isDetailed`
+   still asks the question and the entry form still offers to convert one
+   on demand.
+
+   Either shape keeps the same four headline fields filled in (sets / reps
+   / weight / rpe). For an entry with a set list those are DERIVED from its
+   best set, the one with the highest estimated 1RM, which is what lets
+   weekly volume, PR badges, the dashboard and the charts all keep reading
+   the fields they always read. Nothing is ever thrown away — the setList
+   stays on the entry. */
 
 const newSet = (reps = "", weight = "", rpe = "") => ({ id: uid(), reps, weight, rpe });
 const isDetailed = (e) => Array.isArray(e && e.setList);
@@ -175,8 +221,8 @@ function bestSet(list) {
   return best;
 }
 
-/* Refresh a detailed entry's headline fields from its sets. Call this after
-   any change to setList. No-op for FSBS and cardio entries. */
+/* Refresh an entry's headline fields from its sets. Call this after any
+   change to setList. No-op for cardio and for legacy top-set entries. */
 function syncEntry(e) {
   if (!isDetailed(e) || e.kind === "cardio") return e;
   const filled = filledSets(e);
@@ -307,16 +353,30 @@ function bodyTrend(body) {
 /* ───────────────────────────── STORAGE ─────────────────────────────── */
 
 const STORE_KEY = "powerbuild-tracker:v1";
+
+/* The timers the app ships with. They used to be the hard-coded "Quick start"
+   chips at the top of the Timer tab; they're now ordinary saved timers, so they
+   can be renamed, re-timed, pinned or deleted like any other. */
+const SEED_TIMERS = [30, 60, 90, 120, 180, 300];
+
+const seedTimers = () =>
+  SEED_TIMERS.map((secs, i) => ({
+    id: "seed-timer-" + secs, name: "Rest " + fmtClock(secs), duration: secs,
+    endsAt: null, remaining: null, doneAt: null, pinned: i < 3, createdAt: Date.now() + i,
+  }));
+
 const defaultState = () => ({
-  version: 4,
-  settings: { name: "", units: "kg", startDate: todayStr(), daysPerWeek: 4, theme: "dark", loggingMode: "fsbs" },
+  version: 5,
+  settings: { name: "", units: "kg", startDate: todayStr(), daysPerWeek: 4, theme: "dark" },
   library: DEFAULT_LIBRARY,
+  groups: DEFAULT_GROUPS.map((g) => ({ ...g })),   // [{name,color}] — muscle groups, user-editable
   log: [],        // {id,date,exercise,muscle,kind,sets,reps,weight,rpe,unit,minutes,intensity,notes,createdAt,setList?}
   body: [],       // {id,date,weight,waist,chest,arm,thigh,glutes,notes}
   goals: {},      // { [exerciseName]: number }
   volumeGoals: {},// { [muscleGroup]: targetSetsPerWeek } — user's own weekly set target
-  presets: [],    // [{id,name,description,exercises:[{exercise,muscle,kind}],createdAt}] — reusable exercise bundles
-  timers: [],     // [{id,name,duration,endsAt,remaining,doneAt,createdAt}] — Timer tab
+  presets: [],    // [{id,name,description,pinned,exercises:[{exercise,muscle,kind}],createdAt}]
+  timers: seedTimers(), // [{id,name,duration,endsAt,remaining,doneAt,pinned,createdAt}]
+  dayDrafts: [],  // [{id,date,entries,savedAt}] — workout days you backed out of, see closeWorksheet()
   drafts: {},     // half-finished forms, restored after a crash/lock — see snapshotDrafts()
 });
 
@@ -334,11 +394,10 @@ function migrate(s) {
     s.version = 2;
   }
   if (v < 3) {
-    /* v3 added Detailed (per-set) logging, the Timer tab and crash-proof
-       drafts. Existing logs have no setList, so they stay FSBS entries and
-       keep rendering exactly as before. */
+    /* v3 added per-set logging, the Timer tab and crash-proof drafts.
+       Existing logs have no setList, so they stay top-set entries and keep
+       rendering exactly as before. */
     if (!s.settings) s.settings = {};
-    if (!s.settings.loggingMode) s.settings.loggingMode = "fsbs";
     if (!Array.isArray(s.timers)) s.timers = [];
     if (!s.drafts || typeof s.drafts !== "object") s.drafts = {};
     s.version = 3;
@@ -358,6 +417,38 @@ function migrate(s) {
         s.drafts.workout.entries = s.drafts.workout.entries.map(stamp);
     }
     s.version = 4;
+  }
+  if (v < 5) {
+    /* v5 is the "one mode, one timer list" release:
+       · FSBS is gone — the app always logs set by set now. Entries already on
+         record keep their shape (an old top-set row has no setList and still
+         renders as one), so no history is rewritten; only the setting goes.
+       · Muscle groups became real, editable records instead of a hard-coded
+         colour map. Seed them from the defaults plus anything the user's own
+         library invented, so nothing loses its colour.
+       · The Quick-start chips became ordinary saved timers.
+       · Workout days you back out of are kept as drafts. */
+    if (!s.settings) s.settings = {};
+    delete s.settings.loggingMode;
+    if (!Array.isArray(s.groups) || !s.groups.length) s.groups = DEFAULT_GROUPS.map((g) => ({ ...g }));
+    /* Any group the user invented before groups were records of their own is
+       registered here, keeping the colour it was already being drawn with. */
+    const known = new Set([...s.groups.map((g) => g.name), UNCATEGORIZED]);
+    let extra = 0;
+    for (const ex of s.library || []) {
+      if (ex.muscle && !known.has(ex.muscle)) {
+        known.add(ex.muscle);
+        s.groups.push({ name: ex.muscle, color: EXTRA_COLORS[extra++ % EXTRA_COLORS.length] });
+      }
+    }
+    if (!Array.isArray(s.timers)) s.timers = [];
+    /* keep the user's own timers, add any seed length they don't already have */
+    const haveDur = new Set(s.timers.map((t) => t.duration));
+    for (const t of seedTimers()) if (!haveDur.has(t.duration)) s.timers.push(t);
+    s.timers = s.timers.map((t) => ({ pinned: false, ...t }));
+    if (!Array.isArray(s.dayDrafts)) s.dayDrafts = [];
+    s.presets = (s.presets || []).map((p) => ({ pinned: false, ...p }));
+    s.version = 5;
   }
   return s;
 }
@@ -431,6 +522,9 @@ const ui = {
   logSeg: "history",
   showProfile: false,
   profileDraft: null,
+  showBody: false,      // Body measurements — a window off the header, not a tab
+  groupSheet: false,    // the "muscle groups" manager
+  groupForm: null,      // {name, color, orig, then} — add/edit one group
   workoutSheet: null,   // {date, entries:[]} draft
   presetForm: null,     // {name, description} draft while saving the current day as a preset
   presetView: null,     // working copy of a saved preset being managed/edited
@@ -445,7 +539,6 @@ const ui = {
   exWin: null,          // exercise detail window: {name} for an existing lift, or {isNew:true}
   exWinEdit: false,     // false = read-only view, true = editable
   exWinDraft: null,     // working copy while editing/creating
-  exWinNewGroup: false, // "new muscle group" toggle inside the editor
   bodyForm: null,
   bodyFormWasNew: false,
   deloadOpen: false,
@@ -477,6 +570,22 @@ function resetTransient() {
 
 const esc = (s) => String(s ?? "")
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+/* ── NUMBER FIELDS: comma or period, same number ──────────────────────
+   Half the world types 82,5 and half types 82.5, and a phone keypad hands
+   you whichever one its locale feels like. <input type="number"> silently
+   throws away the value when it sees the "wrong" separator, so every number
+   field in the app is a plain text field with a decimal keypad instead:
+   NUM below stamps that plus `data-num`, which tells handleBind() to strip
+   anything that isn't a digit or a separator and to store the value with a
+   period. What you see stays exactly what you typed; everything downstream
+   (est. 1RM, volume, PRs, goals, graphs) reads one canonical form.     */
+
+const NUM = 'type="text" inputmode="decimal" autocomplete="off" data-num';
+const EM_DASH = "—";
+
+/* the stored form of a typed number: 82,5 → 82.5 */
+const decimalize = (v) => String(v ?? "").replace(/,/g, ".");
 
 const icon = (name, size = 16, extra = "") =>
   `<i data-lucide="${name}" width="${size}" height="${size}" ${extra}></i>`;
@@ -639,7 +748,7 @@ function render() {
   chartState = { line: null, bar: null };
 
   const tab = ui.tab;
-  const titles = { log: "Workout Log", progress: "Progress", library: "Exercise Library", body: "Body Measurements", timer: "Timers" };
+  const titles = { log: "Workout Log", progress: "Progress", library: "Exercise Library", timer: "Timers" };
 
   /* the frame is locked to exactly one viewport height (100dvh tracks mobile
      browser chrome) so the content area scrolls internally and the bottom nav
@@ -653,17 +762,17 @@ function render() {
       <img src="logoC.png" alt="Powerbuild Tracker" width="30" height="30" style="width:30px;height:30px;object-fit:contain;border-radius:8px;display:block;flex-shrink:0">
       <div class="pb-num" style="font-size:19px;font-weight:700;flex:1">${titles[tab]}</div>
       ${chip("Wk " + currentWeek, "var(--gold)")}
+      <button data-action="open-body" title="Body measurements" style="color:var(--muted);padding:4px">${icon("ruler", 20)}</button>
       <button data-action="open-profile" style="color:var(--muted);padding:4px">${icon("settings", 20)}</button>
     </div>`;
   }
 
   /* content */
   html += `<div class="pb-scroll" data-scrollkey="main-${tab}" style="flex:1;min-height:0;overflow-y:auto;padding-bottom:120px">`;
-  if (tab === "home") html += renderHome(settings, log, radar, currentWeek, unit, badges);
+  if (tab === "home") html += renderHome(settings, radar, currentWeek, unit);
   if (tab === "log") html += renderLog(log, library, badges, settings, unit, currentWeek);
   if (tab === "progress") html += renderProgress(log, library, goals, badges, settings, unit);
   if (tab === "library") html += renderLibrary(library);
-  if (tab === "body") html += renderBody(body, unit);
   if (tab === "timer") html += renderTimers();
   html += `</div>`;
 
@@ -683,15 +792,15 @@ function render() {
     </div>`;
   }
 
-  /* FAB — always-visible overlay on Log & Body */
-  if ((tab === "log" || tab === "body") && !ui.workoutSheet) {
+  /* FAB — always-visible overlay on Log */
+  if (tab === "log" && !ui.workoutSheet) {
     html += `<button data-action="fab" class="pb-btn pb-gold" style="position:absolute;right:18px;bottom:92px;width:56px;height:56px;border-radius:18px;box-shadow:0 8px 22px rgba(233,185,73,.35);z-index:30">${icon("plus", 26, 'stroke-width="2.6"')}</button>`;
   }
 
   /* bottom nav */
   const NAV = [
     ["home", "home", "Home"], ["log", "clipboard-list", "Log"], ["timer", "timer", "Timer"],
-    ["progress", "trending-up", "Progress"], ["library", "book-open", "Library"], ["body", "ruler", "Body"],
+    ["progress", "trending-up", "Progress"], ["library", "book-open", "Library"],
   ];
   /* a running timer puts a live dot on its nav icon from anywhere in the app */
   const timersRunning = (state.timers || []).some((t) => t.endsAt || t.doneAt);
@@ -715,10 +824,13 @@ function render() {
   if (ui.setForm) html += renderSetForm(ui.setForm, ui.entryForm ? unitOf(ui.entryForm.f) : unit);
   if (ui.timerForm) html += renderTimerForm(ui.timerForm);
   if (ui.exWin) html += renderExerciseWindow(library);
-  if (ui.bodyForm) html += renderBodyFormSheet(ui.bodyForm, unit);
   if (ui.presetForm) html += renderPresetForm();
   if (ui.presetView) html += renderPresetView();
   if (ui.showProfile) html += renderProfile(ui.profileDraft);
+  if (ui.showBody) html += renderBodyWindow(body, unit);
+  if (ui.bodyForm) html += renderBodyFormSheet(ui.bodyForm, unit);
+  if (ui.groupSheet) html += renderGroupSheet(library);
+  if (ui.groupForm) html += renderGroupForm();
 
   html += `</div></div>`;
   app.innerHTML = html;
@@ -765,10 +877,78 @@ function render() {
 
 /* ───────────────────────────── HOME ───────────────────────────────── */
 
-function renderHome(settings, log, radar, currentWeek, unit, badges) {
-  const totalSets = log.filter((e) => e.kind !== "cardio").reduce((a, e) => a + (+e.sets || 0), 0);
-  const prCount = Object.values(badges).filter((b) => b.badge === "pr").length;
+/* ── the pinned module ────────────────────────────────────────────────
+   The strip of home screen between "Start New Workout" and the how-it-works
+   accordions is the app's launchpad: the presets you actually repeat, and
+   the timers you actually reach for, both one tap away. Pin a preset from
+   Library → Presets, a timer from the Timer tab. */
 
+const PIN_RING_C = 201.06;   /* 2πr for the r=32 dial below */
+
+function renderPinnedPresets() {
+  const pinned = (state.presets || []).filter((p) => p.pinned);
+  if (!pinned.length)
+    return `<div style="font-size:12.5px;color:var(--faint);line-height:1.5;padding:0 2px">
+      Nothing pinned yet. Open <b style="color:var(--muted)">Library → Presets</b> and tap ${icon("pin", 11)} on a bundle to keep it here.
+    </div>`;
+
+  return `<div class="pb-card2" style="overflow:hidden">
+    ${pinned.map((p, i) => {
+      const exs = p.exercises || [];
+      return `<button data-action="start-workout-from-preset" data-id="${esc(p.id)}" style="width:100%;display:flex;align-items:center;gap:10px;padding:10px 12px;text-align:left;color:var(--text);border-bottom:${i < pinned.length - 1 ? "1px solid var(--border-soft)" : "none"}">
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p.name)}</div>
+          <div style="font-size:11.5px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.description ? esc(p.description) : presetCountLabel(exs.length)}</div>
+        </div>
+        ${chip(presetCountLabel(exs.length), "var(--gold)")}
+        ${icon("play", 14, 'style="color:var(--gold);flex-shrink:0"')}
+      </button>`;
+    }).join("")}
+  </div>`;
+}
+
+/* one pinned timer: a round dial you tap to start, pause or clear */
+function pinnedTimerDial(t) {
+  const phase = timerPhase(t);
+  const left = timerRemaining(t);
+  const done = phase === "done";
+  const frac = t.duration > 0 ? Math.max(0, Math.min(1, left / t.duration)) : 0;
+  /* an idle dial is a full but quiet ring — clearly "ready", not "finished" */
+  const color = done ? "var(--green)" : phase === "paused" ? "var(--steel)" : phase === "idle" ? "var(--raise)" : "var(--gold)";
+  const action = done ? "timer-reset" : phase === "running" ? "timer-pause" : "timer-start";
+
+  return `<button data-action="${action}" data-id="${t.id}" style="flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;gap:7px;padding:2px;color:var(--text)">
+    <div class="${done ? "pb-timer-done " : ""}" style="position:relative;width:74px;height:74px;border-radius:50%">
+      <svg width="74" height="74" viewBox="0 0 74 74" style="display:block;transform:rotate(-90deg)">
+        <circle cx="37" cy="37" r="32" fill="none" stroke="var(--surface2)" stroke-width="6"/>
+        <circle data-tmr-ring="${t.id}" data-ring-c="${PIN_RING_C}" cx="37" cy="37" r="32" fill="none" stroke="${color}" stroke-width="6"
+                stroke-linecap="round" stroke-dasharray="${PIN_RING_C}" stroke-dashoffset="${(PIN_RING_C * (1 - frac)).toFixed(2)}"
+                style="transition:stroke-dashoffset .25s linear"/>
+      </svg>
+      <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center">
+        <div data-tmr-time="${t.id}" class="pb-num" style="font-size:${done ? 13 : 17}px;font-weight:700;line-height:1;color:${done ? "var(--green)" : phase === "idle" ? "var(--muted)" : "var(--text)"}">${done ? "DONE" : fmtClock(left)}</div>
+      </div>
+    </div>
+    <div style="font-size:11px;font-weight:600;color:var(--muted);max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.name)}</div>
+  </button>`;
+}
+
+function renderPinnedModule() {
+  const timers = pinnedTimers();
+  return `<div class="pb-card" style="margin-top:14px;padding:13px 14px 15px">
+    ${sectionTitle("Pinned presets")}
+    ${renderPinnedPresets()}
+    <div class="pb-hairline" style="margin:15px 0 12px"></div>
+    ${sectionTitle("Pinned timers")}
+    ${timers.length
+      ? `<div style="display:flex;align-items:flex-start;gap:6px">${timers.map(pinnedTimerDial).join("")}</div>`
+      : `<div style="font-size:12.5px;color:var(--faint);line-height:1.5;padding:0 2px">
+          Nothing pinned yet. Open the <b style="color:var(--muted)">Timer</b> tab and tap ${icon("pin", 11)} on up to three timers.
+        </div>`}
+  </div>`;
+}
+
+function renderHome(settings, radar, currentWeek, unit) {
   const deloadBanner = radar
     ? `<div class="pb-card" style="border-color:rgba(233,185,73,.4);background:rgba(233,185,73,.07)">
         <button data-action="toggle-deload" style="width:100%;display:flex;gap:10px;align-items:center;padding:12px 14px;text-align:left">
@@ -795,7 +975,10 @@ function renderHome(settings, log, radar, currentWeek, unit, badges) {
           <div style="font-size:12.5px;font-weight:600;letter-spacing:.32em;color:var(--gold)">TRACKER</div>
         </div>
       </div>
-      <button data-action="open-profile" style="color:var(--muted);padding:8px;flex-shrink:0">${icon("settings", 22)}</button>
+      <div style="display:flex;align-items:center;gap:2px;flex-shrink:0">
+        <button data-action="open-body" title="Body measurements" style="color:var(--muted);padding:8px">${icon("ruler", 22)}</button>
+        <button data-action="open-profile" style="color:var(--muted);padding:8px">${icon("settings", 22)}</button>
+      </div>
     </div>
 
     <div class="pb-num" style="font-size:27px;font-weight:700;line-height:1.1">
@@ -811,18 +994,14 @@ function renderHome(settings, log, radar, currentWeek, unit, badges) {
 
     ${deloadBanner ? `<div style="margin-top:12px">${deloadBanner}</div>` : ""}
 
-    <div style="display:flex;gap:8px;margin-top:14px">
-      ${stat("Workouts", new Set(log.map((e) => e.date)).size)}
-      ${stat("Total sets", totalSets)}
-      ${stat("PRs beaten", prCount, "", "var(--gold)")}
-    </div>
+    ${renderPinnedModule()}
 
     <div style="margin-top:22px">
       ${sectionTitle("How this works")}
 
       ${accordion("howto", "How to use this (2 minutes)", icon("info", 16, 'style="color:var(--blue)"'), `
         ${B("1.")} Set your name, default unit and program start date in ${B("Profile")} (gear icon). The default is just where each new exercise starts, you can switch kg/lbs on any individual lift as you log it.<br>
-        ${B("2.")} Each time you train, tap ${B("+")} and add one entry per exercise: the exercise, the ${B("weight and reps of your top set")}, how many ${B("total sets")} you did, and RPE. The top set drives your progress; total sets feed your weekly volume.<br>
+        ${B("2.")} Each time you train, tap ${B("+")} and add one entry per exercise, then log ${B("every set")} inside it: reps, weight and RPE, one row per set. Your ${B("best")} set drives your progress; the number of sets feeds your weekly volume.<br>
         ${B("3.")} The app does the thinking: it estimates your 1-rep max, tells you if you beat your best, adds up weekly volume per muscle group, keeps your PRs on the Progress tab, and tracks any Goal 1RM you set.<br>
         ${B("4.")} Can't (or won't) do a lift? Open the ${B("Library")}. Squat, deadlift and the other "must-do" lifts all have real alternatives listed, with the reason you'd swap: bad back, bad knees, bad shoulders, we've got you.<br>
         ${B("5.")} Every week or two, glance at ${B("Volume")} (any muscle groups getting ignored?) and ${B("Progress")} (are the numbers creeping up?). Slow progress is still progress.<br>
@@ -837,10 +1016,10 @@ function renderHome(settings, log, radar, currentWeek, unit, badges) {
         ${B("4. Keep it tidy.")} ${B("Library → Presets → Edit")} renames a bundle, trims exercises out of it, or deletes it. Editing or deleting a preset never touches the workouts you've already logged.
       `)}
 
-      ${accordion("fsbs", "First set, best set (FSBS)", icon("flame", 16, 'style="color:var(--red)"'), `
-        This tracker logs ${B("one weight and one rep number per exercise per session: your TOP set.")} On purpose. Go into every working set intending to empty the tank on the <i>first</i> one, that top set is the true measure of your strength that day, set before fatigue has a say. If your numbers drop on sets two, three, four, that's expected and it doesn't count against you. What counts is whether you beat your top set from last time.<br><br>
-        Why not log every set? Because a mix of four different rep/weight combos per exercise makes "did I improve?" impossible to answer at a glance. One clean number, logged consistently, beats five messy ones. That's what ${B("Total Sets")} is for, it still feeds your weekly volume, but your strength progress is judged on the set that actually reflects your strength: the first one.<br><br>
-        ${B("Not your philosophy?")} Fair. Open ${B("Profile → Logging mode")} and switch to ${B("Detailed")}: you then add sets one at a time inside an exercise, each with its own reps and weight, and your 1RM comes from whichever set scores highest. Switch back whenever, nothing gets deleted.
+      ${accordion("sets", "Logging set by set", icon("list-checks", 16, 'style="color:var(--red)"'), `
+        Every exercise is logged ${B("one set at a time")}. Open the exercise, tap ${B("Add set")} after each one you finish, and give it its reps, its weight and (optionally) its RPE. Add as many as you actually did, edit or drop any of them.<br><br>
+        Your ${B("best")} set, the one with the highest estimated 1RM, is the number the app judges your progress on: PRs, goals and the progress graph all read it. The ${B("count")} of your sets feeds weekly volume. Nothing else is thrown away, every set stays on the entry.<br><br>
+        ${B("Timers come with you.")} Your whole timer list is repeated at the bottom of the workout window and of each exercise, so you can start your rest without backing out of what you're typing.
       `)}
 
       ${accordion("epley", "A note on the 1RM estimate", icon("trending-up", 16, 'style="color:var(--green)"'), `
@@ -853,7 +1032,7 @@ function renderHome(settings, log, radar, currentWeek, unit, badges) {
       `)}
 
       ${accordion("goal", "Chasing a number: set a Goal 1RM", icon("trophy", 16, 'style="color:var(--gold)"'), `
-        On the Progress tab, every lift you've logged has a ${B("Goal")} cell. Type a target, say a 140 ${unit} bench, and the app fills a progress bar toward it and shows exactly how far you have left. The moment a logged top set pushes your estimated 1RM to that target, the status flips to 🏆 GOAL HIT! and your Goals-hit counter ticks up. Set numbers you'll have to fight for.
+        On the Progress tab, every lift you've logged has a ${B("Goal")} cell. Type a target, say a 140 ${unit} bench, and the app fills a progress bar toward it and shows exactly how far you have left. The moment a logged set pushes your estimated 1RM to that target, the status flips to 🏆 GOAL HIT! and your Goals-hit counter ticks up. Set numbers you'll have to fight for.
       `)}
 
       ${accordion("units", "A note on units", icon("ruler", 16, 'style="color:var(--steel)"'), `
@@ -879,18 +1058,55 @@ function renderLog(log, library, badges, settings, unit, currentWeek) {
   </div>`;
 }
 
+/* Parked days sit above the real history, unmistakably not part of it:
+   dashed, gold, labelled DRAFT, and carrying no week chip or set count
+   because they haven't been counted. Resume finishes the day; delete
+   throws it away. */
+function renderDayDrafts() {
+  const drafts = [...(state.dayDrafts || [])].sort((a, b) => b.savedAt - a.savedAt);
+  if (!drafts.length) return "";
+
+  return drafts.map((d) => {
+    const exs = d.entries || [];
+    const ready = exs.filter(entryHasData).length;
+    return `<div class="pb-card" style="margin-bottom:12px;overflow:hidden;border:1px dashed rgba(233,185,73,.55);background:rgba(233,185,73,.04)">
+      <div style="display:flex;align-items:center;gap:8px;padding:11px 14px 9px">
+        <div class="pb-num" style="font-weight:700;font-size:16.5px;flex:1;min-width:0">${fmtDate(d.date)}</div>
+        ${chip("Draft", "var(--gold)")}
+        ${chip(`${exs.length} exercise${exs.length === 1 ? "" : "s"}`)}
+      </div>
+      <div style="padding:0 14px 10px;display:flex;flex-direction:column;gap:5px">
+        ${exs.map((e) => `<div style="display:flex;align-items:center;gap:8px;font-size:13px;color:${entryHasData(e) ? "var(--muted)" : "var(--faint)"}">
+          <span style="width:8px;height:8px;border-radius:4px;background:${colorFor(e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, state.library, e.muscle))};flex-shrink:0"></span>
+          <span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(e.exercise)}</span>
+          ${entryHasData(e) ? "" : `<span style="font-size:11px;color:var(--faint)">empty</span>`}
+        </div>`).join("")}
+      </div>
+      <div style="font-size:11.5px;color:var(--faint);padding:0 14px 10px;line-height:1.45">
+        Not logged yet, so it counts toward nothing.${ready ? "" : " Nothing in it has numbers on it either."}
+      </div>
+      <div style="display:flex;border-top:1px solid var(--border-soft)">
+        <button data-action="resume-draft" data-id="${esc(d.id)}" style="flex:1;padding:12px;color:var(--gold);font-weight:600;font-size:13px;display:flex;align-items:center;justify-content:center;gap:6px">${icon("pencil", 13)} Continue</button>
+        <button data-action="delete-draft" data-id="${esc(d.id)}" style="flex:1;padding:12px;color:var(--red);font-weight:600;font-size:13px;border-left:1px solid var(--border-soft);display:flex;align-items:center;justify-content:center;gap:6px">${icon("trash-2", 13)} Delete</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+
 function renderHistory(log, library, badges, settings, unit) {
+  const drafts = renderDayDrafts();
+
   if (!log.length)
-    return `<div class="pb-card" style="padding:26px;text-align:center;color:var(--muted);font-size:13.5px;line-height:1.6">
+    return drafts + `<div class="pb-card" style="padding:26px;text-align:center;color:var(--muted);font-size:13.5px;line-height:1.6">
       ${icon("clipboard-list", 26, 'style="margin:0 auto 10px;display:block;color:var(--faint)"')}
-      Nothing here yet. Tap <b style="color:var(--gold)">+</b> to log your first workout, one entry per exercise, top set only.
+      Nothing logged yet. Tap <b style="color:var(--gold)">+</b> to build your first workout, one entry per exercise, then every set inside it.
     </div>`;
 
   const byDate = {};
   for (const e of log) (byDate[e.date] = byDate[e.date] || []).push(e);
   const dates = Object.keys(byDate).sort().reverse();
 
-  return dates.map((date) => {
+  return drafts + dates.map((date) => {
     const entries = byDate[date].sort((a, b) => a.createdAt - b.createdAt);
     const wk = weekOf(date, settings.startDate);
     const sets = entries.filter((e) => e.kind !== "cardio").reduce((a, e) => a + (+e.sets || 0), 0);
@@ -934,8 +1150,7 @@ function renderHistory(log, library, badges, settings, unit) {
 
 function renderVolume(log, library, settings, currentWeek) {
   const week = ui.volumeWeek;
-  const groups = [];
-  for (const ex of library) if (!groups.includes(ex.muscle)) groups.push(ex.muscle);
+  const groups = libraryGroups(library);
   for (const e of log) { const m = e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, library, e.muscle); if (!groups.includes(m)) groups.push(m); }
 
   const vol = volumeForWeek(log, library, settings.startDate, week);
@@ -947,10 +1162,15 @@ function renderVolume(log, library, settings, currentWeek) {
     const isCardio = g === "Cardio";
     const v = vol[g] || 0;
     const unit = isCardio ? "min" : "sets";
-    /* a personal weekly target takes over the assessment when the user sets one.
+    /* A personal weekly target takes over the assessment when the user sets one.
        Everyone's "enough" is different. Muscle groups target sets; cardio targets
-       minutes. No target falls back to the relative "biggest group this week"
-       heuristic (cardio without a target isn't flagged at all). */
+       minutes.
+
+       Without a target the app has no business calling a group neglected — it
+       doesn't know your split. A week with no chest work is a rest from chest,
+       not a failure, and there's no honest way to tell those apart until you've
+       said what you were aiming for. So an untargeted group is only ever flagged
+       "Low", relative to the biggest group you actually trained this week. */
     const target = targets[g] > 0 ? targets[g] : null;
     const editing = ui.volGoalEditing === g;
 
@@ -963,15 +1183,17 @@ function renderVolume(log, library, settings, currentWeek) {
       if (v === 0) { statusChip = chip("Neglected", "var(--red)"); neglected = true; }
       else if (v >= target) statusChip = chip("On target ✓", "var(--green)");
       else statusChip = chip(`${Math.round((target - v) * 10) / 10} ${unit} to go`, "var(--gold)");
-    } else if (!isCardio) {
-      if (v === 0) { statusChip = chip("Neglected", "var(--red)"); neglected = true; }
-      else if (v > 0 && max >= 6 && v < max / 3) statusChip = chip("Low", "var(--gold)");
+    } else if (!isCardio && v > 0 && max >= 6 && v < max / 3) {
+      statusChip = chip("Low", "var(--gold)");
     }
     const barColor = target && v >= target ? "var(--green)" : colorFor(g, i);
 
-    const targetControls = editing
+    /* the bucket isn't a group you own, so there's nothing to aim at */
+    const targetControls = g === UNCATEGORIZED
+      ? `<span style="font-size:11px;color:var(--faint)">give these lifts a group to target them</span>`
+      : editing
       ? `<span style="display:flex;gap:6px;align-items:center">
-          <input class="pb-input" type="number" inputmode="numeric" min="0" data-bind="volGoal" value="${esc(ui.volGoalVal)}" placeholder="${unit}" style="width:74px;padding:5px 8px;font-size:13px" data-autofocus>
+          <input class="pb-input" ${NUM} data-bind="volGoal" value="${esc(ui.volGoalVal)}" placeholder="—" style="width:74px;padding:5px 8px;font-size:13px" data-autofocus>
           <button data-action="save-vol-goal" data-g="${esc(g)}" class="pb-btn pb-gold" style="width:30px;height:30px;border-radius:8px">${icon("check", 15)}</button>
         </span>`
       : `<button data-action="edit-vol-goal" data-g="${esc(g)}" class="pb-chip" style="color:var(--gold);border-color:rgba(233,185,73,.35);background:rgba(233,185,73,.08)">
@@ -1008,7 +1230,7 @@ function renderVolume(log, library, settings, currentWeek) {
     </div>
     <div class="pb-card" style="padding:6px 14px">${rows}</div>
     <div style="font-size:11.5px;color:var(--faint);margin:10px 4px 0;line-height:1.5">
-      Tap <b style="color:var(--gold)">Target</b> to set your own weekly goal for a group, sets for a muscle or minutes for cardio, then each week is judged against your plan, not the biggest group. Enough is different for everyone. Without a target, "Low" means under a third of your biggest group this week.
+      Tap <b style="color:var(--gold)">Target</b> to set your own weekly goal for a group, sets for a muscle or minutes for cardio, then each week is judged against your plan, not the biggest group. Enough is different for everyone. Until you set one, nothing gets called <b style="color:var(--muted)">Neglected</b>, a zero might be a rest, only you know; "Low" just means under a third of your biggest group this week.
     </div>
   </div>`;
 }
@@ -1102,7 +1324,7 @@ function renderGoalRow(r, unit, last, active) {
 
   const goalControls = editing
     ? `<span data-stopprop style="display:flex;gap:6px;align-items:center">
-        <input class="pb-input" type="number" inputmode="decimal" data-bind="goal" value="${esc(ui.goalVal)}" placeholder="goal" style="width:78px;padding:5px 8px;font-size:13px" data-autofocus>
+        <input class="pb-input" ${NUM} data-bind="goal" value="${esc(ui.goalVal)}" placeholder="—" style="width:78px;padding:5px 8px;font-size:13px" data-autofocus>
         <button data-action="save-goal" data-name="${esc(r.name)}" class="pb-btn pb-gold" style="width:30px;height:30px;border-radius:8px">${icon("check", 15)}</button>
       </span>`
     : `<button data-action="edit-goal" data-name="${esc(r.name)}" class="pb-chip" style="color:var(--gold);border-color:rgba(233,185,73,.35);background:rgba(233,185,73,.08)">
@@ -1134,16 +1356,36 @@ function renderGoalRow(r, unit, last, active) {
 
 /* ─────────────────────────── LIBRARY ──────────────────────────────── */
 
+/* Every group the user can choose, in their own order: the registered ones
+   first, then anything a library row still refers to that somehow isn't
+   registered (an old custom exercise, an import). A group with no exercises
+   in it yet is deliberately included — it has to be pickable before it can
+   ever have one. Uncategorized is never here; it isn't a choice. */
 function libraryGroups(library) {
-  const g = []; for (const ex of library) if (!g.includes(ex.muscle)) g.push(ex.muscle); return g;
+  const g = groupNames();
+  for (const ex of library) if (ex.muscle && ex.muscle !== UNCATEGORIZED && !g.includes(ex.muscle)) g.push(ex.muscle);
+  return g;
+}
+
+/* …and the same list with the bucket tacked on the end, for the places that
+   have to SHOW every exercise rather than offer every group. */
+function allGroups(library) {
+  const g = libraryGroups(library);
+  if (library.some((ex) => ex.muscle === UNCATEGORIZED)) g.push(UNCATEGORIZED);
+  return g;
 }
 
 /* An exercise you added on the fly while logging (quick-add from the picker)
    arrives with nothing but a name and a muscle group. That, and only that, is
    what earns the blue NEW flag: it's a to-do, not a badge. Fill in equipment,
    alternatives or details and the flag disappears, at which point the exercise
-   is indistinguishable from the built-in ones, which is the point. */
-const needsDetails = (ex) => !!(ex && ex.custom) && !ex.equipment && !ex.alternatives && !ex.note;
+   is indistinguishable from the built-in ones, which is the point.
+
+   Some exercises don't need any of that — a machine only your gym has, a
+   movement whose name says everything. Dismissing the flag says exactly
+   that, and is the other way off the list. */
+const needsDetails = (ex) =>
+  !!(ex && ex.custom) && !ex.dismissedNew && !ex.equipment && !ex.alternatives && !ex.note;
 
 const newFlag = (ex) => needsDetails(ex)
   ? '<span style="font-size:10px;color:var(--blue);margin-left:6px;font-weight:700;letter-spacing:.06em">NEW</span>'
@@ -1151,7 +1393,7 @@ const newFlag = (ex) => needsDetails(ex)
 
 function renderLibraryList(library) {
   const q = ui.libraryQ, filter = ui.libraryFilter;
-  const groups = libraryGroups(library);
+  const groups = allGroups(library);   // the bucket is shown here, just never offered
   const shown = library.filter((ex) =>
     (filter === "All" || ex.muscle === filter) &&
     (!q || ex.name.toLowerCase().includes(q.toLowerCase())));
@@ -1170,6 +1412,87 @@ function renderLibraryList(library) {
       </button>`).join("")}
     </div>
   </div>`).join("");
+}
+
+/* ─────────────────── MUSCLE GROUPS (add / recolour) ─────────────────
+   The seven built-in groups aren't special: they live in the same list as
+   anything you add, and the colour you give a group is the colour it wears
+   everywhere — the stripe down each logged exercise, the volume bars, the
+   preset dots, the library headings. Renaming one carries every exercise,
+   preset and weekly target across with it, so nothing is orphaned.
+
+   Reached from the ＋ chip after the last category in the Library, and from
+   the same ＋ inside the muscle picker while you're building a workout, so
+   you never have to leave a half-typed day to invent a group.          */
+
+function groupUseCount(name, library) {
+  return (library || []).filter((ex) => ex.muscle === name).length;
+}
+
+function renderGroupSheet(library) {
+  const groups = libraryGroups(library);
+  return sheet("Muscle groups", "groupSheet", `
+    <button data-action="group-new" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:14px;border-style:dashed;border-color:rgba(233,185,73,.45);color:var(--gold);margin-bottom:14px">
+      ${icon("plus", 16)} New group
+    </button>
+    <div class="pb-card" style="overflow:hidden;margin-bottom:12px">
+      ${groups.map((g, i) => `<button data-action="group-edit" data-g="${esc(g)}" style="width:100%;display:flex;align-items:center;gap:11px;padding:11px 14px;text-align:left;color:var(--text);border-bottom:${i < groups.length - 1 ? "1px solid var(--border-soft)" : "none"}">
+        <span style="width:20px;height:20px;border-radius:7px;background:${colorFor(g, i)};flex-shrink:0;border:1px solid var(--border)"></span>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(g)}</div>
+          <div style="font-size:11.5px;color:var(--faint)">${groupUseCount(g, library)} exercise${groupUseCount(g, library) === 1 ? "" : "s"}</div>
+        </div>
+        ${icon("pencil", 14, 'style="color:var(--faint);flex-shrink:0"')}
+      </button>`).join("")}
+    </div>
+    <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 2px">
+      A group's colour is used everywhere it appears: library headings, the stripe beside each logged exercise, weekly volume bars, preset dots. Change it here and it changes everywhere at once.
+    </div>
+  `, 100);
+}
+
+function renderGroupForm() {
+  const f = ui.groupForm;
+  const isNew = !f.orig;
+  const name = (f.name || "").trim();
+  const ok = !!name;
+  const used = f.orig ? groupUseCount(f.orig, state.library) : 0;
+
+  return sheet(isNew ? "New group" : "Edit group", "groupForm", `
+    ${field("Name", `<input class="pb-input" data-bind="group.name" value="${esc(f.name)}" placeholder="—" data-autofocus>`,
+      isNew ? "Forearms, Neck, Grip, Mobility, whatever you actually train."
+            : `Renaming carries all ${used} exercise${used === 1 ? "" : "s"} in this group across with it.`)}
+
+    ${field("Colour", `
+      <div style="display:flex;flex-wrap:wrap;gap:8px">
+        ${GROUP_SWATCHES.map((c) => `<button data-action="group-color" data-c="${c}" title="${c}" style="width:34px;height:34px;border-radius:10px;background:${c};border:2px solid ${String(f.color).toLowerCase() === c ? "var(--text)" : "transparent"};box-shadow:0 0 0 1px var(--border)"></button>`).join("")}
+        <label style="width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;background:var(--surface2);border:1px solid var(--border);color:var(--muted);cursor:pointer" title="Any other colour">
+          ${icon("pipette", 15)}
+          <input type="color" data-bind="group.color" value="${esc(f.color)}" style="width:0;height:0;opacity:0;border:0;padding:0">
+        </label>
+      </div>`)}
+
+    <div class="pb-card2" style="padding:12px 14px;display:flex;align-items:center;gap:11px;margin-bottom:16px">
+      <span style="width:26px;height:26px;border-radius:9px;background:${f.color};flex-shrink:0;border:1px solid var(--border)"></span>
+      <div style="flex:1;min-width:0">
+        <div id="groupPreviewName" style="font-weight:600;font-size:14px">${name ? esc(name) : "Your new group"}</div>
+        <div style="font-size:11.5px;color:var(--faint)">this is how it will look everywhere</div>
+      </div>
+      <span style="width:4px;height:26px;border-radius:2px;background:${f.color};flex-shrink:0"></span>
+    </div>
+
+    <button id="groupSaveBtn" data-action="group-save" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
+      ${icon("check", 16)} ${isNew ? "Create group" : "Save changes"}
+    </button>
+    ${!isNew ? `<button data-action="group-delete" class="pb-btn" style="width:100%;padding:12px 0;margin-top:10px;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">
+      ${icon("trash-2", 15)} Delete group
+    </button>
+    <div style="font-size:11.5px;color:var(--faint);margin-top:8px;line-height:1.5">
+      ${used
+        ? `Deleting the group doesn't delete exercises. Its ${used} exercise${used === 1 ? "" : "s"} move to <b style="color:var(--muted)">Uncategorized</b> at the bottom of the library, where you can re-file ${used === 1 ? "it" : "them"} whenever. Logged workouts are untouched either way.`
+        : "This group is empty, so deleting it changes nothing else."}
+    </div>` : ""}
+  `, 110);
 }
 
 /* reusable "History / Weekly Volume"-style pill toggle */
@@ -1199,18 +1522,22 @@ function renderExercisesLibrary(library) {
     </div>
     <div style="display:flex;flex-wrap:wrap;gap:6px;padding-bottom:10px">
       ${["All", ...groups].map((g) => `<button data-action="lib-filter" data-id="${esc(g)}" class="pb-chip" style="flex-shrink:0;padding:6px 12px;font-size:12.5px;color:${ui.libraryFilter === g ? "var(--gold-ink)" : "var(--muted)"};background:${ui.libraryFilter === g ? "var(--gold)" : "var(--surface2)"};border-color:${ui.libraryFilter === g ? "var(--gold)" : "var(--border)"}">${esc(g)}</button>`).join("")}
+      <button data-action="open-groups" title="Add or edit muscle groups" class="pb-chip" style="flex-shrink:0;padding:6px 11px;font-size:12.5px;color:var(--gold);background:rgba(233,185,73,.08);border-color:rgba(233,185,73,.4)">${icon("plus", 13, 'stroke-width="2.6"')}</button>
     </div>
 
     ${incomplete.length > 0 ? `<div class="pb-card" style="border-color:rgba(93,139,204,.35);background:rgba(93,139,204,.06);padding:11px 12px 9px;margin-bottom:10px;font-size:12.5px;color:var(--muted);line-height:1.5">
       <b style="color:var(--blue)">Added from your log, details missing:</b>
       <div style="margin:7px 0 8px">
-        ${incomplete.map((x) => `<button data-action="open-exercise-window" data-name="${esc(x.name)}" style="display:flex;align-items:center;gap:8px;width:100%;padding:4px 0;color:var(--text);font-size:13px;font-weight:600;text-align:left">
-          <span style="width:5px;height:5px;border-radius:3px;background:var(--blue);flex-shrink:0"></span>
-          <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(x.name)}</span>
-          ${icon("chevron-right", 14, 'style="color:var(--faint);flex-shrink:0"')}
-        </button>`).join("")}
+        ${incomplete.map((x) => `<div style="display:flex;align-items:center;gap:8px">
+          <button data-action="open-exercise-window" data-name="${esc(x.name)}" style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;padding:4px 0;color:var(--text);font-size:13px;font-weight:600;text-align:left">
+            <span style="width:5px;height:5px;border-radius:3px;background:var(--blue);flex-shrink:0"></span>
+            <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(x.name)}</span>
+            ${icon("chevron-right", 14, 'style="color:var(--faint);flex-shrink:0"')}
+          </button>
+          <button data-action="dismiss-new" data-name="${esc(x.name)}" title="Dismiss, no details needed" style="flex-shrink:0;padding:4px 2px 4px 6px;color:var(--faint)">${icon("x", 14)}</button>
+        </div>`).join("")}
       </div>
-      Tap one to fill in its equipment &amp; alternatives when you're ready.
+      Tap one to fill in its equipment &amp; alternatives when you're ready, or ✕ to take it off this list as-is.
     </div>` : ""}
 
     <button data-action="add-exercise" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:14px;margin-bottom:12px;border-style:dashed;border-color:var(--border)">
@@ -1237,7 +1564,7 @@ function newEntry(name, muscle, kind, createdAt = Date.now()) {
     unit: state.settings.units,   // starting pick, changeable per exercise
     createdAt,
   };
-  if (e.kind !== "cardio" && state.settings.loggingMode === "detailed") e.setList = [];
+  if (e.kind !== "cardio") e.setList = [];
   return e;
 }
 
@@ -1267,9 +1594,10 @@ function renderPresets() {
     const exs = p.exercises || [];
     return `<div class="pb-card" style="margin-bottom:12px;overflow:hidden">
       <div style="padding:13px 14px">
-        <div style="display:flex;align-items:baseline;gap:8px">
+        <div style="display:flex;align-items:center;gap:8px">
           <div class="pb-num" style="font-weight:700;font-size:16.5px;flex:1;min-width:0">${esc(p.name)}</div>
           ${chip(presetCountLabel(exs.length), "var(--gold)")}
+          <button data-action="preset-pin" data-id="${esc(p.id)}" title="${p.pinned ? "Unpin from home" : "Pin to home"}" style="flex-shrink:0;padding:4px;color:${p.pinned ? "var(--gold)" : "var(--faint)"}">${icon(p.pinned ? "pin-off" : "pin", 16)}</button>
         </div>
         ${p.description ? `<div style="font-size:12.5px;color:var(--muted);margin-top:3px">${esc(p.description)}</div>` : ""}
         <div style="display:flex;flex-direction:column;gap:6px;margin-top:11px">${presetExerciseList(exs)}</div>
@@ -1280,7 +1608,7 @@ function renderPresets() {
       </div>
     </div>`;
   }).join("") + `<div style="font-size:12px;color:var(--faint);line-height:1.55;margin:2px 4px 10px">
-      Presets save the <i>exercises</i>, not the numbers. When you use one, each move comes in blank so you log fresh sets, reps and weight every session, that's what keeps your progress honest.
+      Tap ${icon("pin", 11)} to keep a bundle on the home screen, one tap from starting the day. Presets save the <i>exercises</i>, not the numbers. When you use one, each move comes in blank so you log fresh sets, reps and weight every session, that's what keeps your progress honest.
     </div>`;
 }
 
@@ -1290,8 +1618,8 @@ function renderPresetView() {
   const exs = p.exercises || [];
   const canSave = !!(p.name && p.name.trim());
   return sheet("Edit preset", "presetView", `
-    ${field("Name", `<input class="pb-input" data-bind="presetView.name" value="${esc(p.name)}" placeholder="Back &amp; Shoulder day">`)}
-    ${field("Description", `<input class="pb-input" data-bind="presetView.description" value="${esc(p.description)}" placeholder="lat pulldown focus">`, "Optional, a quick reminder of what's inside.")}
+    ${field("Name", `<input class="pb-input" data-bind="presetView.name" value="${esc(p.name)}" placeholder="—">`)}
+    ${field("Description", `<input class="pb-input" data-bind="presetView.description" value="${esc(p.description)}" placeholder="—">`, "Optional, a quick reminder of what's inside.")}
     ${sectionTitle(`Exercises · ${presetCountLabel(exs.length)}`)}
     <div class="pb-card" style="overflow:hidden;margin-bottom:16px">
       ${exs.length ? exs.map((ex, i) => `<div style="display:flex;align-items:center;gap:10px;padding:11px 14px;border-bottom:${i < exs.length - 1 ? "1px solid var(--border-soft)" : "none"}">
@@ -1303,6 +1631,9 @@ function renderPresetView() {
         <button data-action="remove-preset-exercise" data-i="${i}" title="Remove from preset" style="color:var(--red);padding:6px">${icon("x", 16)}</button>
       </div>`).join("") : `<div style="padding:16px;text-align:center;color:var(--faint);font-size:12.5px;line-height:1.5">No exercises left. Delete this preset, or build a new one from a workout.</div>`}
     </div>
+    <button data-action="presetview-pin" class="pb-btn" style="width:100%;padding:11px 0;font-size:13.5px;margin-bottom:12px;background:${p.pinned ? "rgba(233,185,73,.12)" : "var(--surface2)"};color:${p.pinned ? "var(--gold)" : "var(--muted)"};border:1px solid ${p.pinned ? "rgba(233,185,73,.4)" : "var(--border)"}">
+      ${icon(p.pinned ? "pin-off" : "pin", 15)} ${p.pinned ? "Pinned to home" : "Pin to home"}
+    </button>
     <button data-action="save-preset-edits" ${canSave ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${canSave ? 1 : 0.45}">${icon("check", 16)} Save changes</button>
     <button data-action="delete-preset" data-id="${esc(p.id)}" class="pb-btn" style="width:100%;padding:12px 0;margin-top:10px;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">${icon("trash-2", 15)} Delete preset</button>
   `);
@@ -1318,8 +1649,8 @@ function renderPresetForm() {
     <div style="font-size:13px;color:var(--muted);line-height:1.55;margin-bottom:14px">
       Save this day's ${exs.length} exercise${exs.length === 1 ? "" : "s"} as a reusable bundle. Only the exercises are kept, not the sets, reps or weight, so you can drop them into any future day and just log fresh numbers.
     </div>
-    ${field("Preset name *", `<input class="pb-input" data-bind="preset.name" value="${esc(f.name)}" placeholder="e.g. Back &amp; Shoulder day" data-autofocus>`)}
-    ${field("Description", `<input class="pb-input" data-bind="preset.description" value="${esc(f.description)}" placeholder="e.g. lat pulldown focus">`, "Optional, a quick hint about what's inside.")}
+    ${field("Preset name *", `<input class="pb-input" data-bind="preset.name" value="${esc(f.name)}" placeholder="—" data-autofocus>`)}
+    ${field("Description", `<input class="pb-input" data-bind="preset.description" value="${esc(f.description)}" placeholder="—">`, "Optional, a quick hint about what's inside.")}
     ${sectionTitle(`Included · ${presetCountLabel(exs.length)}`)}
     <div class="pb-card" style="overflow:hidden;margin-bottom:16px">
       ${exs.map((e, i) => `<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:${i < exs.length - 1 ? "1px solid var(--border-soft)" : "none"}">
@@ -1409,8 +1740,14 @@ function exWindowViewBody(ex) {
     <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px">
       ${chip(esc(ex.muscle), colorFor(ex.muscle))}
       ${ex.type ? chip(esc(ex.type)) : ""}
-      ${needsDetails(ex) ? chip("NEW", "var(--blue)") : ""}
+      ${needsDetails(ex)
+        ? `${chip("NEW", "var(--blue)")}
+           <button data-action="dismiss-new" data-name="${esc(ex.name)}" class="pb-chip" style="color:var(--faint);gap:5px">${icon("check", 11)} Dismiss</button>`
+        : ""}
     </div>
+    ${needsDetails(ex) ? `<div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:-8px 0 16px">
+      Flagged because it was added straight from your log with nothing but a name. Fill in the details below, or dismiss it if this one doesn't need any.
+    </div>` : ""}
 
     ${ex.image
       ? `<img src="${esc(ex.image)}" alt="${esc(ex.name)}" style="width:100%;max-height:300px;object-fit:cover;border-radius:14px;border:1px solid var(--border);margin-bottom:18px;display:block">`
@@ -1439,13 +1776,16 @@ function exWindowViewBody(ex) {
 function exWindowEditBody(f, library) {
   const groups = libraryGroups(library);
   const vid = youtubeId(f.video);
-  const musclePicker = ui.exWinNewGroup
-    ? `<input class="pb-input" data-bind="exwin.muscle" value="${esc(f.muscle)}" placeholder="New muscle group…" data-autofocus>`
-    : `<select class="pb-input" data-bind="exwinMuscle">
-        <option value="" disabled${f.muscle === "" ? " selected" : ""}>Choose group…</option>
-        ${groups.map((g) => `<option value="${esc(g)}"${f.muscle === g ? " selected" : ""}>${esc(g)}</option>`).join("")}
-        <option value="__new">＋ New group…</option>
-      </select>`;
+  /* Picking "＋ New group" hands off to the same group editor the Library
+     uses, so a group invented here arrives with a colour like any other. */
+  const musclePicker = `<div style="display:flex;gap:8px;align-items:center">
+    <select class="pb-input" data-bind="exwinMuscle" style="flex:1">
+      <option value="" disabled${f.muscle === "" ? " selected" : ""}>Choose group…</option>
+      ${groups.map((g) => `<option value="${esc(g)}"${f.muscle === g ? " selected" : ""}>${esc(g)}</option>`).join("")}
+      <option value="__new">＋ New group…</option>
+    </select>
+    <button data-action="group-new" data-then="exwin" title="New muscle group" class="pb-btn" style="flex-shrink:0;width:42px;height:42px;color:var(--gold);background:rgba(233,185,73,.08);border:1px solid rgba(233,185,73,.4)">${icon("plus", 17, 'stroke-width="2.6"')}</button>
+  </div>`;
 
   const imageBlock = f.image
     ? `<div style="position:relative;margin-bottom:8px">
@@ -1463,18 +1803,18 @@ function exWindowEditBody(f, library) {
       </label>`;
 
   return `
-    ${field("Name *", `<input class="pb-input" data-bind="exwin.name" value="${esc(f.name)}" placeholder="e.g. Pendlay Row">`)}
+    ${field("Name *", `<input class="pb-input" data-bind="exwin.name" value="${esc(f.name)}" placeholder="—">`)}
     ${field("Muscle group trained *", musclePicker, "Only name and muscle group are required, the rest is optional but recommended.")}
     ${field("Type", `<select class="pb-input" data-bind="exwin.type">${["Compound", "Isolation", "Cardio"].map((t) => `<option${f.type === t ? " selected" : ""}>${t}</option>`).join("")}</select>`)}
 
     ${field("Photo", imageBlock, "Snap the exact machine at your gym so this exercise always looks familiar.")}
 
-    ${field("Tutorial video (YouTube link)", `<input class="pb-input" type="url" inputmode="url" data-bind="exwin.video" value="${esc(f.video)}" placeholder="https://youtube.com/watch?v=…">`,
+    ${field("Tutorial video (YouTube link)", `<input class="pb-input" type="url" inputmode="url" data-bind="exwin.video" value="${esc(f.video)}" placeholder="—">`,
       vid ? "Looks good, this plays right inside the exercise." : (f.video ? "Couldn't read a YouTube id from that, it'll show as a plain link." : "Paste a link and the tutorial plays inside the app."))}
 
-    ${field("Details", `<textarea class="pb-input" rows="4" data-bind="exwin.note" placeholder="The 2 main muscles it trains, plus a tip or when to swap it…" style="resize:none">${esc(f.note)}</textarea>`, "The 2 main muscles trained in plain terms (mid chest, tricep long head, quads…), plus a tip or a reason to swap.")}
-    ${field("Equipment", `<input class="pb-input" data-bind="exwin.equipment" value="${esc(f.equipment)}" placeholder="Barbell, cables…">`)}
-    ${field("Alternatives", `<input class="pb-input" data-bind="exwin.alternatives" value="${esc(f.alternatives)}" placeholder="Exercise A · Exercise B">`)}
+    ${field("Details", `<textarea class="pb-input" rows="4" data-bind="exwin.note" placeholder="—" style="resize:none">${esc(f.note)}</textarea>`, "The 2 main muscles trained in plain terms (mid chest, tricep long head, quads…), plus a tip or a reason to swap.")}
+    ${field("Equipment", `<input class="pb-input" data-bind="exwin.equipment" value="${esc(f.equipment)}" placeholder="—">`)}
+    ${field("Alternatives", `<input class="pb-input" data-bind="exwin.alternatives" value="${esc(f.alternatives)}" placeholder="—">`)}
 
     ${!(ui.exWin && ui.exWin.isNew) ? `<button data-action="exwin-delete" class="pb-btn" style="width:100%;padding:12px 0;margin-top:6px;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">
       ${icon("trash-2", 15)} Delete exercise
@@ -1526,7 +1866,7 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
 
   return fullScreen(50, `
     <div style="display:flex;align-items:center;gap:10px;padding:14px 16px 10px;border-bottom:1px solid var(--border-soft)">
-      <button data-action="close-worksheet" style="color:var(--muted);padding:4px">${icon("x", 21)}</button>
+      <button data-action="close-worksheet" title="${draft.editing ? "Close" : "Close, keeping this as a draft"}" style="color:var(--muted);padding:4px">${icon("x", 21)}</button>
       <div class="pb-num" style="font-size:19px;font-weight:700;flex:1">${draft.editing ? "Edit Workout" : "New Workout"}</div>
       ${chip("Week " + wk, "var(--gold)")}
       ${draft.editing ? `<button data-action="delete-day" title="Delete this whole day" style="color:var(--red);padding:4px">${icon("trash-2", 19)}</button>` : ""}
@@ -1537,19 +1877,20 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
 
       ${sectionTitle("Exercises this session")}
       ${draft.entries.length === 0 ? `<div class="pb-card" style="padding:20px;text-align:center;color:var(--faint);font-size:13px;line-height:1.5;margin-bottom:10px">
-        ${state.settings.loggingMode === "detailed"
-          ? `One entry per exercise, then log <b style="color:var(--muted)">every set</b> inside it.`
-          : `One entry per exercise. Log your <b style="color:var(--muted)">top set</b>, first set, best set.`}
+        One entry per exercise, then log <b style="color:var(--muted)">every set</b> inside it.
       </div>` : ""}
       ${entries}
 
       <button data-action="open-picker" class="pb-btn pb-ghost" style="width:100%;padding:13px 0;border-style:dashed;margin-top:4px">
         ${icon("plus", 17)} Add exercise
       </button>
+
+      ${renderTimerList()}
     </div>
 
     <div style="position:absolute;bottom:0;left:0;right:0;padding:12px 16px 18px;background:linear-gradient(transparent, var(--bg) 30%)">
       ${emptyCount ? `<div style="font-size:11.5px;color:var(--faint);text-align:center;margin-bottom:8px;line-height:1.45">${emptyCount} exercise${emptyCount > 1 ? "s" : ""} still need${emptyCount > 1 ? "" : "s"} data, ${emptyCount > 1 ? "they" : "it"} won't be saved until you fill ${emptyCount > 1 ? "them" : "it"} in.</div>` : ""}
+      ${!draft.editing && draft.entries.length ? `<div style="font-size:11.5px;color:var(--faint);text-align:center;margin-bottom:8px;line-height:1.45">Closing this window keeps the day as a draft in your log, nothing is lost.</div>` : ""}
       ${draft.entries.length ? `<button data-action="save-as-preset" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:14.5px;margin-bottom:8px">
         ${icon("bookmark-plus", 16)} Save as Preset
       </button>` : ""}
@@ -1563,7 +1904,10 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
 /* exercise picker with quick-add (name + muscle only, like the sheet) */
 function renderPickerList(library) {
   const q = ui.pickerQ, quick = ui.pickerQuick;
-  const groups = libraryGroups(library);
+  /* two different lists on one screen: you can pick an uncategorized lift, but
+     you can never file a new one into the bucket by hand */
+  const groups = allGroups(library);
+  const pickable = libraryGroups(library);
   const match = library.filter((x) => !q || x.name.toLowerCase().includes(q.toLowerCase()));
   const exact = library.some((x) => x.name.toLowerCase() === q.trim().toLowerCase());
 
@@ -1577,9 +1921,10 @@ function renderPickerList(library) {
     html += `<div class="pb-card" style="padding:14px;margin-bottom:12px">
       <div style="font-weight:700;font-size:14px;margin-bottom:10px">“${esc(quick.name)}”, which muscle does it train?</div>
       <div style="display:flex;flex-wrap:wrap;gap:6px">
-        ${groups.map((g) => `<button data-action="quick-add-muscle" data-g="${esc(g)}" class="pb-chip" style="padding:8px 14px;font-size:13px;color:${colorFor(g)};border-color:${colorFor(g)}55;background:${colorFor(g)}14">${esc(g)}</button>`).join("")}
+        ${pickable.map((g) => `<button data-action="quick-add-muscle" data-g="${esc(g)}" class="pb-chip" style="padding:8px 14px;font-size:13px;color:${colorFor(g)};border-color:${colorFor(g)}55;background:${colorFor(g)}14">${esc(g)}</button>`).join("")}
+        <button data-action="group-new" data-then="quickadd" title="New muscle group" class="pb-chip" style="padding:8px 12px;font-size:13px;color:var(--gold);border-color:rgba(233,185,73,.4);background:rgba(233,185,73,.08)">${icon("plus", 13, 'stroke-width="2.6"')}</button>
       </div>
-      <div style="font-size:11.5px;color:var(--faint);margin-top:10px">Name + muscle is all it needs to appear in the log. Fill in the rest later in the Library.</div>
+      <div style="font-size:11.5px;color:var(--faint);margin-top:10px">Name + muscle is all it needs to appear in the log. Missing a group? Tap ＋ to make one right here, no trip to the Library.</div>
     </div>`;
   }
   html += groups.filter((g) => match.some((x) => x.muscle === g)).map((g) => `<div style="margin-bottom:14px">
@@ -1724,29 +2069,29 @@ function renderEntryFields(form, unit) {
 
   const inputs = cardio
     ? `<div style="display:flex;gap:10px">
-        <div style="flex:1">${field("Time (minutes)", `<input class="pb-input" type="number" inputmode="decimal" data-bind="entry.minutes" value="${esc(f.minutes)}" placeholder="30">`)}</div>
-        <div style="flex:1">${field("Intensity (RPE 1–10)", `<input class="pb-input" type="number" inputmode="decimal" min="1" max="10" data-bind="entry.intensity" value="${esc(f.intensity)}" placeholder="6">`)}</div>
+        <div style="flex:1">${field("Time (minutes)", `<input class="pb-input" ${NUM} data-bind="entry.minutes" value="${esc(f.minutes)}" placeholder="—">`)}</div>
+        <div style="flex:1">${field("Intensity (RPE 1–10)", `<input class="pb-input" ${NUM} data-bind="entry.intensity" value="${esc(f.intensity)}" placeholder="—">`)}</div>
       </div>`
     : detailed
     ? renderSetList(f, eUnit)
     : `<div style="display:flex;gap:10px">
-        <div style="flex:1">${field("Total sets", `<input class="pb-input" type="number" inputmode="numeric" data-bind="entry.sets" value="${esc(f.sets)}" placeholder="3">`)}</div>
-        <div style="flex:1">${field("Top set reps", `<input class="pb-input" type="number" inputmode="numeric" data-bind="entry.reps" value="${esc(f.reps)}" placeholder="8">`)}</div>
+        <div style="flex:1">${field("Total sets", `<input class="pb-input" ${NUM} data-bind="entry.sets" value="${esc(f.sets)}" placeholder="—">`)}</div>
+        <div style="flex:1">${field("Top set reps", `<input class="pb-input" ${NUM} data-bind="entry.reps" value="${esc(f.reps)}" placeholder="—">`)}</div>
       </div>
       <div style="display:flex;gap:10px">
-        <div style="flex:1">${field(labelWith("Top set weight", unitSelect(eUnit)), `<input class="pb-input" type="number" inputmode="decimal" data-bind="entry.weight" value="${esc(f.weight)}" placeholder="80">`,
+        <div style="flex:1">${field(labelWith("Top set weight", unitSelect(eUnit)), `<input class="pb-input" ${NUM} data-bind="entry.weight" value="${esc(f.weight)}" placeholder="—">`,
           "Log what the machine says, the unit is per exercise.")}</div>
-        <div style="flex:1">${field(labelWith("RPE (1–10)"), `<input class="pb-input" type="number" inputmode="decimal" min="1" max="10" step="0.5" data-bind="entry.rpe" value="${esc(f.rpe)}" placeholder="8">`, "10 = nothing left")}</div>
+        <div style="flex:1">${field(labelWith("RPE (1–10)"), `<input class="pb-input" ${NUM} data-bind="entry.rpe" value="${esc(f.rpe)}" placeholder="—">`, "10 = nothing left")}</div>
       </div>`;
 
-  /* An entry keeps whatever shape it was logged in, so nothing is ever lost by
-     flipping the setting. This is the one-way door out of a single top set, and
-     only offered while Detailed mode is on. */
-  const convert = !cardio && !detailed && state.settings.loggingMode === "detailed"
+  /* Entries logged before per-set logging existed have no setList and are left
+     exactly as they were. This is the opt-in door across: it keeps the recorded
+     top set as set 1 and lets the rest be filled in. */
+  const convert = !cardio && !detailed
     ? `<button data-action="entry-to-detailed" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;font-size:13.5px;margin-bottom:14px;border-style:dashed;color:var(--gold);border-color:rgba(233,185,73,.45)">
         ${icon("list-plus", 15)} Log this one set by set
       </button>
-      <div style="font-size:11.5px;color:var(--faint);margin:-8px 2px 14px;line-height:1.5">Logged before you switched modes. Converting keeps the top set as set 1, then you add the rest.</div>`
+      <div style="font-size:11.5px;color:var(--faint);margin:-8px 2px 14px;line-height:1.5">An older entry that recorded one top set and a total. Converting keeps that set as set 1, then you add the rest.</div>`
     : "";
 
   return fullScreen(70, `
@@ -1763,7 +2108,7 @@ function renderEntryFields(form, unit) {
       ${!isDraft ? field("Date", `<input type="date" class="pb-input" data-bind="entry.date" value="${esc(f.date)}">`) : ""}
       ${convert}
       ${inputs}
-      ${field("Personal notes", `<textarea class="pb-input" rows="2" data-bind="entry.notes" placeholder="Felt strong · slow eccentric · new grip…" style="resize:none">${esc(f.notes)}</textarea>`,
+      ${field("Personal notes", `<textarea class="pb-input" rows="2" data-bind="entry.notes" placeholder="—" style="resize:none">${esc(f.notes)}</textarea>`,
         detailed ? "One note for the whole exercise, it covers every set above." : "")}
 
       <!-- live computed row — the sheet's Est. 1RM + "vs. Your Best" -->
@@ -1782,6 +2127,8 @@ function renderEntryFields(form, unit) {
       ${detailed ? `<div style="font-size:11.5px;color:var(--faint);margin:8px 2px 0;line-height:1.5">
         Your <b style="color:var(--muted)">highest</b> estimated 1RM across every set above is what counts toward PRs and the Progress graph. All the sets stay saved either way.
       </div>` : ""}
+
+      ${renderTimerList()}
     </div>
 
     <div style="position:absolute;bottom:0;left:0;right:0;padding:12px 16px 18px;background:linear-gradient(transparent, var(--bg) 30%)">
@@ -1799,11 +2146,11 @@ function renderSetForm(form, unit) {
   const ok = setHasData(s);
   return sheet(isNew ? `Add set ${index + 1}` : `Edit set ${index + 1}`, "setForm", `
     <div style="display:flex;gap:10px">
-      <div style="flex:1">${field(labelWith("Reps"), `<input class="pb-input" type="number" inputmode="numeric" min="1" data-bind="set.reps" value="${esc(s.reps)}" placeholder="8" data-autofocus>`)}</div>
-      <div style="flex:1">${field(labelWith("Weight", unitSelect(unit)), `<input class="pb-input" type="number" inputmode="decimal" min="0" step="0.5" data-bind="set.weight" value="${esc(s.weight)}" placeholder="80">`,
+      <div style="flex:1">${field(labelWith("Reps"), `<input class="pb-input" ${NUM} data-bind="set.reps" value="${esc(s.reps)}" placeholder="—" data-autofocus>`)}</div>
+      <div style="flex:1">${field(labelWith("Weight", unitSelect(unit)), `<input class="pb-input" ${NUM} data-bind="set.weight" value="${esc(s.weight)}" placeholder="—">`,
         "Applies to every set of this exercise.")}</div>
     </div>
-    ${field("RPE (1–10)", `<input class="pb-input" type="number" inputmode="decimal" min="1" max="10" step="0.5" data-bind="set.rpe" value="${esc(s.rpe)}" placeholder="8">`, "Optional. 10 = nothing left in the tank.")}
+    ${field("RPE (1–10)", `<input class="pb-input" ${NUM} data-bind="set.rpe" value="${esc(s.rpe)}" placeholder="—">`, "Optional. 10 = nothing left in the tank.")}
 
     <div class="pb-card2" style="padding:11px 14px;display:flex;align-items:center;gap:12px;margin-bottom:14px">
       <div>
@@ -1847,7 +2194,25 @@ function updateEntryPreview() {
   if (s) { s.disabled = !valid; s.style.opacity = valid ? 1 : 0.45; }
 }
 
-/* ─────────────────────────── BODY TAB ─────────────────────────────── */
+/* ───────────────────── BODY MEASUREMENTS (window) ───────────────────
+   Body check-ins happen every week or two, not every session, so they no
+   longer take up one of the five slots along the bottom of the screen.
+   The whole section, unchanged, opens as a window from the ruler button
+   sitting next to the gear — same list, same stats, same editor. */
+
+function renderBodyWindow(body, unit) {
+  return fullScreen(80, `
+    <div style="display:flex;align-items:center;gap:10px;padding:14px 16px 10px;border-bottom:1px solid var(--border-soft)">
+      <button data-action="close-body" style="color:var(--muted);padding:4px">${icon("x", 21)}</button>
+      ${icon("ruler", 19, 'style="color:var(--gold);flex-shrink:0"')}
+      <div class="pb-num" style="font-size:19px;font-weight:700;flex:1">Body Measurements</div>
+      <button data-action="new-body" class="pb-btn pb-gold" style="padding:8px 14px;font-size:13.5px">${icon("plus", 15)} New</button>
+    </div>
+    <div class="pb-scroll" data-scrollkey="bodywin" style="flex:1;overflow-y:auto;padding-bottom:30px">
+      ${renderBody(body, unit)}
+    </div>
+  `, "bodyWin");
+}
 
 function renderBody(body, unit) {
   const t = bodyTrend(body);
@@ -1856,7 +2221,7 @@ function renderBody(body, unit) {
   const list = rows.length === 0
     ? `<div class="pb-card" style="padding:26px;text-align:center;color:var(--muted);font-size:13.5px;line-height:1.6">
         ${icon("ruler", 26, 'style="margin:0 auto 10px;display:block;color:var(--faint)"')}
-        The workout log for your body. Tap <b style="color:var(--gold)">+</b> to add your first check-in, once a week or two, same time of day, before food.
+        The workout log for your body. Tap <b style="color:var(--gold)">New</b> up top to add your first check-in, once a week or two, same time of day, before food.
       </div>`
     : `<div class="pb-card" style="overflow:hidden;margin-bottom:14px">
         ${rows.map((r, i) => `<button data-action="edit-body" data-id="${r.id}" style="width:100%;text-align:left;padding:12px 14px;display:flex;gap:10px;align-items:center;color:var(--text);border-bottom:${i < rows.length - 1 ? "1px solid var(--border-soft)" : "none"}">
@@ -1894,7 +2259,7 @@ function renderBody(body, unit) {
 
 function renderBodyFormSheet(f, unit) {
   const isNew = ui.bodyFormWasNew;
-  const num = (label, bind, val) => `<div style="flex:1">${field(label, `<input class="pb-input" type="number" inputmode="decimal" data-bind="${bind}" value="${esc(val)}">`)}</div>`;
+  const num = (label, bind, val) => `<div style="flex:1">${field(label, `<input class="pb-input" ${NUM} data-bind="${bind}" value="${esc(val)}">`)}</div>`;
   return sheet(isNew ? "New check-in" : "Edit check-in", "bodyForm", `
     ${field("Date", `<input type="date" class="pb-input" data-bind="body.date" value="${esc(f.date)}">`)}
     <div style="display:flex;gap:10px">${num(`Bodyweight (${unit})`, "body.weight", f.weight)}${num("Waist (cm/in)", "body.waist", f.waist)}</div>
@@ -1905,19 +2270,24 @@ function renderBodyFormSheet(f, unit) {
     ${!isNew ? `<button data-action="delete-body" class="pb-btn" style="width:100%;padding:12px 0;margin-top:8px;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">
       ${icon("trash-2", 15)} Delete
     </button>` : ""}
-  `);
+  `, 100);   /* above the Body window it opens from */
 }
 
 /* ═══════════════════════════ TIMERS ════════════════════════════════
-   A timer is {id,name,duration,endsAt,remaining,doneAt}. `endsAt` is an
+   A timer is {id,name,duration,endsAt,remaining,doneAt,pinned}. `endsAt` is an
    absolute timestamp rather than a ticking countdown, so a running timer
    stays honest through a re-render, a backgrounded tab, or the app being
    closed and reopened: anything that ran out while you were away is caught
    the moment you come back. Saved timers are reusable — start, pause,
    reset, start again — and any number can run at once.               */
 
-const QUICK_TIMERS = [30, 60, 90, 120, 180, 300];
 const RING_C = 326.73;   /* 2πr for the r=52 progress ring below */
+
+/* Up to three timers ride along on the home screen. The cap is the layout:
+   three dials sit side by side across a phone and still read from arm's
+   length. Anything pinned past that simply doesn't make the row. */
+const MAX_PINNED_TIMERS = 3;
+const pinnedTimers = () => (state.timers || []).filter((t) => t.pinned).slice(0, MAX_PINNED_TIMERS);
 
 function fmtClock(sec) {
   sec = Math.max(0, Math.ceil(sec));
@@ -2008,13 +2378,16 @@ function paintTimers() {
   for (const t of state.timers || []) {
     if (!t.endsAt) continue;
     const left = timerRemaining(t);
-    const digits = document.getElementById("tmr-time-" + t.id);
-    if (digits) digits.textContent = fmtClock(left);
-    const ring = document.getElementById("tmr-ring-" + t.id);
-    if (ring) {
-      const frac = t.duration > 0 ? Math.max(0, Math.min(1, left / t.duration)) : 0;
-      ring.setAttribute("stroke-dashoffset", (RING_C * (1 - frac)).toFixed(2));
-    }
+    const clock = fmtClock(left);
+    /* the same timer can be on screen more than once — its card on the Timer
+       tab, its dial on Home, its pill in the workout window — so every copy
+       is addressed by attribute, not by a single id. */
+    document.querySelectorAll(`[data-tmr-time="${t.id}"]`).forEach((el) => { el.textContent = clock; });
+    const frac = t.duration > 0 ? Math.max(0, Math.min(1, left / t.duration)) : 0;
+    document.querySelectorAll(`[data-tmr-ring="${t.id}"]`).forEach((el) => {
+      const c = +el.dataset.ringC || RING_C;
+      el.setAttribute("stroke-dashoffset", (c * (1 - frac)).toFixed(2));
+    });
   }
 }
 
@@ -2062,21 +2435,32 @@ function timerActiveCard(t) {
     <div style="position:relative;width:108px;height:108px;flex-shrink:0">
       <svg width="108" height="108" viewBox="0 0 120 120" style="display:block;transform:rotate(-90deg)">
         <circle cx="60" cy="60" r="52" fill="none" stroke="var(--surface2)" stroke-width="9"/>
-        <circle id="tmr-ring-${t.id}" cx="60" cy="60" r="52" fill="none" stroke="${ringColor}" stroke-width="9"
+        <circle data-tmr-ring="${t.id}" data-ring-c="${RING_C}" cx="60" cy="60" r="52" fill="none" stroke="${ringColor}" stroke-width="9"
                 stroke-linecap="round" stroke-dasharray="${RING_C}" stroke-dashoffset="${(RING_C * (1 - frac)).toFixed(2)}"
                 style="transition:stroke-dashoffset .25s linear"/>
       </svg>
       <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center">
-        <div id="tmr-time-${t.id}" class="pb-num" style="font-size:${done ? 19 : 25}px;font-weight:700;line-height:1;color:${done ? "var(--green)" : "var(--text)"}">${done ? "DONE" : fmtClock(left)}</div>
+        <div data-tmr-time="${t.id}" class="pb-num" style="font-size:${done ? 19 : 25}px;font-weight:700;line-height:1;color:${done ? "var(--green)" : "var(--text)"}">${done ? "DONE" : fmtClock(left)}</div>
         <div style="font-size:9px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);margin-top:3px">${done ? "time's up" : phase === "paused" ? "paused" : "remaining"}</div>
       </div>
     </div>
     <div style="flex:1;min-width:0">
-      <div style="font-weight:700;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.name)}</div>
+      <div style="display:flex;align-items:center;gap:6px">
+        <div style="flex:1;min-width:0;font-weight:700;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.name)}</div>
+        ${pinButton(t)}
+      </div>
       <div style="font-size:12px;color:var(--faint);margin-top:2px">${fmtClock(t.duration)} timer</div>
       <div style="display:flex;gap:7px;margin-top:12px">${controls}</div>
     </div>
   </div>`;
+}
+
+/* Pin a timer and it rides along on the home screen as a round dial. Three
+   at a time; the fourth tap says so rather than silently doing nothing. */
+function pinButton(t) {
+  const on = !!t.pinned;
+  return `<button data-action="timer-pin" data-id="${t.id}" title="${on ? "Unpin from home" : "Pin to home"}"
+    style="flex-shrink:0;padding:7px;color:${on ? "var(--gold)" : "var(--faint)"}">${icon(on ? "pin-off" : "pin", 16)}</button>`;
 }
 
 function timerIdleRow(t, last) {
@@ -2088,28 +2472,27 @@ function timerIdleRow(t, last) {
         <div class="pb-num" style="font-size:12.5px;color:var(--muted)">${fmtClock(t.duration)}</div>
       </div>
     </button>
-    <button data-action="timer-edit" data-id="${t.id}" title="Edit timer" style="flex-shrink:0;padding:12px 14px;color:var(--faint);align-self:stretch">${icon("pencil", 16)}</button>
+    ${pinButton(t)}
+    <button data-action="timer-edit" data-id="${t.id}" title="Edit timer" style="flex-shrink:0;padding:12px 14px 12px 7px;color:var(--faint);align-self:stretch">${icon("pencil", 16)}</button>
   </div>`;
 }
 
+/* One list, no headings. Everything here is just "a timer you saved": the
+   lengths the app ships with are ordinary rows you can rename, re-time,
+   pin or delete, exactly like the ones you build yourself. Running timers
+   float to the top as full dials so the countdown is the first thing you see. */
 function renderTimers() {
   const timers = state.timers || [];
   const active = timers.filter((t) => timerPhase(t) !== "idle");
   const idle = timers.filter((t) => timerPhase(t) === "idle");
 
   return `<div class="" style="padding:14px 16px 0">
-    ${sectionTitle("Quick start")}
-    <div style="display:flex;flex-wrap:wrap;gap:7px;margin-bottom:20px">
-      ${QUICK_TIMERS.map((s) => `<button data-action="quick-timer" data-s="${s}" class="pb-chip pb-num" style="padding:9px 15px;font-size:14px;font-weight:700;color:var(--gold);border-color:rgba(233,185,73,.35);background:rgba(233,185,73,.08)">${fmtClock(s)}</button>`).join("")}
-    </div>
+    ${active.map(timerActiveCard).join("")}
 
-    ${active.length ? `${sectionTitle(`Running · ${active.length}`)}${active.map(timerActiveCard).join("")}<div style="height:12px"></div>` : ""}
-
-    ${sectionTitle("Your timers")}
     ${idle.length
       ? `<div class="pb-card" style="overflow:hidden;margin-bottom:12px">${idle.map((t, i) => timerIdleRow(t, i === idle.length - 1)).join("")}</div>`
       : `<div class="pb-card" style="padding:${timers.length ? "16px" : "26px"};text-align:center;color:var(--muted);font-size:13.5px;line-height:1.6;margin-bottom:12px">
-          ${timers.length ? "Every timer you've saved is running right now." : `${icon("timer", 26, 'style="margin:0 auto 10px;display:block;color:var(--faint)"')}No timers saved yet. Tap a quick-start time above, or build your own with the button below, rest between sets, a plank hold, an interval, whatever you need.`}
+          ${timers.length ? "Every timer you've saved is running right now." : `${icon("timer", 26, 'style="margin:0 auto 10px;display:block;color:var(--faint)"')}No timers left. Build one with the button below, rest between sets, a plank hold, an interval, whatever you need.`}
         </div>`}
 
     <button data-action="timer-add" class="pb-btn pb-ghost" style="width:100%;padding:13px 0;font-size:14px;border-style:dashed;margin-bottom:14px">
@@ -2117,9 +2500,29 @@ function renderTimers() {
     </button>
 
     <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 4px 10px">
-      Run as many at once as you like, each keeps its own countdown. When one finishes you get a notification, a buzz and a chime. Timers count in real time, so one that runs out while you're on another tab still lands the moment it's up, and one that ends while the app is closed alerts you as soon as you open it again.
+      Tap ${icon("pin", 11)} to keep a timer on the home screen, up to three. Run as many at once as you like, each keeps its own countdown. When one finishes you get a notification, a buzz and a chime. Timers count in real time, so one that runs out while you're on another tab still lands the moment it's up, and one that ends while the app is closed alerts you as soon as you open it again.
     </div>
     <div style="height:8px"></div>
+  </div>`;
+}
+
+/* ── timers where you're actually standing ────────────────────────────
+   Rest starts the moment a set ends, not after you've closed two windows
+   to reach the Timer tab. So the Timer tab's own list is embedded at the
+   bottom of the workout window and of each exercise — the same running
+   dials and the same tappable rows, behaving identically, just somewhere
+   you can reach without losing what you were typing. */
+
+function renderTimerList() {
+  const timers = state.timers || [];
+  if (!timers.length) return "";
+  const active = timers.filter((t) => timerPhase(t) !== "idle");
+  const idle = timers.filter((t) => timerPhase(t) === "idle");
+
+  return `<div style="margin-top:22px">
+    ${sectionTitle("Timers", `<span style="font-size:11px;color:var(--faint)">tap to start your rest</span>`)}
+    ${active.map(timerActiveCard).join("")}
+    ${idle.length ? `<div class="pb-card" style="overflow:hidden">${idle.map((t, i) => timerIdleRow(t, i === idle.length - 1)).join("")}</div>` : ""}
   </div>`;
 }
 
@@ -2128,23 +2531,27 @@ function renderTimerForm(form) {
   const total = Math.max(0, (+t.min || 0) * 60 + (+t.sec || 0));
   const ok = total > 0;
   return sheet(isNew ? "New timer" : "Edit timer", "timerForm", `
-    ${field("Name", `<input class="pb-input" data-bind="timer.name" value="${esc(t.name)}" placeholder="Rest between sets" ${isNew ? "data-autofocus" : ""}>`, "Optional. It's what the notification says.")}
+    ${field("Name", `<input class="pb-input" data-bind="timer.name" value="${esc(t.name)}" placeholder="—" ${isNew ? "data-autofocus" : ""}>`, "Optional. It's what the notification says.")}
     <div style="display:flex;gap:10px">
-      <div style="flex:1">${field("Minutes", `<input class="pb-input" type="number" inputmode="numeric" min="0" max="180" data-bind="timer.min" value="${esc(t.min)}" placeholder="2">`)}</div>
-      <div style="flex:1">${field("Seconds", `<input class="pb-input" type="number" inputmode="numeric" min="0" max="59" data-bind="timer.sec" value="${esc(t.sec)}" placeholder="30">`)}</div>
+      <div style="flex:1">${field("Minutes", `<input class="pb-input" ${NUM} data-bind="timer.min" value="${esc(t.min)}" placeholder="—">`)}</div>
+      <div style="flex:1">${field("Seconds", `<input class="pb-input" ${NUM} data-bind="timer.sec" value="${esc(t.sec)}" placeholder="—">`)}</div>
     </div>
     <div style="display:flex;flex-wrap:wrap;gap:7px;margin:-4px 0 16px">
-      ${QUICK_TIMERS.map((s) => `<button data-action="timer-preset" data-s="${s}" class="pb-chip pb-num" style="padding:7px 13px;font-size:13px;font-weight:700;color:var(--muted)">${fmtClock(s)}</button>`).join("")}
+      ${SEED_TIMERS.map((s) => `<button data-action="timer-preset" data-s="${s}" class="pb-chip pb-num" style="padding:7px 13px;font-size:13px;font-weight:700;color:var(--muted)">${fmtClock(s)}</button>`).join("")}
     </div>
     <div class="pb-card2" style="padding:11px 14px;margin-bottom:14px;display:flex;align-items:baseline;gap:10px">
       <div class="pb-label">Total</div>
       <div id="timerTotal" class="pb-num" style="font-size:24px;font-weight:700;color:${ok ? "var(--gold)" : "var(--faint)"};line-height:1">${ok ? fmtClock(total) : "—"}</div>
     </div>
+    <button data-action="timer-form-pin" class="pb-btn" style="width:100%;padding:11px 0;font-size:13.5px;margin-bottom:14px;background:${t.pinned ? "rgba(233,185,73,.12)" : "var(--surface2)"};color:${t.pinned ? "var(--gold)" : "var(--muted)"};border:1px solid ${t.pinned ? "rgba(233,185,73,.4)" : "var(--border)"}">
+      ${icon(t.pinned ? "pin-off" : "pin", 15)} ${t.pinned ? "Pinned to home" : "Pin to home"}
+    </button>
     <button id="timerSaveBtn" data-action="timer-save" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:14px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">${icon("check", 17)} ${isNew ? "Save timer" : "Save changes"}</button>
     ${!isNew ? `<button data-action="timer-delete" class="pb-btn" style="width:100%;padding:12px 0;margin-top:8px;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">
       ${icon("trash-2", 15)} Delete timer
     </button>` : ""}
-  `);
+  `, 120);   /* the timer list is embedded in the workout and exercise windows too,
+                so its editor has to sit above every one of them */
 }
 
 /* live total + save-button state while typing a duration */
@@ -2169,7 +2576,7 @@ function renderProfile(f) {
       <button data-action="save-profile" class="pb-btn pb-gold" style="padding:8px 16px;font-size:13.5px">Save</button>
     </div>
     <div class="pb-scroll" data-scrollkey="profile" style="flex:1;overflow-y:auto;padding:16px 16px 40px">
-      ${field("Your name", `<input class="pb-input" data-bind="profile.name" value="${esc(f.name)}" placeholder="John Lifter">`)}
+      ${field("Your name", `<input class="pb-input" data-bind="profile.name" value="${esc(f.name)}" placeholder="—">`)}
       ${field("Default unit", `<div style="display:flex;gap:8px">
         ${UNITS.map((u) => `<button data-action="profile-units" data-u="${u}" class="pb-btn" style="flex:1;padding:11px 0;background:${f.units === u ? "var(--gold)" : "var(--surface2)"};color:${f.units === u ? "var(--gold-ink)" : "var(--muted)"};border:1px solid ${f.units === u ? "var(--gold)" : "var(--border)"}">${u}</button>`).join("")}
       </div>`, "The unit each new exercise starts on, and the one all your est. 1RMs, PRs, goals and graphs are shown in. You can still switch the unit on any individual exercise while you log it, right above the weight field.")}
@@ -2180,21 +2587,7 @@ function renderProfile(f) {
         }).join("")}
       </div>`, "Dark is a Discord-style grey palette (default). Light is easier in a bright room.")}
       ${field("Program start date", `<input type="date" class="pb-input" data-bind="profile.startDate" value="${esc(f.startDate)}">`, "Week numbers count from this date.")}
-      ${field("Training days / week", `<input class="pb-input" type="number" inputmode="numeric" min="1" max="7" data-bind="profile.daysPerWeek" value="${esc(f.daysPerWeek)}">`)}
-
-      <div class="pb-hairline" style="margin:18px 0"></div>
-      ${sectionTitle("How you log")}
-      ${field("Logging mode", `<div style="display:flex;gap:8px">
-        ${[["fsbs", "FSBS", "flame"], ["detailed", "Detailed", "list-checks"]].map(([m, label, ic]) => {
-          const on = (f.loggingMode || "fsbs") === m;
-          return `<button data-action="profile-mode" data-m="${m}" class="pb-btn" style="flex:1;padding:11px 0;background:${on ? "var(--gold)" : "var(--surface2)"};color:${on ? "var(--gold-ink)" : "var(--muted)"};border:1px solid ${on ? "var(--gold)" : "var(--border)"}">${icon(ic, 15)} ${label}</button>`;
-        }).join("")}
-      </div>`)}
-      <div class="pb-card2" style="padding:12px 13px;font-size:12.5px;color:var(--muted);line-height:1.6;margin:-4px 0 12px">
-        <b style="color:var(--text)">FSBS, first set best set.</b> Fast and simple. Per exercise you log one top set plus how many sets you did in total. In and out, minimum typing.<br><br>
-        <b style="color:var(--text)">Detailed, every set.</b> For the thorough. Add sets one at a time inside an exercise, each with its own reps and weight, exactly the way you add exercises to a day. Your estimated 1RM comes from your <b style="color:var(--text)">best</b> set.<br><br>
-        Switching is safe and you can do it whenever. Nothing is deleted: workouts you logged set by set keep every set in storage and just show their best one while you're in FSBS. Flip back and they're all still there.
-      </div>
+      ${field("Training days / week", `<input class="pb-input" ${NUM} data-bind="profile.daysPerWeek" value="${esc(f.daysPerWeek)}">`)}
 
       <div class="pb-hairline" style="margin:18px 0"></div>
 
@@ -2415,6 +2808,42 @@ window.addEventListener("resize", drawCharts);
 
 const newBodyRow = () => ({ id: uid(), date: todayStr(), weight: "", waist: "", chest: "", arm: "", thigh: "", glutes: "", notes: "" });
 
+/* ── DRAFT DAYS ───────────────────────────────────────────────────────
+   Backing out of a half-built workout used to throw it away, which made
+   leaving the window to go add an exercise to the Library a gamble. Now a
+   day with anything in it is parked in state.dayDrafts instead: it shows
+   up at the top of the log, waits as long as you like, and reopens exactly
+   as you left it. A draft is NOT the log — nothing in it counts toward
+   sets, PRs, volume, weeks or the graphs until you actually save the day.
+
+   (Distinct from state.drafts, which is the crash/lock snapshot of whatever
+   form is open right now. This is a deliberate park, that is a safety net.) */
+
+function stashDayDraft(draft) {
+  if (!draft || draft.editing || !draft.entries.length) return;
+  const row = {
+    id: draft.draftId || uid(),
+    date: draft.date,
+    entries: clone(draft.entries),
+    savedAt: Date.now(),
+  };
+  const rest = (state.dayDrafts || []).filter((d) => d.id !== row.id);
+  patch({ dayDrafts: [...rest, row] });
+}
+
+/* leaving the workout window: park it, don't bin it */
+function closeWorksheet() {
+  const draft = ui.workoutSheet;
+  ui.workoutSheet = null; ui.picking = false; ui.entryForm = null; ui.setForm = null;
+  if (draft && !draft.editing && draft.entries.length) stashDayDraft(draft);
+  else if (draft && draft.draftId) dropDayDraft(draft.draftId);   // emptied it out
+  else render();
+}
+
+function dropDayDraft(id) {
+  patch({ dayDrafts: (state.dayDrafts || []).filter((d) => d.id !== id) });
+}
+
 function commitWorkout(draft) {
   /* only real, filled-in entries get logged — blank preset placeholders are
      dropped so they never pollute the history with empty rows. */
@@ -2435,8 +2864,13 @@ function commitWorkout(draft) {
     return;
   }
   const stamped = filled.map((e, i) => ({ ...e, date: draft.date, createdAt: Date.now() + i }));
+  const draftId = draft.draftId;
   ui.workoutSheet = null;
-  patch({ log: [...state.log, ...stamped] });
+  /* a draft that just became a real day stops being a draft */
+  patch({
+    log: [...state.log, ...stamped],
+    dayDrafts: draftId ? (state.dayDrafts || []).filter((d) => d.id !== draftId) : state.dayDrafts,
+  });
 }
 
 const actions = {
@@ -2452,7 +2886,6 @@ const actions = {
   "save-profile": () => { const f = ui.profileDraft; ui.showProfile = false; ui.profileDraft = null; applyTheme(f.theme); patch({ settings: f }); },
   "profile-units": (el) => { ui.profileDraft.units = el.dataset.u; render(); },
   "profile-theme": (el) => { ui.profileDraft.theme = el.dataset.t; applyTheme(el.dataset.t); render(); },
-  "profile-mode": (el) => { ui.profileDraft.loggingMode = el.dataset.m; render(); },
   "reset-all": () => {
     if (confirm("Reset ALL data, workouts, library changes, goals, measurements and settings? This cannot be undone.")) {
       ui.showProfile = false; ui.profileDraft = null;
@@ -2461,12 +2894,11 @@ const actions = {
       patch(fresh);
     }
   },
+  "open-body": () => { ui.showBody = true; render(); },
+  "close-body": () => { ui.showBody = false; ui.bodyForm = null; render(); },
+  "new-body": () => { ui.bodyForm = newBodyRow(); ui.bodyFormWasNew = true; render(); },
   "new-workout": () => { ui.tab = "log"; ui.logSeg = "history"; resetTransient(); ui.workoutSheet = { date: todayStr(), entries: [] }; render(); },
-  "fab": () => {
-    if (ui.tab === "log") ui.workoutSheet = { date: todayStr(), entries: [] };
-    else { ui.bodyForm = newBodyRow(); ui.bodyFormWasNew = true; }
-    render();
-  },
+  "fab": () => { ui.workoutSheet = { date: todayStr(), entries: [] }; render(); },
   "toggle-deload": () => { ui.deloadOpen = !ui.deloadOpen; render(); },
   "toggle-accordion": (el) => {
     const id = el.dataset.id;
@@ -2518,26 +2950,131 @@ const actions = {
     patch({ goals: g });
   },
   "lib-filter": (el) => { ui.libraryFilter = el.dataset.id; render(); },
+
+  /* ── muscle groups ────────────────────────────────────────────────── */
+  "open-groups": () => { ui.groupSheet = true; render(); },
+  /* `then` remembers who asked, so creating a group mid-workout drops you
+     straight back into what you were doing with the new group selected */
+  "group-new": (el) => {
+    /* start on a colour nothing else is wearing, so groups stay tellable apart */
+    const free = GROUP_SWATCHES.find((c) => !groupList().some((g) => String(g.color).toLowerCase() === c));
+    ui.groupForm = { name: "", color: free || GROUP_SWATCHES[0], orig: null, then: (el && el.dataset.then) || null };
+    render();
+  },
+  "group-edit": (el) => {
+    const name = el.dataset.g;
+    ui.groupForm = { name, color: colorFor(name), orig: name, then: null };
+    render();
+  },
+  "group-color": (el) => { if (ui.groupForm) { ui.groupForm.color = el.dataset.c; render(); } },
+  "group-save": () => {
+    const f = ui.groupForm;
+    if (!f) return;
+    const name = (f.name || "").trim();
+    if (!name) return;
+    if (name.toLowerCase() === UNCATEGORIZED.toLowerCase()) {
+      alert(`“${UNCATEGORIZED}” is reserved, it's where exercises land when their group is deleted. Pick another name.`);
+      return;
+    }
+    if (groupNames().some((g) => g.toLowerCase() === name.toLowerCase() && g !== f.orig)) {
+      alert("You already have a group called “" + name + "”.");
+      return;
+    }
+    const groups = libraryGroups(state.library).map((g) => ({ name: g, color: colorFor(g) }));
+    const p = { ...state };
+
+    if (f.orig) {
+      /* a rename has to carry everything that points at the old name, or the
+         exercises in it would quietly fall out of their own group */
+      p.groups = groups.map((g) => (g.name === f.orig ? { name, color: f.color } : g));
+      if (name !== f.orig) {
+        p.library = state.library.map((ex) => (ex.muscle === f.orig ? { ...ex, muscle: name } : ex));
+        p.log = state.log.map((e) => (e.muscle === f.orig ? { ...e, muscle: name } : e));
+        p.presets = (state.presets || []).map((pr) => ({
+          ...pr, exercises: (pr.exercises || []).map((x) => (x.muscle === f.orig ? { ...x, muscle: name } : x)),
+        }));
+        if (state.volumeGoals && state.volumeGoals[f.orig] != null) {
+          const vg = { ...state.volumeGoals };
+          vg[name] = vg[f.orig]; delete vg[f.orig];
+          p.volumeGoals = vg;
+        }
+        if (ui.libraryFilter === f.orig) ui.libraryFilter = name;
+      }
+    } else {
+      p.groups = [...groups, { name, color: f.color }];
+    }
+
+    const then = f.then;
+    ui.groupForm = null;
+    if (then === "exwin" && ui.exWinDraft) ui.exWinDraft.muscle = name;
+    if (then) ui.groupSheet = false;     // opened from a workout, not the manager
+    patch(p);
+    /* quick-add was mid-question ("which muscle does it train?") — answer it */
+    if (then === "quickadd" && ui.pickerQuick) {
+      const el = document.createElement("button");
+      el.dataset.g = name;
+      actions["quick-add-muscle"](el);
+    }
+  },
+  /* Deleting a group never takes exercises down with it — whatever is still
+     in it is tipped into the Uncategorized bucket, where it stays findable
+     and loggable until it's given a real group. */
+  "group-delete": () => {
+    const f = ui.groupForm;
+    if (!f || !f.orig) return;
+    const name = f.orig;
+    const used = groupUseCount(name, state.library);
+    const msg = used
+      ? `Delete the “${name}” group? Its ${used} exercise${used === 1 ? "" : "s"} move to Uncategorized, nothing is deleted and your logged workouts are untouched.`
+      : `Delete the “${name}” group?`;
+    if (!confirm(msg)) return;
+
+    const p = {
+      groups: libraryGroups(state.library).filter((g) => g !== name).map((g) => ({ name: g, color: colorFor(g) })),
+    };
+    if (used) {
+      p.library = state.library.map((ex) => (ex.muscle === name ? { ...ex, muscle: UNCATEGORIZED } : ex));
+      p.log = state.log.map((e) => (e.muscle === name ? { ...e, muscle: UNCATEGORIZED } : e));
+      p.presets = (state.presets || []).map((pr) => ({
+        ...pr, exercises: (pr.exercises || []).map((x) => (x.muscle === name ? { ...x, muscle: UNCATEGORIZED } : x)),
+      }));
+    }
+    if (state.volumeGoals && state.volumeGoals[name] != null) {
+      const vg = { ...state.volumeGoals };
+      delete vg[name];                       // the bucket can't carry a target
+      p.volumeGoals = vg;
+    }
+    ui.groupForm = null;
+    if (ui.libraryFilter === name) ui.libraryFilter = "All";
+    patch(p);
+  },
+
+  /* the NEW flag is a to-do, and some exercises simply have nothing to do */
+  "dismiss-new": (el) => {
+    const name = el.dataset.name;
+    patch({ library: state.library.map((x) => (x.name === name ? { ...x, dismissedNew: true } : x)) });
+  },
+
   "add-exercise": () => {
     ui.exWinDraft = { id: uid(), name: "", muscle: "", type: "Compound", equipment: "", alternatives: "", note: "", image: "", video: "", custom: true };
-    ui.exWin = { isNew: true }; ui.exWinEdit = true; ui.exWinNewGroup = false; render();
+    ui.exWin = { isNew: true }; ui.exWinEdit = true; render();
   },
   /* open the detail window (read-only) — every "info" button lands here.
      Exercises are keyed by name across the app, so we look up by name. */
   "open-exercise-window": (el) => {
     ui.exWin = { name: el.dataset.name };
-    ui.exWinEdit = false; ui.exWinDraft = null; ui.exWinNewGroup = false; render();
+    ui.exWinEdit = false; ui.exWinDraft = null; render();
   },
-  "exwin-close": () => { ui.exWin = null; ui.exWinEdit = false; ui.exWinDraft = null; ui.exWinNewGroup = false; render(); },
+  "exwin-close": () => { ui.exWin = null; ui.exWinEdit = false; ui.exWinDraft = null; render(); },
   "exwin-edit": () => {
     const ex = state.library.find((x) => x.name === ui.exWin.name);
     if (!ex) return;
     ui.exWinDraft = { image: "", video: "", ...ex };
-    ui.exWinEdit = true; ui.exWinNewGroup = false; render();
+    ui.exWinEdit = true; render();
   },
   "exwin-cancel": () => {
     if (ui.exWin && ui.exWin.isNew) ui.exWin = null;
-    ui.exWinEdit = false; ui.exWinDraft = null; ui.exWinNewGroup = false; render();
+    ui.exWinEdit = false; ui.exWinDraft = null; render();
   },
   "exwin-remove-image": () => { if (ui.exWinDraft) { ui.exWinDraft.image = ""; render(); } },
   "exwin-save": () => {
@@ -2545,19 +3082,31 @@ const actions = {
     if (!f || !(f.name.trim() && f.muscle.trim())) return;
     const ex = { ...f, name: f.name.trim(), muscle: f.muscle.trim() };
     const exists = state.library.some((x) => x.id === ex.id);
-    ui.exWin = { name: ex.name }; ui.exWinEdit = false; ui.exWinDraft = null; ui.exWinNewGroup = false;
+    ui.exWin = { name: ex.name }; ui.exWinEdit = false; ui.exWinDraft = null;
     patch({ library: exists ? state.library.map((x) => (x.id === ex.id ? ex : x)) : [...state.library, ex] });
   },
   "exwin-delete": () => {
     if (confirm("Delete this exercise from the library? Logged workouts keep their data.")) {
       const id = ui.exWinDraft && ui.exWinDraft.id;
       const name = ui.exWin && ui.exWin.name;
-      ui.exWin = null; ui.exWinEdit = false; ui.exWinDraft = null; ui.exWinNewGroup = false;
+      ui.exWin = null; ui.exWinEdit = false; ui.exWinDraft = null;
       patch({ library: state.library.filter((x) => (id ? x.id !== id : x.name !== name)) });
     }
   },
-  "close-worksheet": () => { ui.workoutSheet = null; ui.picking = false; ui.entryForm = null; ui.setForm = null; render(); },
+  "close-worksheet": closeWorksheet,
   "commit-workout": () => commitWorkout(ui.workoutSheet),
+  /* pick a parked day back up exactly where it was left */
+  "resume-draft": (el) => {
+    const d = (state.dayDrafts || []).find((x) => x.id === el.dataset.id);
+    if (!d) return;
+    ui.tab = "log"; ui.logSeg = "history"; resetTransient();
+    ui.workoutSheet = { date: d.date, entries: clone(d.entries), draftId: d.id };
+    ui.picking = false; ui.entryForm = null; ui.setForm = null;
+    render();
+  },
+  "delete-draft": (el) => {
+    if (confirm("Delete this draft? Nothing in it was ever logged.")) dropDayDraft(el.dataset.id);
+  },
   /* reopen a logged day in the full workout window so the whole session can be
      edited (fix a mistake, add/remove a lift, or save it as a preset). */
   "edit-day": (el) => {
@@ -2595,7 +3144,7 @@ const actions = {
       muscle: e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, state.library, e.muscle),
       kind: e.kind || "strength",
     }));
-    const preset = { id: uid(), name: f.name.trim(), description: (f.description || "").trim(), exercises, createdAt: Date.now() };
+    const preset = { id: uid(), name: f.name.trim(), description: (f.description || "").trim(), pinned: false, exercises, createdAt: Date.now() };
     ui.presetForm = null;
     patch({ presets: [...(state.presets || []), preset] });  // sheet closes back to the workout draft
   },
@@ -2613,6 +3162,11 @@ const actions = {
     ui.workoutSheet = { date: todayStr(), entries: presetToEntries(p) };
     render();
   },
+  "preset-pin": (el) => {
+    const id = el.dataset.id;
+    patch({ presets: (state.presets || []).map((p) => (p.id === id ? { ...p, pinned: !p.pinned } : p)) });
+  },
+  "presetview-pin": () => { if (ui.presetView) { ui.presetView.pinned = !ui.presetView.pinned; render(); } },
   "open-preset": (el) => {
     const p = (state.presets || []).find((x) => x.id === el.dataset.id);
     if (p) { ui.presetView = JSON.parse(JSON.stringify(p)); render(); }  // edit a working copy
@@ -2717,21 +3271,32 @@ const actions = {
   },
 
   /* ── timers ───────────────────────────────────────────────────────── */
-  "quick-timer": (el) => {
-    const secs = +el.dataset.s;
-    const name = "Rest " + fmtClock(secs);
-    let t = (state.timers || []).find((x) => x.duration === secs && x.name === name);
-    if (!t) {
-      t = { id: uid(), name, duration: secs, endsAt: null, remaining: null, doneAt: null, createdAt: Date.now() };
-      state.timers = [...(state.timers || []), t];
+  /* pinning from the list — the cap is enforced here, once, for every route in */
+  "timer-pin": (el) => {
+    const t = (state.timers || []).find((x) => x.id === el.dataset.id);
+    if (!t) return;
+    if (!t.pinned && pinnedTimers().length >= MAX_PINNED_TIMERS) {
+      alert(`Home holds ${MAX_PINNED_TIMERS} pinned timers. Unpin one to make room.`);
+      return;
     }
-    startTimer(t);
+    patch({ timers: state.timers.map((x) => (x.id === t.id ? { ...x, pinned: !x.pinned } : x)) });
   },
-  "timer-add": () => { ui.timerForm = { t: { id: uid(), name: "", min: "", sec: "" }, isNew: true }; render(); },
+  /* pinning from inside the editor — the flag rides on the draft until you save */
+  "timer-form-pin": () => {
+    const f = ui.timerForm;
+    if (!f) return;
+    if (!f.t.pinned && pinnedTimers().filter((x) => x.id !== f.t.id).length >= MAX_PINNED_TIMERS) {
+      alert(`Home holds ${MAX_PINNED_TIMERS} pinned timers. Unpin one to make room.`);
+      return;
+    }
+    f.t.pinned = !f.t.pinned;
+    render();
+  },
+  "timer-add": () => { ui.timerForm = { t: { id: uid(), name: "", min: "", sec: "", pinned: false }, isNew: true }; render(); },
   "timer-edit": (el) => {
     const t = (state.timers || []).find((x) => x.id === el.dataset.id);
     if (!t) return;
-    ui.timerForm = { t: { id: t.id, name: t.name, min: Math.floor(t.duration / 60) || "", sec: t.duration % 60 || "" }, isNew: false };
+    ui.timerForm = { t: { id: t.id, name: t.name, min: Math.floor(t.duration / 60) || "", sec: t.duration % 60 || "", pinned: !!t.pinned }, isNew: false };
     render();
   },
   "timer-preset": (el) => {
@@ -2751,8 +3316,8 @@ const actions = {
     /* editing the length of a running timer restarts it cleanly rather than
        leaving a countdown that no longer matches its own dial */
     const row = existing
-      ? { ...existing, name, duration, endsAt: null, remaining: null, doneAt: null }
-      : { id: form.t.id, name, duration, endsAt: null, remaining: null, doneAt: null, createdAt: Date.now() };
+      ? { ...existing, name, duration, pinned: !!form.t.pinned, endsAt: null, remaining: null, doneAt: null }
+      : { id: form.t.id, name, duration, pinned: !!form.t.pinned, endsAt: null, remaining: null, doneAt: null, createdAt: Date.now() };
     ui.timerForm = null;
     patch({ timers: existing ? state.timers.map((x) => (x.id === row.id ? row : x)) : [...(state.timers || []), row] });
   },
@@ -2842,6 +3407,8 @@ const actions = {
     else if (t === "presetView") ui.presetView = null;
     else if (t === "setForm") ui.setForm = null;
     else if (t === "timerForm") ui.timerForm = null;
+    else if (t === "groupSheet") ui.groupSheet = false;
+    else if (t === "groupForm") ui.groupForm = null;
     render();
   },
 };
@@ -2861,7 +3428,20 @@ document.addEventListener("click", (e) => {
 function handleBind(el) {
   const bind = el.dataset.bind;
   if (!bind) return;
-  const v = el.value;
+  let v = el.value;
+  /* A number field keeps whatever separator you typed on screen — only stray
+     characters are pushed back out — while the value that gets stored is
+     always period-separated, so 82,5 and 82.5 are the same number. */
+  if (el.dataset.num != null) {
+    const clean = v.replace(/[^\d.,]/g, "");
+    if (clean !== v) {
+      const pos = el.selectionStart;
+      el.value = clean;
+      try { el.setSelectionRange(pos - (v.length - clean.length), pos - (v.length - clean.length)); } catch { /* not a text field */ }
+      v = clean;
+    }
+    v = decimalize(v);
+  }
   if (bind === "libq") {
     ui.libraryQ = v;
     const list = document.getElementById("libList");
@@ -2887,8 +3467,18 @@ function handleBind(el) {
   } else if (bind === "progressSel") {
     ui.progressSelected = v; render();
   } else if (bind === "exwinMuscle") {
-    if (v === "__new") { ui.exWinNewGroup = true; ui.exWinDraft.muscle = ""; render(); }
+    /* "＋ New group…" hands straight over to the group editor, which drops the
+       finished group back onto this draft — see actions["group-save"]. */
+    if (v === "__new") actions["group-new"]({ dataset: { then: "exwin" } });
     else { ui.exWinDraft.muscle = v; render(); }
+  } else if (bind === "group.name") {
+    ui.groupForm.name = v;
+    const label = document.getElementById("groupPreviewName");
+    if (label) label.textContent = v.trim() || "Your new group";
+    const btn = document.getElementById("groupSaveBtn");
+    if (btn) { const ok = !!v.trim(); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
+  } else if (bind === "group.color") {
+    ui.groupForm.color = v; render();
   } else if (bind === "entryUnit") {
     /* the unit belongs to the whole exercise, so it can be changed from the
        entry form or from any of its set editors. A discrete tap, not typing —
@@ -2915,12 +3505,14 @@ function handleBind(el) {
 }
 
 document.addEventListener("input", (e) => {
-  if (e.target.matches("select")) return; // selects handled on change
+  /* selects and the colour well re-render on commit, not on every tick of a
+     drag, or the native picker gets pulled out from under the user's finger */
+  if (e.target.matches("select, input[type=color]")) return;
   handleBind(e.target);
 });
 document.addEventListener("change", (e) => {
   if (e.target.matches('input[type="file"]')) { handleFile(e.target); return; }
-  if (e.target.matches("select, input[type=date]")) handleBind(e.target);
+  if (e.target.matches("select, input[type=date], input[type=color]")) handleBind(e.target);
 });
 
 /* file uploads (exercise photo) — read, downscale, stash on the draft, redraw */
@@ -2973,7 +3565,7 @@ window.addEventListener("click", function once() {
   if (d.set && ui.entryForm) ui.setForm = d.set;
   if (d.body) { ui.bodyForm = d.body; ui.bodyFormWasNew = !!d.bodyWasNew; }
   if (ui.workoutSheet || ui.entryForm) ui.tab = "log";
-  else if (ui.bodyForm) ui.tab = "body";
+  else if (ui.bodyForm) ui.showBody = true;   // the form lives inside that window
 })();
 
 applyTheme(state.settings.theme);

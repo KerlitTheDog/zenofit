@@ -115,6 +115,11 @@ input[type="date"].pb-input::-webkit-date-and-time-value{
 .pb-acc-chevron{ display:inline-flex; flex-shrink:0; transition:transform .25s cubic-bezier(.4,0,.2,1); }
 .pb-acc.is-open .pb-acc-chevron{ transform:rotate(180deg); }
 
+/* The drag handle has to own the gesture: without touch-action:none the
+   browser claims a vertical drag for scrolling and the row never moves. */
+.pb-drag{ touch-action:none; cursor:grab; }
+.pb-drag:active{ cursor:grabbing; }
+
 /* a finished timer breathes until you deal with it — impossible to miss from
    across the gym, but not a strobe */
 .pb-timer-done{ animation:pbPulse 1.5s ease-in-out infinite; }

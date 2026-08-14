@@ -8,13 +8,14 @@
    │                                                                     │
    │ 1. PLACEHOLDER_BODY_GRAPH_SLOT  — future measurement graphs, Body   │
    │    tab bottom                                                       │
-   │ 2. PLACEHOLDER_PLANNER_TAB_SLOT — future Program Planner card, in   │
-   │    Profile (v1 intentionally ships without the planner tab; the     │
-   │    deload calendar in Weekly Volume covers the part that matters)   │
+   │ 2. PLACEHOLDER_RANKS_SLOT       — future ranks & strength standards,│
+   │    the second segment of the Progress tab                           │
    │                                                                     │
    │ Done: the Home logo and the tab-header brand mark now use           │
    │ logoC.png; the reserved Home banner slot was removed (the deload    │
-   │ alert is the only banner that renders there).                       │
+   │ alert is the only banner that renders there); the Profile's         │
+   │ Program Planner slot is gone (the deload calendar in Weekly Volume  │
+   │ covers the part that matters).                                      │
    └─────────────────────────────────────────────────────────────────────┘
 
    Spreadsheet → code map:
@@ -205,6 +206,31 @@ const weekOf = (dateStr, startStr) =>
 /* Est. 1RM (Epley): =ROUND(weight*(1+reps/30),1) */
 const epley1RM = (weight, reps) =>
   weight > 0 && reps > 0 ? Math.round(weight * (1 + reps / 30) * 10) / 10 : null;
+
+/* ── THE 1RM TABLES (the calculator tab) ──────────────────────────────
+   The calculator itself is the same Epley line the rest of the app runs
+   on, so a max worked out here is the same number the log would give it.
+
+   The two tables it prints are that curve read backwards. It comes in two
+   pieces, and they meet exactly at 10 reps / 75%, so the join is invisible:
+
+     · 1–10 reps → 100% − (reps−1)/36. Near the max, Epley's straight line
+       inverts far too generously (it would call a double 94% of a single),
+       so the top of the table walks down in even 1/36 steps instead.
+     · 10+ reps  → 30 / (30 + reps), which is simply Epley solved for the
+       weight instead of the max.
+
+   calcPct(reps) is what one working set is worth as a share of the max;
+   calcReps(pct) is the same curve inverted — how many reps a percentage is
+   good for. It floors, because a table that rounds a percentage UP to a rep
+   you can't finish is the one way a chart like this can hurt you.        */
+const calcPct = (reps) => (reps <= 10 ? 1 - (reps - 1) / 36 : 30 / (30 + reps));
+
+const calcReps = (pct) =>
+  pct >= 0.75 ? Math.floor(1 + 36 * (1 - pct)) : Math.floor((30 * (1 - pct)) / pct);
+
+/* one decimal, no dangling ".0" — 133.3 kg, but 120 kg */
+const trimNum = (n) => String(Math.round(n * 10) / 10);
 
 /* Cardio "1RM equivalent": session-RPE load (Foster) = minutes × RPE */
 const cardioScore = (minutes, intensity) =>
@@ -701,7 +727,16 @@ const ui = {
   deloadForm: null,     // {id, start, end, isNew} — the deload editor
   accordions: {},   // all accordions start collapsed
   volumeWeek: null,
+  progSeg: "progress",  // progress | placeholder — Progress sub-tab
   progressSelected: null,
+  /* the progress graph is an instrument, not a picture: chartView is the
+     slice of the series on screen (float index bounds), chartSel the entry
+     whose dot is open, chartFull whether it's taken over the screen */
+  chartView: null,      // {lo, hi} — null means "the whole series"
+  chartSel: null,       // id of the logged entry behind the selected dot
+  chartFull: false,
+  calc: { weight: "", reps: "", unit: null },  // the 1RM calculator's fields
+  calcResult: null,     // {weight, reps, oneRM, unit} — the last calculation
   goalEditing: null,    // exercise name whose goal is being edited
   goalVal: "",
   volGoalEditing: null, // muscle group whose set target is being edited
@@ -716,7 +751,9 @@ function resetTransient() {
   ui.deloadPick = null;
   ui.calMonth = monthOf(todayStr());
   ui.accordions = {};
+  ui.progSeg = "progress";
   ui.progressSelected = null;
+  ui.chartView = null; ui.chartSel = null; ui.chartFull = false;
   ui.goalEditing = null;
   ui.volGoalEditing = null;
   ui.libraryQ = "";
@@ -759,9 +796,10 @@ const placeholder = (token, height, children = "") =>
   `<div class="pb-placeholder" style="height:${height}px"><div style="padding:8px">${children || token}<div style="font-size:9px;margin-top:2px;opacity:.7">${children ? token : "swap me in code"}</div></div></div>`;
 
 /* The unit dropdown that lives inside a weight field's label — tap "kg" and
-   pick whatever the machine in front of you is stamped in. */
-const unitSelect = (value) =>
-  `<select class="pb-unit-select" data-bind="entryUnit" aria-label="${T("profile.unit")}">${
+   pick whatever the machine in front of you is stamped in. The calculator
+   has one of its own, so the binding is a parameter. */
+const unitSelect = (value, bind = "entryUnit") =>
+  `<select class="pb-unit-select" data-bind="${bind}" aria-label="${T("profile.unit")}">${
     UNITS.map((u) => `<option value="${u}"${value === u ? " selected" : ""}>${u}</option>`).join("")
   }</select>`;
 
@@ -906,7 +944,7 @@ function render() {
   chartState = { line: null, bar: null };
 
   const tab = ui.tab;
-  const titles = { log: T("title.log"), progress: T("title.progress"), library: T("title.library"), timer: T("title.timers") };
+  const titles = { log: T("title.log"), progress: T("title.progress"), library: T("title.library"), timer: T("title.timers"), calc: T("title.calc") };
 
   /* the frame is locked to exactly one viewport height (100dvh tracks mobile
      browser chrome) so the content area scrolls internally and the bottom nav
@@ -932,6 +970,7 @@ function render() {
   if (tab === "progress") html += renderProgress(log, library, goals, badges, settings, unit);
   if (tab === "library") html += renderLibrary(library);
   if (tab === "timer") html += renderTimers();
+  if (tab === "calc") html += renderCalc();
   html += `</div>`;
 
   /* "time's up" banner — floats above the nav on whatever tab you're on, so a
@@ -958,7 +997,8 @@ function render() {
   /* bottom nav */
   const NAV = [
     ["home", "home", T("nav.home")], ["log", "clipboard-list", T("nav.log")], ["timer", "timer", T("nav.timer")],
-    ["progress", "trending-up", T("nav.progress")], ["library", "book-open", T("nav.library")],
+    ["progress", "trending-up", T("nav.progress")], ["calc", "calculator", T("nav.calc")],
+    ["library", "book-open", T("nav.library")],
   ];
   /* a running timer puts a live dot on its nav icon from anywhere in the app */
   const timersRunning = (state.timers || []).some((t) => t.endsAt || t.doneAt);
@@ -984,6 +1024,7 @@ function render() {
   if (ui.exWin) html += renderExerciseWindow(library);
   if (ui.presetForm) html += renderPresetForm();
   if (ui.presetView) html += renderPresetView();
+  if (ui.chartFull) html += renderChartFull();
   if (ui.showProfile) html += renderProfile(ui.profileDraft);
   if (ui.showBody) html += renderBodyWindow(body, unit);
   if (ui.bodyForm) html += renderBodyFormSheet(ui.bodyForm, unit);
@@ -1531,12 +1572,19 @@ function renderVolume(log, library, settings, currentWeek) {
 /* ─────────────────────────── PROGRESS ─────────────────────────────── */
 
 function renderProgress(log, library, goals, badges, settings, unit) {
+  const segs = segControl("prog-seg", ui.progSeg,
+    [["progress", T("prog.segProgress")], ["placeholder", T("prog.segPlaceholder")]]);
+
+  if (ui.progSeg === "placeholder")
+    return `<div class="" style="padding:12px 16px 0">${segs}${renderProgPlaceholder()}</div>`;
+
   const rows = dashboardRows(log, library, goals);
   const selected = ui.progressSelected;
   const sel = selected && rows.some((r) => r.name === selected) ? selected : rows[0]?.name || null;
 
   if (!rows.length)
-    return `<div class="" style="padding:16px">
+    return `<div class="" style="padding:12px 16px 0">
+      ${segs}
       <div class="pb-card" style="padding:26px;text-align:center;color:var(--muted);font-size:13.5px;line-height:1.6">
         ${icon("trending-up", 26, 'style="margin:0 auto 10px;display:block;color:var(--faint)"')}
         ${T("prog.empty")}
@@ -1554,28 +1602,40 @@ function renderProgress(log, library, goals, badges, settings, unit) {
   const series = sel
     ? chronoSort(log).filter((e) => e.exercise === sel).map((e) => ({ ...e, m: metricOf(e) })).filter((e) => e.m != null)
     : [];
-  const chartData = series.map((e) => ({ x: fmtShort(e.date), y: e.m }));
+  /* every dot carries the entry that made it, so tapping one can open the
+     session behind the number instead of just showing it again */
+  const chartData = series.map((e) => ({ x: fmtShort(e.date), y: e.m, e, badge: badges[e.id]?.badge || null }));
 
   const { sets: wkSets } = weeklyTotals(log, settings.startDate);
   const maxWk = Math.max(1, ...Object.keys(wkSets).map(Number));
   const wkData = Array.from({ length: maxWk }, (_, i) => ({ w: "W" + (i + 1), sets: wkSets[i + 1] || 0 }));
 
-  if (chartData.length >= 2) chartState.line = { data: chartData, goal: selRow?.goal ?? null };
+  if (chartData.length >= 2)
+    chartState.line = {
+      data: chartData, goal: selRow?.goal ?? null,
+      unit: selRow?.cardio ? T("unit.pts") : unit,
+      name: sel, cardio: !!selRow?.cardio,
+    };
   chartState.bar = { data: wkData };
+
+  /* a dot from a lift you're no longer looking at can't stay selected */
+  if (ui.chartSel && !chartData.some((d) => d.e.id === ui.chartSel)) ui.chartSel = null;
+  if (!chartState.line) ui.chartFull = false;
 
   const goalRows = rows.map((r, i) => renderGoalRow(r, unit, i === rows.length - 1, sel === r.name)).join("");
 
   const detail = series.length > 0
     ? `<div class="pb-card pb-scroll" data-scrollkey="prog-detail" style="margin-bottom:20px;max-height:210px;overflow-y:auto">
-        ${[...series].reverse().map((e) => `<div style="display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--border-soft);font-size:13px">
+        ${[...series].reverse().map((e) => `<button data-action="chart-pick" data-id="${e.id}" style="width:100%;text-align:left;display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--border-soft);font-size:13px;color:var(--text);background:${ui.chartSel === e.id ? "rgba(233,185,73,.08)" : "transparent"}">
           <span style="color:var(--muted);width:84px;flex-shrink:0">${fmtShort(e.date)}</span>
           <span style="flex:1;color:var(--faint);font-size:12px">${e.kind === "cardio" ? `${esc(e.minutes)} min × RPE ${esc(e.intensity)}` : `${esc(e.reps)} × ${esc(e.weight)} ${unitOf(e)}`}</span>
           <span class="pb-num" style="font-weight:700;font-size:15.5px;color:${badges[e.id]?.badge === "pr" ? "var(--gold)" : "var(--text)"}">${e.m}</span>
-        </div>`).join("")}
+        </button>`).join("")}
       </div>`
     : "";
 
   return `<div class="" style="padding:12px 16px 0">
+    ${segs}
     <div style="display:flex;gap:8px;margin-bottom:18px">
       ${stat(T("prog.entries"), glance.logged)}
       ${stat(T("prog.sets"), glance.sets)}
@@ -1587,14 +1647,16 @@ function renderProgress(log, library, goals, badges, settings, unit) {
     <div class="pb-card" style="margin-bottom:20px;overflow:hidden">${goalRows}</div>
 
     ${sectionTitle(T("prog.graph"), `<span style="font-size:11px;color:var(--faint)">${selRow?.cardio ? T("prog.sessionLoad") : T("prog.est1rm", { unit })}</span>`)}
-    <div class="pb-card" style="padding:14px 8px 6px;margin-bottom:12px">
+    <div class="pb-card" style="padding:14px 8px 8px;margin-bottom:12px">
       <div style="padding:0 8px 10px">
         <select class="pb-input" data-bind="progressSel" style="font-weight:600">
           ${rows.map((r) => `<option value="${esc(r.name)}"${r.name === sel ? " selected" : ""}>${esc(exLabel(r.name))}</option>`).join("")}
         </select>
       </div>
       ${chartData.length >= 2
-        ? `<div id="lineChart" style="position:relative;width:100%;height:210px"></div>`
+        ? `${chartToolbar(false)}
+           <div data-linechart style="position:relative;width:100%;height:210px;touch-action:pan-y"></div>
+           <div data-linedetail>${renderPointDetail()}</div>`
         : `<div style="height:130px;display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:13px;text-align:center;padding:0 24px;line-height:1.5">
             ${sel ? T("prog.chartHint") : T("prog.chartHintAny")}
           </div>`}
@@ -1607,6 +1669,88 @@ function renderProgress(log, library, goals, badges, settings, unit) {
       <div id="barChart" style="position:relative;width:100%;height:140px"></div>
     </div>
   </div>`;
+}
+
+/* The second segment of the Progress tab: reserved, on purpose, and labelled
+   as such rather than quietly missing. Ranks and strength standards land here. */
+function renderProgPlaceholder() {
+  return `<div>
+    ${sectionTitle(T("prog.placeholderTitle"))}
+    <!-- PLACEHOLDER_RANKS_SLOT — ranks & strength standards ship in a later version -->
+    ${placeholder("PLACEHOLDER_RANKS_SLOT", 120, T("prog.placeholderSlot"))}
+    <div style="font-size:12px;color:var(--faint);line-height:1.55;margin:12px 4px 0">
+      ${T("prog.placeholderNote")}
+    </div>
+    <div style="height:14px"></div>
+  </div>`;
+}
+
+/* ── the progress graph's own controls ────────────────────────────────
+   Zoom, reset and fullscreen sit above the plot rather than hiding behind
+   a gesture, because a chart you can only zoom by pinching is a chart half
+   the people looking at it never zoom at all. */
+function chartToolbar(full) {
+  return `<div data-charttoolbar="${full ? "full" : "inline"}">${chartToolbarInner(full)}</div>`;
+}
+
+function chartToolbarInner(full) {
+  const btn = (action, ic, label) =>
+    `<button data-action="${action}" title="${label}" aria-label="${label}" class="pb-btn pb-ghost" style="width:34px;height:32px;border-radius:9px;color:var(--muted);flex-shrink:0">${icon(ic, 15)}</button>`;
+  const zoomed = !!ui.chartView;
+  return `<div style="display:flex;align-items:center;gap:6px;padding:0 8px 8px">
+    ${btn("chart-zoom-in", "zoom-in", T("chart.zoomIn"))}
+    ${btn("chart-zoom-out", "zoom-out", T("chart.zoomOut"))}
+    ${zoomed ? btn("chart-reset", "rotate-ccw", T("chart.reset")) : ""}
+    <div style="flex:1;min-width:0;font-size:10.5px;color:var(--faint);text-align:right;line-height:1.3">${T("chart.hint")}</div>
+    ${btn(full ? "chart-exit-full" : "chart-full", full ? "minimize-2" : "maximize-2", full ? T("chart.exitFull") : T("chart.full"))}
+  </div>`;
+}
+
+/* What one dot is: the set that made it, the day it happened, and whatever
+   was written down at the time. Nothing selected yet says so. */
+function renderPointDetail() {
+  const line = chartState.line;
+  if (!line) return "";
+  const p = line.data.find((d) => d.e.id === ui.chartSel);
+  if (!p)
+    return `<div style="font-size:11.5px;color:var(--faint);line-height:1.5;padding:6px 10px 2px;text-align:center">${T("chart.tapHint")}</div>`;
+
+  const e = p.e;
+  const eUnit = unitOf(e);
+  const sets = isDetailed(e) ? filledSets(e) : [];
+  return `<div class="pb-card2" style="margin:6px 4px 2px;padding:12px 13px">
+    <div style="display:flex;align-items:baseline;gap:8px">
+      <div style="font-weight:700;font-size:14px;flex:1;min-width:0">${fmtDate(e.date, { weekday: "short", day: "numeric", month: "short", year: "numeric" })}</div>
+      ${p.badge && BADGE_SHORT[p.badge] ? chip(BADGE_SHORT[p.badge], p.badge === "pr" ? "var(--gold)" : "") : ""}
+      <div class="pb-num" style="font-weight:700;font-size:19px;color:var(--gold);flex-shrink:0">${p.y}<span style="font-size:10.5px;color:var(--muted);font-weight:600"> ${line.unit}</span></div>
+    </div>
+    <div style="font-size:12.5px;color:var(--muted);margin-top:3px">${entrySummary(e, eUnit, true)}</div>
+    ${sets.length ? `<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:9px">
+      ${sets.map((s, i) => chip(`${i + 1} · ${esc(s.reps)} × ${esc(s.weight)} ${eUnit}${s.rpe ? ` @${esc(s.rpe)}` : ""}`)).join("")}
+    </div>` : ""}
+    ${e.notes
+      ? `<div style="font-size:12.5px;color:var(--text);margin-top:9px;line-height:1.5">“${esc(e.notes)}”</div>`
+      : `<div style="font-size:11.5px;color:var(--faint);margin-top:8px">${T("chart.noNote")}</div>`}
+  </div>`;
+}
+
+/* Fullscreen: the same chart, the same selection, just given the whole
+   phone. Opened from the toolbar, closed back to exactly where it was. */
+function renderChartFull() {
+  const line = chartState.line;
+  if (!line) return "";
+  return fullScreen(95, `
+    <div style="display:flex;align-items:center;gap:10px;padding:14px 16px 10px;border-bottom:1px solid var(--border-soft)">
+      <button data-action="chart-exit-full" style="color:var(--muted);padding:4px">${icon("x", 21)}</button>
+      <div style="flex:1;min-width:0">
+        <div class="pb-num" style="font-size:17px;font-weight:700;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(exLabel(line.name))}</div>
+        <div style="font-size:11.5px;color:var(--faint)">${line.cardio ? T("prog.sessionLoad") : T("prog.est1rm", { unit: line.unit })}</div>
+      </div>
+    </div>
+    <div style="padding:10px 8px 0">${chartToolbar(true)}</div>
+    <div data-linechart style="position:relative;flex:1;min-height:120px;margin:0 8px;touch-action:none"></div>
+    <div class="pb-scroll" data-linedetail style="max-height:44%;overflow-y:auto;padding:0 12px 18px">${renderPointDetail()}</div>
+  `, "chartFull");
 }
 
 function renderGoalRow(r, unit, last, active) {
@@ -1644,6 +1788,104 @@ function renderGoalRow(r, unit, last, active) {
       <div style="flex:1"></div>
       ${goalControls}
     </div>
+  </div>`;
+}
+
+/* ────────────────────── ONE REP MAX CALCULATOR ─────────────────────
+   A lift and a rep count in, a whole training block's worth of numbers
+   out: the estimated max, what to load for each percentage of it, and
+   what each rep count is worth. It's stand-alone on purpose — nothing
+   here is logged, nothing here needs an exercise to exist first, so it
+   works for the barbell in front of you at a gym you're visiting once.
+
+   The maths is calcPct/calcReps at the top of the file, which is the same
+   Epley the log uses, so a max worked out here matches the one a logged
+   set would produce. Units are just a label: the answer comes back in
+   whatever went in, because every step of it is a ratio.               */
+
+const CALC_PERCENTS = [100, 95, 90, 85, 80, 75, 70, 65, 60, 55, 50];
+const CALC_MAX_REPS = 30;
+
+const calcTable = (head, rows) => `<div class="pb-card" style="overflow:hidden;margin-bottom:16px">
+  <div style="display:flex;gap:8px;padding:10px 13px;border-bottom:1px solid var(--border);background:var(--surface2)">
+    ${head.map((h, i) => `<div class="pb-label" style="flex:1;min-width:0;text-align:${i === 0 ? "left" : i === 1 ? "center" : "right"}">${h}</div>`).join("")}
+  </div>
+  ${rows}
+</div>`;
+
+const calcRow = (cells, last, highlight) => `<div style="display:flex;gap:8px;align-items:center;padding:9px 13px;border-bottom:${last ? "none" : "1px solid var(--border-soft)"};background:${highlight ? "rgba(233,185,73,.07)" : "transparent"}">
+  <div style="flex:1;min-width:0;font-size:13px;font-weight:600;color:${highlight ? "var(--gold)" : "var(--muted)"}">${cells[0]}</div>
+  <div class="pb-num" style="flex:1;min-width:0;text-align:center;font-size:15px;font-weight:700;color:var(--text)">${cells[1]}</div>
+  <div class="pb-num" style="flex:1;min-width:0;text-align:right;font-size:14px;font-weight:600;color:var(--muted)">${cells[2]}</div>
+</div>`;
+
+function renderCalc() {
+  const f = ui.calc;
+  const unit = f.unit || state.settings.units;
+  const res = ui.calcResult;
+  const ready = +decimalize(f.weight) > 0 && +decimalize(f.reps) > 0;
+
+  const form = `<div class="pb-card" style="padding:14px;margin-bottom:16px">
+    ${field(labelWith(T("calc.lift"), unitSelect(unit, "calcUnit")),
+      `<input class="pb-input" ${NUM} data-bind="calc.weight" value="${esc(f.weight)}" placeholder="—">`)}
+    ${field(T("calc.reps"), `<input class="pb-input" ${NUM} data-bind="calc.reps" value="${esc(f.reps)}" placeholder="—">`,
+      T("calc.repsHint"))}
+    <button id="calcRunBtn" data-action="calc-run" ${ready ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:14px 0;font-size:15.5px;opacity:${ready ? 1 : 0.45}">
+      ${icon("equal", 17)} ${T("calc.run")}
+    </button>
+  </div>`;
+
+  if (!res)
+    return `<div class="" style="padding:14px 16px 0">
+      <div style="font-size:13px;color:var(--muted);line-height:1.55;margin:0 2px 14px">${T("calc.intro")}</div>
+      ${form}
+      <div class="pb-card" style="padding:24px;text-align:center;color:var(--faint);font-size:13px;line-height:1.6">
+        ${icon("calculator", 26, 'style="margin:0 auto 10px;display:block"')}
+        ${T("calc.empty")}
+      </div>
+      <div style="height:14px"></div>
+    </div>`;
+
+  const u = res.unit;
+  /* every row is built off the UNROUNDED max — rounding once, at the end of
+     each row, is what keeps 95% of a 133.3 kg max reading 126.7 and not the
+     126.6 you get from rounding twice */
+  const pctRows = CALC_PERCENTS.map((p, i) => calcRow(
+    [`${p}%`, `${trimNum(res.exact * p / 100)} ${u}`, calcReps(p / 100)],
+    i === CALC_PERCENTS.length - 1, p === 100,
+  )).join("");
+
+  /* and the same thing read the other way: what one rep count is worth. The
+     percentage is read back off the weight actually printed, so the row is
+     always internally consistent. */
+  const repRows = Array.from({ length: CALC_MAX_REPS }, (_, i) => i + 1).map((r, i, arr) => {
+    const w = Math.round(res.exact * calcPct(r) * 10) / 10;
+    return calcRow([r, `${trimNum(w)} ${u}`, `${Math.round((w / res.oneRM) * 100)}%`],
+      i === arr.length - 1, r === res.reps);
+  }).join("");
+
+  return `<div class="" style="padding:14px 16px 0">
+    <div style="font-size:13px;color:var(--muted);line-height:1.55;margin:0 2px 14px">${T("calc.intro")}</div>
+    ${form}
+
+    <div class="pb-card" style="padding:16px 15px;margin-bottom:18px;border-color:rgba(233,185,73,.45);background:rgba(233,185,73,.06)">
+      <div class="pb-label" style="margin-bottom:4px">${T("calc.resultLabel")}</div>
+      <div class="pb-num" style="font-size:38px;font-weight:700;line-height:1;color:var(--gold)">
+        ${trimNum(res.oneRM)}<span style="font-size:16px;color:var(--muted);font-weight:600"> ${u}</span>
+      </div>
+      <div style="font-size:12.5px;color:var(--muted);margin-top:6px">
+        ${T("calc.from", { weight: trimNum(res.weight), unit: u, reps: res.reps })}
+      </div>
+    </div>
+
+    ${sectionTitle(T("calc.pctTitle"))}
+    ${calcTable([T("calc.colPct"), T("calc.colWeight"), T("calc.colReps")], pctRows)}
+
+    ${sectionTitle(T("calc.repTitle"))}
+    ${calcTable([T("calc.colRepsPlain"), T("calc.colWeight"), T("calc.colPctPlain")], repRows)}
+
+    <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 4px 10px">${T("calc.footer")}</div>
+    <div style="height:14px"></div>
   </div>`;
 }
 
@@ -2514,8 +2756,7 @@ function renderSetForm(form, unit) {
   return sheet(isNew ? T("setForm.add", { n: index + 1 }) : T("setForm.edit", { n: index + 1 }), "setForm", `
     <div style="display:flex;gap:10px">
       <div style="flex:1">${field(labelWith(T("setForm.reps")), `<input class="pb-input" ${NUM} data-bind="set.reps" value="${esc(s.reps)}" placeholder="—" data-autofocus>`)}</div>
-      <div style="flex:1">${field(labelWith(T("setForm.weight"), unitSelect(unit)), `<input class="pb-input" ${NUM} data-bind="set.weight" value="${esc(s.weight)}" placeholder="—">`,
-        T("setForm.weightHint"))}</div>
+      <div style="flex:1">${field(labelWith(T("setForm.weight"), unitSelect(unit)), `<input class="pb-input" ${NUM} data-bind="set.weight" value="${esc(s.weight)}" placeholder="—">`)}</div>
     </div>
     ${field(T("entry.rpe"), `<input class="pb-input" ${NUM} data-bind="set.rpe" value="${esc(s.rpe)}" placeholder="—">`, T("setForm.rpeHint"))}
 
@@ -2875,21 +3116,29 @@ function renderTimers() {
 
 /* ── timers where you're actually standing ────────────────────────────
    Rest starts the moment a set ends, not after you've closed two windows
-   to reach the Timer tab. So the Timer tab's own list is embedded at the
-   bottom of the workout window and of each exercise — the same running
-   dials and the same tappable rows, behaving identically, just somewhere
-   you can reach without losing what you were typing. */
+   to reach the Timer tab. So your pinned timers ride along at the bottom
+   of the workout window and of each exercise — the same round dials as on
+   the home screen, one tap to start, pause or clear, somewhere you can
+   reach without losing what you were typing.
+
+   Deliberately the dials and not the full list: mid-set you want the two
+   or three lengths you actually rest for, at a glance and at arm's length,
+   not every timer you've ever saved. The Timer tab is still the place to
+   build, edit and pin them. */
 
 function renderTimerList() {
-  const timers = state.timers || [];
-  if (!timers.length) return "";
-  const active = timers.filter((t) => timerPhase(t) !== "idle");
-  const idle = timers.filter((t) => timerPhase(t) === "idle");
+  if (!(state.timers || []).length) return "";
+  const pinned = pinnedTimers();
 
   return `<div style="margin-top:22px">
     ${sectionTitle(T("timers.listTitle"), `<span style="font-size:11px;color:var(--faint)">${T("timers.listHint")}</span>`)}
-    ${active.map(timerActiveCard).join("")}
-    ${idle.length ? `<div class="pb-card" style="overflow:hidden">${idle.map((t, i) => timerIdleRow(t, i === idle.length - 1)).join("")}</div>` : ""}
+    ${pinned.length
+      ? `<div class="pb-card" style="padding:14px 12px 15px">
+          <div style="display:flex;align-items:flex-start;gap:6px">${pinned.map(pinnedTimerDial).join("")}</div>
+        </div>`
+      : `<div class="pb-card" style="padding:16px;font-size:12.5px;color:var(--faint);line-height:1.5;text-align:center">
+          ${T("home.noPinnedTimers", { icon: icon("pin", 11) })}
+        </div>`}
   </div>`;
 }
 
@@ -2958,12 +3207,6 @@ function renderProfile(f) {
       </div>`)}
       ${field(T("profile.startDate"), `<input type="date" class="pb-input" data-bind="profile.startDate" value="${esc(f.startDate)}">`, T("profile.startDateHint"))}
       ${field(T("profile.daysPerWeek"), `<input class="pb-input" ${NUM} data-bind="profile.daysPerWeek" value="${esc(f.daysPerWeek)}">`)}
-
-      <div class="pb-hairline" style="margin:18px 0"></div>
-
-      <!-- PLACEHOLDER_PLANNER_TAB_SLOT — Program Planner ships in a later version -->
-      ${sectionTitle(T("profile.comingLater"))}
-      ${placeholder("PLACEHOLDER_PLANNER_TAB_SLOT", 72, T("profile.plannerSlot"))}
 
       <div class="pb-hairline" style="margin:18px 0"></div>
       ${sectionTitle(T("profile.data"))}
@@ -3055,67 +3298,257 @@ function drawCharts() {
   drawBarChart();
 }
 
+/* ══════════════════ THE PROGRESS GRAPH: AN INSTRUMENT ═══════════════
+   The line chart is the one place where every number you've ever logged
+   for a lift is visible at once, so it's built to be handled rather than
+   admired: pinch or scroll to zoom, drag to pan, tap a dot to read the
+   session behind it, and blow the whole thing up to fill the phone.
+
+   Two rules make that survive the app's render-everything model:
+
+   1. The view (which slice of the series is on screen) and the selection
+      live in `ui`, not in this file's closures, so a re-render never
+      resets what you were looking at.
+   2. Every [data-linechart] on the page is painted from the same state.
+      The card in the tab and the fullscreen window are the same chart
+      drawn twice; they can't drift apart.
+
+   Gestures redraw the chart while they're still going, so the in-flight
+   pointer state has to outlive a redraw too — hence the module-level
+   pointer map instead of variables inside the paint function.         */
+
+const CHART_MIN_SPAN = 1;         // never zoom past two points on screen
+const CHART_TAP_SLOP = 7;         // px of movement still counted as a tap
+const chartPointers = new Map();  // live pointers on a plot, by pointerId
+let chartGesture = null;          // {mode:"pan"|"pinch", …} while one is running
+let chartClipId = 0;              // unique <clipPath> ids, one per painted copy
+
+/* the visible index window, clamped against the data every time it's read,
+   so nothing can leave a view pointing off the end of a shorter series */
+function chartWindow(n) {
+  const v = ui.chartView || { lo: 0, hi: n - 1 };
+  const span = Math.min(Math.max(v.hi - v.lo, CHART_MIN_SPAN), n - 1);
+  const lo = Math.max(0, Math.min(v.lo, n - 1 - span));
+  return { lo, hi: lo + span };
+}
+
+/* zoom around a focal index — the point under the fingers stays put */
+function chartZoom(factor, focus) {
+  const line = chartState.line;
+  if (!line || line.data.length < 2) return;
+  const n = line.data.length;
+  const { lo, hi } = chartWindow(n);
+  const span = hi - lo;
+  const fi = focus == null ? (lo + hi) / 2 : focus;
+  const t = span > 0 ? (fi - lo) / span : 0.5;
+  const next = Math.min(Math.max(span / factor, CHART_MIN_SPAN), n - 1);
+  const nlo = fi - t * next;
+  ui.chartView = next >= n - 1 ? null : { lo: nlo, hi: nlo + next };
+  drawLineChart();
+  refreshChartToolbars();
+}
+
+function chartPan(dIndex) {
+  const line = chartState.line;
+  if (!line) return;
+  const { lo, hi } = chartWindow(line.data.length);
+  ui.chartView = { lo: lo + dIndex, hi: hi + dIndex };
+  drawLineChart();
+}
+
+/* Selecting a dot repaints the chart and rewrites the detail panels in
+   place. A full render() here would rebuild the page under the finger
+   mid-gesture, so this is deliberately surgical. */
+function chartSelect(id) {
+  ui.chartSel = id;
+  drawLineChart();
+  document.querySelectorAll("[data-linedetail]").forEach((el) => { el.innerHTML = renderPointDetail(); });
+  /* keep the session list under the chart in step with the dot */
+  document.querySelectorAll('[data-action="chart-pick"]').forEach((el) => {
+    el.style.background = el.dataset.id === id ? "rgba(233,185,73,.08)" : "transparent";
+  });
+  if (window.lucide) lucide.createIcons();
+}
+
+/* the reset button appears and disappears with the zoom, so the toolbars
+   are rebuilt whenever the view changes */
+function refreshChartToolbars() {
+  document.querySelectorAll("[data-charttoolbar]").forEach((el) => {
+    el.innerHTML = chartToolbarInner(el.dataset.charttoolbar === "full");
+  });
+  if (window.lucide) lucide.createIcons();
+}
+
 function drawLineChart() {
-  const wrap = document.getElementById("lineChart");
-  if (!wrap || !chartState.line) return;
+  document.querySelectorAll("[data-linechart]").forEach(paintLineChart);
+}
+
+function paintLineChart(wrap) {
+  if (!chartState.line) { wrap.innerHTML = ""; return; }
   const { data, goal } = chartState.line;
-  const W = wrap.clientWidth || 340, H = 210;
-  const left = 46, right = W - 14, top = 6, bottom = H - 30;
+  const n = data.length;
+  const W = wrap.clientWidth, H = wrap.clientHeight;
+  if (n < 2 || !W || !H) return;
+
+  const left = 46, right = W - 14, top = 8, bottom = H - 26;
   const plotW = right - left, plotH = bottom - top;
+  if (plotW < 20 || plotH < 20) return;
 
   const cGrid = themeColor("--border-soft"), cAxis = themeColor("--border"), cTick = themeColor("--faint"),
-        cGold = themeColor("--gold"), cDot = themeColor("--bg"), cGreen = themeColor("--green");
+        cGold = themeColor("--gold"), cDot = themeColor("--bg"), cGreen = themeColor("--green"),
+        cText = themeColor("--text");
 
-  const vals = data.map((d) => d.y);
+  const { lo, hi } = chartWindow(n);
+  const span = hi - lo;
+  /* one point of margin either side keeps the line entering and leaving the
+     frame instead of starting in mid-air at the edge of the zoom */
+  const i0 = Math.max(0, Math.floor(lo) - 1), i1 = Math.min(n - 1, Math.ceil(hi) + 1);
+  const shown = data.slice(Math.max(0, Math.floor(lo)), Math.min(n - 1, Math.ceil(hi)) + 1);
+  const vals = (shown.length ? shown : data).map((d) => d.y);
+
   const ticks = niceTicks(Math.min(...vals), Math.max(...vals), 5);
   const yMin = ticks[0], yMax = ticks[ticks.length - 1];
-  const yOf = (v) => bottom - ((v - yMin) / (yMax - yMin)) * plotH;
-  const n = data.length;
-  const xOf = (i) => n === 1 ? left + plotW / 2 : left + (i * plotW) / (n - 1);
+  const yOf = (v) => bottom - ((v - yMin) / (yMax - yMin || 1)) * plotH;
+  const xOf = (i) => left + ((i - lo) / span) * plotW;
+  /* the inverse, for hit-testing and for zooming around a finger */
+  const idxAt = (px) => lo + ((px - left) / plotW) * span;
 
-  const pts = data.map((d, i) => ({ x: +xOf(i).toFixed(2), y: +yOf(d.y).toFixed(2) }));
+  const pts = data.map((d, i) => ({ x: +xOf(i).toFixed(2), y: +yOf(d.y).toFixed(2), i }));
+  const cid = "pbclip" + (++chartClipId);
 
-  let svg = `<svg width="${W}" height="${H}" style="display:block">`;
-  /* grid */
+  let svg = `<svg width="${W}" height="${H}" style="display:block">
+    <defs><clipPath id="${cid}"><rect x="${left}" y="${top - 6}" width="${plotW}" height="${plotH + 12}"/></clipPath></defs>`;
+
+  /* horizontal grid */
   for (const t of ticks) svg += `<line x1="${left}" x2="${right}" y1="${yOf(t).toFixed(2)}" y2="${yOf(t).toFixed(2)}" stroke="${cGrid}" stroke-dasharray="3 5"/>`;
-  for (let i = 0; i < n; i++) svg += `<line x1="${pts[i].x}" x2="${pts[i].x}" y1="${top}" y2="${bottom}" stroke="${cGrid}" stroke-dasharray="3 5"/>`;
-  /* axes */
+  /* one vertical guide per visible point, thinned out when they crowd */
+  const vSkip = Math.max(1, Math.ceil((i1 - i0 + 1) / 12));
+  for (let i = i0; i <= i1; i += vSkip) {
+    const x = pts[i].x;
+    if (x < left - 1 || x > right + 1) continue;
+    svg += `<line x1="${x}" x2="${x}" y1="${top}" y2="${bottom}" stroke="${cGrid}" stroke-dasharray="3 5"/>`;
+  }
+  /* axes + labels */
   svg += `<line x1="${left}" x2="${right}" y1="${bottom}" y2="${bottom}" stroke="${cAxis}"/>`;
   for (const t of ticks) svg += `<text x="${left - 6}" y="${(yOf(t) + 3.5).toFixed(2)}" fill="${cTick}" font-size="10.5" text-anchor="end">${t}</text>`;
-  const skip = Math.max(1, Math.ceil(n / 7));
-  for (let i = 0; i < n; i++) {
-    if (i % skip !== 0 && i !== n - 1) continue;
-    svg += `<text x="${pts[i].x}" y="${bottom + 14}" fill="${cTick}" font-size="10.5" text-anchor="middle">${esc(data[i].x)}</text>`;
+  const lSkip = Math.max(1, Math.ceil((i1 - i0 + 1) / 7));
+  for (let i = i0; i <= i1; i++) {
+    if ((i - i0) % lSkip !== 0 && i !== i1) continue;
+    const x = pts[i].x;
+    if (x < left + 4 || x > right - 4) continue;
+    svg += `<text x="${x}" y="${bottom + 14}" fill="${cTick}" font-size="10.5" text-anchor="middle">${esc(data[i].x)}</text>`;
   }
-  /* goal reference line (drawn only inside the domain, like recharts) */
+  /* goal reference line, drawn only while it's inside the visible domain */
   if (goal != null && goal >= yMin && goal <= yMax) {
     const gy = yOf(goal).toFixed(2);
     svg += `<line x1="${left}" x2="${right}" y1="${gy}" y2="${gy}" stroke="${cGreen}" stroke-dasharray="5 4"/>`;
     svg += `<text x="${right - 3}" y="${(yOf(goal) - 4).toFixed(2)}" fill="${cGreen}" font-size="10" text-anchor="end">${T("prog.goal").toLowerCase()}</text>`;
   }
-  /* line + dots */
-  svg += `<path d="${monotonePath(pts)}" fill="none" stroke="${cGold}" stroke-width="2.4"/>`;
-  for (const p of pts) svg += `<circle cx="${p.x}" cy="${p.y}" r="3.5" fill="${cGold}" stroke="${cDot}" stroke-width="1.5"/>`;
-  svg += `<circle id="lineActiveDot" r="5" fill="${cGold}" stroke="${cDot}" stroke-width="1.5" style="display:none"/>`;
-  svg += `</svg>`;
-  wrap.innerHTML = svg + `<div id="lineTip" style="position:absolute;display:none;pointer-events:none;z-index:5"></div>`;
 
-  const tip = wrap.querySelector("#lineTip");
-  const dot = wrap.querySelector("#lineActiveDot");
-  wrap.onmousemove = (e) => {
-    const r = wrap.getBoundingClientRect();
-    const mx = e.clientX - r.left;
-    let best = 0, bd = Infinity;
-    pts.forEach((p, i) => { const d = Math.abs(p.x - mx); if (d < bd) { bd = d; best = i; } });
-    const p = pts[best];
-    dot.setAttribute("cx", p.x); dot.setAttribute("cy", p.y); dot.style.display = "";
-    tip.innerHTML = tooltipHTML(data[best].x, "y", data[best].y, cGold);
-    tip.style.display = "block";
-    const tw = tip.offsetWidth;
-    tip.style.left = Math.min(Math.max(2, p.x + 12), W - tw - 2) + "px";
-    tip.style.top = Math.max(2, p.y - 40) + "px";
+  /* line + dots, clipped to the plot so a zoom can't spill over the axis */
+  svg += `<g clip-path="url(#${cid})">`;
+  svg += `<path d="${monotonePath(pts)}" fill="none" stroke="${cGold}" stroke-width="2.4"/>`;
+  const sel = data.findIndex((d) => d.e.id === ui.chartSel);
+  /* dots thin out when zoomed all the way out on a long history, but the
+     selected one is always drawn */
+  const dSkip = plotW / Math.max(1, span) < 7 ? Math.ceil(7 / Math.max(0.5, plotW / Math.max(1, span))) : 1;
+  for (let i = i0; i <= i1; i++) {
+    if (i !== sel && dSkip > 1 && i % dSkip !== 0) continue;
+    svg += `<circle cx="${pts[i].x}" cy="${pts[i].y}" r="${data[i].badge === "pr" ? 4.4 : 3.5}" fill="${cGold}" stroke="${cDot}" stroke-width="1.5"/>`;
+  }
+  if (sel >= 0) {
+    const p = pts[sel];
+    svg += `<line x1="${p.x}" x2="${p.x}" y1="${top}" y2="${bottom}" stroke="${cGold}" stroke-width="1" stroke-dasharray="2 4" opacity=".8"/>`;
+    svg += `<circle cx="${p.x}" cy="${p.y}" r="11" fill="${cGold}" opacity=".16"/>`;
+    svg += `<circle cx="${p.x}" cy="${p.y}" r="6" fill="${cGold}" stroke="${cText}" stroke-width="1.6"/>`;
+  }
+  svg += `</g></svg>`;
+
+  /* the zoom read-out, so it's never a mystery which part of the history
+     you're looking at */
+  const zoomTag = ui.chartView
+    ? `<div style="position:absolute;top:4px;right:8px;font-size:10px;font-weight:700;letter-spacing:.04em;color:var(--gold);background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:2px 6px">
+        ${T("chart.showing", { n: Math.min(n, Math.round(span) + 1), total: n })}
+      </div>`
+    : "";
+  wrap.innerHTML = svg + zoomTag;
+
+  /* ── gestures ─────────────────────────────────────────────────────── */
+  const endGesture = (id) => {
+    chartPointers.delete(id);
+    if (chartPointers.size === 0) chartGesture = null;
+    else if (chartGesture) chartGesture.moved = true;   // no tap on the way out of a pinch
   };
-  wrap.onmouseleave = () => { tip.style.display = "none"; dot.style.display = "none"; };
+
+  wrap.onpointerdown = (e) => {
+    chartPointers.set(e.pointerId, { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, t: Date.now() });
+    try { wrap.setPointerCapture(e.pointerId); } catch { /* mouse on some builds */ }
+    if (chartPointers.size >= 2) {
+      const [a, b] = [...chartPointers.values()];
+      const r = wrap.getBoundingClientRect();
+      chartGesture = {
+        mode: "pinch", moved: true,
+        dist: Math.max(1, Math.abs(a.x - b.x)),
+        win: chartWindow(n),
+        focus: Math.max(0, Math.min(n - 1, idxAt((a.x + b.x) / 2 - r.left))),
+      };
+    } else {
+      chartGesture = { mode: "pan", moved: false };
+    }
+  };
+
+  wrap.onpointermove = (e) => {
+    const p = chartPointers.get(e.pointerId);
+    if (!p || !chartGesture) return;
+    const prevX = p.x;
+    p.x = e.clientX; p.y = e.clientY;
+
+    if (chartGesture.mode === "pinch" && chartPointers.size >= 2) {
+      const [a, b] = [...chartPointers.values()];
+      const dist = Math.max(1, Math.abs(a.x - b.x));
+      const g = chartGesture;
+      const span0 = g.win.hi - g.win.lo;
+      const next = Math.min(Math.max(span0 * (g.dist / dist), CHART_MIN_SPAN), n - 1);
+      const t = span0 > 0 ? (g.focus - g.win.lo) / span0 : 0.5;
+      const nlo = g.focus - t * next;
+      ui.chartView = next >= n - 1 ? null : { lo: nlo, hi: nlo + next };
+      drawLineChart();
+      refreshChartToolbars();
+      return;
+    }
+    if (Math.abs(p.x - p.x0) > CHART_TAP_SLOP || Math.abs(p.y - p.y0) > CHART_TAP_SLOP) chartGesture.moved = true;
+    if (!chartGesture.moved || !ui.chartView) return;   // unzoomed there's nowhere to pan
+    chartPan(-((p.x - prevX) / plotW) * span);
+  };
+
+  wrap.onpointerup = (e) => {
+    const p = chartPointers.get(e.pointerId);
+    const g = chartGesture;
+    /* a tap, not a drag: open whatever dot is nearest, or clear the
+       selection when the tap lands nowhere near the line */
+    if (p && g && g.mode === "pan" && !g.moved) {
+      const r = wrap.getBoundingClientRect();
+      const mx = e.clientX - r.left, my = e.clientY - r.top;
+      let best = -1, bd = Infinity;
+      for (let i = i0; i <= i1; i++) {
+        const d = Math.hypot(pts[i].x - mx, (pts[i].y - my) * 0.45);   // x matters more than y
+        if (d < bd) { bd = d; best = i; }
+      }
+      endGesture(e.pointerId);
+      chartSelect(best >= 0 && bd < 34 ? data[best].e.id : null);
+      return;
+    }
+    endGesture(e.pointerId);
+  };
+  wrap.onpointercancel = (e) => endGesture(e.pointerId);
+
+  wrap.onwheel = (e) => {
+    e.preventDefault();
+    const r = wrap.getBoundingClientRect();
+    chartZoom(e.deltaY < 0 ? 1.3 : 1 / 1.3, Math.max(0, Math.min(n - 1, idxAt(e.clientX - r.left))));
+  };
+  /* a double-click is the desktop shortcut back to the whole series */
+  wrap.ondblclick = () => { ui.chartView = null; drawLineChart(); refreshChartToolbars(); };
 }
 
 function drawBarChart() {
@@ -3366,7 +3799,33 @@ const actions = {
     const e = state.log.find((x) => x.id === el.dataset.id);
     if (e) { ui.entryForm = { f: { ...e }, isDraft: false }; render(); }
   },
-  "select-progress": (el) => { ui.progressSelected = el.dataset.name; render(); },
+  "prog-seg": (el) => { ui.progSeg = el.dataset.id; ui.chartFull = false; render(); },
+  "select-progress": (el) => {
+    ui.progressSelected = el.dataset.name;
+    ui.chartView = null; ui.chartSel = null;   // a different lift is a different chart
+    render();
+  },
+
+  /* ── the progress graph ───────────────────────────────────────────── */
+  "chart-zoom-in": () => chartZoom(1.6, null),
+  "chart-zoom-out": () => chartZoom(1 / 1.6, null),
+  "chart-reset": () => { ui.chartView = null; drawLineChart(); refreshChartToolbars(); },
+  "chart-full": () => { ui.chartFull = true; render(); },
+  "chart-exit-full": () => { ui.chartFull = false; render(); },
+  /* picking a session from the list under the chart moves the dot too */
+  "chart-pick": (el) => chartSelect(ui.chartSel === el.dataset.id ? null : el.dataset.id),
+
+  /* ── 1RM calculator ───────────────────────────────────────────────── */
+  "calc-run": () => {
+    const w = +decimalize(ui.calc.weight), r = Math.round(+decimalize(ui.calc.reps));
+    const oneRM = epley1RM(w, r);
+    if (oneRM == null) return;                     // nothing typed yet
+    /* oneRM is the number on screen; `exact` is the same max unrounded, which
+       is what the two tables are built from — see renderCalc */
+    ui.calcResult = { weight: w, reps: r, oneRM, exact: w * (1 + r / 30), unit: ui.calc.unit || state.settings.units };
+    render();
+  },
+
   "edit-goal": (el) => {
     const rows = dashboardRows(state.log, state.library, state.goals);
     const r = rows.find((x) => x.name === el.dataset.name);
@@ -3922,7 +4381,22 @@ function handleBind(el) {
   } else if (bind === "draft.date") {
     ui.workoutSheet.date = v; render();
   } else if (bind === "progressSel") {
-    ui.progressSelected = v; render();
+    ui.progressSelected = v;
+    ui.chartView = null; ui.chartSel = null;   // a different lift is a different chart
+    render();
+  } else if (bind === "calcUnit") {
+    /* the calculator is pure ratios, so the unit is only ever a label: the
+       answer comes back in whatever went in. Relabel the result too. */
+    ui.calc.unit = v;
+    if (ui.calcResult) ui.calcResult.unit = v;
+    render();
+  } else if (bind.startsWith("calc.")) {
+    ui.calc[bind.slice(5)] = v;
+    const btn = document.getElementById("calcRunBtn");
+    if (btn) {
+      const ok = +decimalize(ui.calc.weight) > 0 && +decimalize(ui.calc.reps) > 0;
+      btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45;
+    }
   } else if (bind === "exwinMuscle") {
     /* "＋ New group…" hands straight over to the group editor, which drops the
        finished group back onto this draft — see actions["group-save"]. */

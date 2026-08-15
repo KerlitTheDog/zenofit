@@ -87,6 +87,35 @@ input[type="date"].pb-input{
 input[type="date"].pb-input::-webkit-date-and-time-value{
   text-align:center; min-width:0; margin:0;
 }
+/* The volume slider in the timer editor. A native range control looks like a
+   different app on every platform, so the track and thumb are drawn here: a
+   thin rail in the same grey as the other inputs, with a gold thumb big
+   enough to catch with a thumb, not a mouse pointer. */
+.pb-range{
+  -webkit-appearance:none; appearance:none;
+  height:26px; background:transparent; outline:none; cursor:pointer;
+  touch-action:none;   /* the drag belongs to the slider, not the sheet */
+}
+.pb-range::-webkit-slider-runnable-track{
+  height:5px; border-radius:3px; background:var(--surface2); border:1px solid var(--border);
+}
+.pb-range::-moz-range-track{
+  height:5px; border-radius:3px; background:var(--surface2); border:1px solid var(--border);
+}
+.pb-range::-webkit-slider-thumb{
+  -webkit-appearance:none; appearance:none;
+  width:20px; height:20px; margin-top:-8.5px; border-radius:50%;
+  background:var(--gold); border:2px solid var(--bg);
+  box-shadow:0 1px 4px rgba(0,0,0,.35);
+}
+.pb-range::-moz-range-thumb{
+  width:20px; height:20px; border-radius:50%;
+  background:var(--gold); border:2px solid var(--bg);
+  box-shadow:0 1px 4px rgba(0,0,0,.35);
+}
+.pb-range:focus::-webkit-slider-thumb{ box-shadow:0 0 0 4px rgba(233,185,73,.22); }
+.pb-range:focus::-moz-range-thumb{ box-shadow:0 0 0 4px rgba(233,185,73,.22); }
+
 .pb-label{ font-size:11px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
   color:var(--muted); }
 .pb-hairline{ height:1px; background:var(--border-soft); }

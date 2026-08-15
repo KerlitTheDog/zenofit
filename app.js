@@ -509,16 +509,24 @@ const STORE_KEY = "powerbuild-tracker:v1";
    can be renamed, re-timed, pinned or deleted like any other. */
 const SEED_TIMERS = [30, 60, 90, 120, 180, 300];
 
+/* What a timer alerts with, until the user says otherwise. The sounds
+   themselves are SOUND_LIB, further down with the rest of the timer
+   engine; these two live here because seedTimers() below runs while the
+   app is still loading and needs them. */
+const DEFAULT_SOUND = "chime";
+const DEFAULT_VOLUME = 0.8;
+
 /* `key: "rest"` marks a name the app chose rather than the user, so it can
    be shown translated. Renaming the timer drops the key — see timer-save. */
 const seedTimers = () =>
   SEED_TIMERS.map((secs, i) => ({
     id: "seed-timer-" + secs, name: "Rest " + fmtClock(secs), key: "rest", duration: secs,
     endsAt: null, remaining: null, doneAt: null, pinned: i < 3, createdAt: Date.now() + i,
+    sound: DEFAULT_SOUND, volume: DEFAULT_VOLUME,
   }));
 
 const defaultState = () => ({
-  version: 7,
+  version: 8,
   settings: { name: "", units: "kg", startDate: todayStr(), daysPerWeek: 4, theme: "dark", lang: "en" },
   library: DEFAULT_LIBRARY,
   groups: DEFAULT_GROUPS.map((g) => ({ ...g })),   // [{name,key?,color}] — user-editable
@@ -628,6 +636,13 @@ function migrate(s) {
     if (!s.settings) s.settings = {};
     s.settings.lang = resolveLang(s.settings.lang);
     s.version = 7;
+  }
+  if (v < 8) {
+    /* v8 gave every timer its own alert: a sound and a volume. Timers that
+       predate it keep doing exactly what they did before — the default is
+       the chime that used to be the only option. */
+    s.timers = (s.timers || []).map((t) => ({ sound: DEFAULT_SOUND, volume: DEFAULT_VOLUME, ...t }));
+    s.version = 8;
   }
   return s;
 }
@@ -1107,8 +1122,12 @@ function renderPinnedPresets() {
   </div>`;
 }
 
-/* one pinned timer: a round dial you tap to start, pause or clear */
-function pinnedTimerDial(t) {
+/* One pinned timer: a round dial you tap to start, pause or clear.
+   `controls` adds the explicit pause / reset pair underneath, which is what
+   the dials embedded in the workout and exercise windows get — mid-set,
+   with a bar in your hands, "tap the dial and hope it did the right thing"
+   isn't good enough; there you want the same buttons the Timer tab has. */
+function pinnedTimerDial(t, controls = false) {
   const phase = timerPhase(t);
   const left = timerRemaining(t);
   const done = phase === "done";
@@ -1117,7 +1136,7 @@ function pinnedTimerDial(t) {
   const color = done ? "var(--green)" : phase === "paused" ? "var(--steel)" : phase === "idle" ? "var(--raise)" : "var(--gold)";
   const action = done ? "timer-reset" : phase === "running" ? "timer-pause" : "timer-start";
 
-  return `<button data-action="${action}" data-id="${t.id}" style="flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;gap:7px;padding:2px;color:var(--text)">
+  const dial = `<button data-action="${action}" data-id="${t.id}" style="width:100%;min-width:0;display:flex;flex-direction:column;align-items:center;gap:7px;padding:2px;color:var(--text)">
     <div class="${done ? "pb-timer-done " : ""}" style="position:relative;width:74px;height:74px;border-radius:50%">
       <svg width="74" height="74" viewBox="0 0 74 74" style="display:block;transform:rotate(-90deg)">
         <circle cx="37" cy="37" r="32" fill="none" stroke="var(--surface2)" stroke-width="6"/>
@@ -1131,6 +1150,22 @@ function pinnedTimerDial(t) {
     </div>
     <div style="font-size:11px;font-weight:600;color:var(--muted);max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(timerLabel(t))}</div>
   </button>`;
+
+  /* an idle dial has nothing to pause or reset, so it stays a bare dial and
+     the row doesn't jump around when one of three timers starts */
+  const ctl = (a, ic, label, gold) =>
+    `<button data-action="${a}" data-id="${t.id}" title="${label}" aria-label="${label}" class="pb-btn ${gold ? "pb-gold" : "pb-ghost"}" style="flex:1;min-width:0;padding:7px 0">${icon(ic, 13)}</button>`;
+  const pair = !controls || phase === "idle" ? ""
+    : done
+      ? ctl("timer-start", "rotate-ccw", T("timers.again"), true) + ctl("timer-reset", "check", T("timers.doneBtn"))
+      : phase === "paused"
+        ? ctl("timer-start", "play", T("timers.resume"), true) + ctl("timer-reset", "rotate-ccw", T("timers.reset"))
+        : ctl("timer-pause", "pause", T("timers.pause")) + ctl("timer-reset", "square", T("timers.stop"));
+
+  return `<div style="flex:1;min-width:0;display:flex;flex-direction:column;align-items:center">
+    ${dial}
+    ${pair ? `<div style="display:flex;gap:5px;margin-top:8px;width:100%">${pair}</div>` : ""}
+  </div>`;
 }
 
 function renderPinnedModule() {
@@ -1141,7 +1176,7 @@ function renderPinnedModule() {
     <div class="pb-hairline" style="margin:15px 0 12px"></div>
     ${sectionTitle(T("home.pinnedTimers"))}
     ${timers.length
-      ? `<div style="display:flex;align-items:flex-start;gap:6px">${timers.map(pinnedTimerDial).join("")}</div>`
+      ? `<div style="display:flex;align-items:flex-start;gap:6px">${timers.map((t) => pinnedTimerDial(t)).join("")}</div>`
       : `<div style="font-size:12.5px;color:var(--faint);line-height:1.5;padding:0 2px">
           ${T("home.noPinnedTimers", { icon: icon("pin", 11) })}
         </div>`}
@@ -2924,23 +2959,84 @@ function unlockAudio() {
   } catch { /* audio is a nicety, never a blocker */ }
 }
 
-function chime() {
+/* ── THE ALERT SOUNDS ─────────────────────────────────────────────────
+   Every one of these is synthesised on the spot out of oscillators, not
+   loaded from an audio file. That's deliberate: the app is a PWA people
+   install and use in a basement gym with no signal, and a folder of mp3s
+   would be a download to wait for, a cache to miss, and a licence to
+   worry about. A dozen notes of Web Audio weigh nothing, work offline on
+   the first run, and can't 404.
+
+   A sound is a list of notes: [start, frequency, length, waveform, gain,
+   glideTo?]. Times are seconds from the moment it fires; `glideTo` sweeps
+   the pitch across the note, which is what makes the siren and the swoop.
+   Keep the peak gains ≤ 1 — the master level below is what actually sets
+   the loudness, and it's per timer.                                    */
+
+const SOUND_LIB = {
+  /* the original three-tone — still the default */
+  chime:    [[0, 880, .32, "sine", 1], [.34, 880, .32, "sine", 1], [.68, 1175, .36, "sine", 1]],
+  /* one clean strike, for people who want to be told once */
+  ding:     [[0, 1319, .55, "sine", 1], [0, 2637, .35, "sine", .28]],
+  /* doorbell */
+  dingdong: [[0, 988, .45, "sine", 1], [.26, 784, .75, "sine", 1]],
+  /* struck bell with its overtones, long tail */
+  bell:     [[0, 1568, 1.4, "sine", .9], [0, 2350, .9, "sine", .3], [0, 3136, .6, "sine", .18]],
+  /* deep temple gong */
+  gong:     [[0, 196, 2.2, "sine", 1], [0, 294, 1.6, "sine", .45], [0, 98, 2.4, "sine", .5]],
+  /* wooden mallet run, four notes up */
+  marimba:  [[0, 523, .26, "triangle", 1], [.13, 659, .26, "triangle", 1], [.26, 784, .26, "triangle", 1], [.39, 1046, .5, "triangle", 1]],
+  /* digital watch: three tight blips */
+  beep:     [[0, 1000, .1, "square", .6], [.16, 1000, .1, "square", .6], [.32, 1000, .16, "square", .6]],
+  /* the impatient one — eight alternating blips you cannot ignore */
+  alarm:    Array.from({ length: 8 }, (_, i) => [i * .14, i % 2 ? 1100 : 880, .09, "square", .55]),
+  /* rising arcade swoop */
+  arcade:   [[0, 440, .12, "square", .5], [.1, 660, .12, "square", .5], [.2, 880, .12, "square", .5], [.3, 1320, .3, "square", .5, 1760]],
+  /* harsh buzzer, two pulses, for the last set of the day */
+  buzzer:   [[0, 180, .28, "sawtooth", .45], [.36, 180, .38, "sawtooth", .45]],
+  /* a slow two-tone siren sweep */
+  siren:    [[0, 600, .5, "triangle", .7, 1000], [.5, 1000, .5, "triangle", .7, 600]],
+  /* barely there: one soft tick, for training somewhere quiet */
+  soft:     [[0, 660, .18, "sine", .5], [.2, 880, .3, "sine", .5]],
+};
+
+/* the order they're offered in, quiet-and-friendly first, insistent last.
+   (DEFAULT_SOUND / DEFAULT_VOLUME live up in the storage section, because
+   the seeded timers are built before this file gets this far.) */
+const SOUND_IDS = ["chime", "ding", "dingdong", "bell", "marimba", "soft", "gong", "beep", "alarm", "arcade", "siren", "buzzer"];
+
+const soundLabel = (id) => T("sound." + id);
+const soundOf = (t) => (t && SOUND_LIB[t.sound] ? t.sound : DEFAULT_SOUND);
+const volumeOf = (t) => {
+  const v = t && t.volume;
+  return v == null || isNaN(+v) ? DEFAULT_VOLUME : Math.max(0, Math.min(1, +v));
+};
+
+/* 0.4 at full volume matches the loudness the single old chime played at,
+   so nothing gets louder by accident — the slider only goes down from what
+   people are already used to */
+const SOUND_CEILING = 0.4;
+
+function playSound(id, volume = DEFAULT_VOLUME) {
   unlockAudio();
-  if (!audioCtx) return;
+  const notes = SOUND_LIB[id] || SOUND_LIB[DEFAULT_SOUND];
+  const vol = Math.max(0, Math.min(1, volume));
+  if (!audioCtx || vol <= 0) return;          // muted is a real choice, honour it
   try {
-    const t0 = audioCtx.currentTime;
-    for (let i = 0; i < 3; i++) {
-      const at = t0 + i * 0.34;
+    const t0 = audioCtx.currentTime + 0.02;
+    for (const [at, f, dur, type, g, glide] of notes) {
       const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(i === 2 ? 1175 : 880, at);
-      gain.gain.setValueAtTime(0.0001, at);
-      gain.gain.exponentialRampToValueAtTime(0.32, at + 0.02);
-      gain.gain.exponentialRampToValueAtTime(0.0001, at + 0.3);
+      osc.type = type;
+      osc.frequency.setValueAtTime(f, t0 + at);
+      if (glide) osc.frequency.exponentialRampToValueAtTime(glide, t0 + at + dur);
+      const peak = Math.max(0.0001, g * vol * SOUND_CEILING);
+      gain.gain.setValueAtTime(0.0001, t0 + at);
+      gain.gain.exponentialRampToValueAtTime(peak, t0 + at + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + at + dur);
       osc.connect(gain); gain.connect(audioCtx.destination);
-      osc.start(at); osc.stop(at + 0.32);
+      osc.start(t0 + at); osc.stop(t0 + at + dur + 0.02);
     }
-  } catch { /* ignore */ }
+  } catch { /* ignore — a missing chime never blocks a workout */ }
 }
 
 /* Asked for on the first Start — a permission prompt needs a user gesture. */
@@ -2965,7 +3061,7 @@ function notifyDone(t) {
 function fireTimer(t) {
   t.endsAt = null; t.remaining = null; t.doneAt = Date.now();
   try { if (navigator.vibrate) navigator.vibrate([250, 120, 250, 120, 400]); } catch { /* ignore */ }
-  chime();
+  playSound(soundOf(t), volumeOf(t));
   notifyDone(t);
   ui.timerToast = { id: t.id, name: timerLabel(t) || T("timers.listTitle") };
 }
@@ -3134,7 +3230,7 @@ function renderTimerList() {
     ${sectionTitle(T("timers.listTitle"), `<span style="font-size:11px;color:var(--faint)">${T("timers.listHint")}</span>`)}
     ${pinned.length
       ? `<div class="pb-card" style="padding:14px 12px 15px">
-          <div style="display:flex;align-items:flex-start;gap:6px">${pinned.map(pinnedTimerDial).join("")}</div>
+          <div style="display:flex;align-items:flex-start;gap:6px">${pinned.map((t) => pinnedTimerDial(t, true)).join("")}</div>
         </div>`
       : `<div class="pb-card" style="padding:16px;font-size:12.5px;color:var(--faint);line-height:1.5;text-align:center">
           ${T("home.noPinnedTimers", { icon: icon("pin", 11) })}
@@ -3159,6 +3255,8 @@ function renderTimerForm(form) {
       <div class="pb-label">${T("timers.total")}</div>
       <div id="timerTotal" class="pb-num" style="font-size:24px;font-weight:700;color:${ok ? "var(--gold)" : "var(--faint)"};line-height:1">${ok ? fmtClock(total) : "—"}</div>
     </div>
+
+    ${renderSoundPicker(t)}
     <button data-action="timer-form-pin" class="pb-btn" style="width:100%;padding:11px 0;font-size:13.5px;margin-bottom:14px;background:${t.pinned ? "rgba(233,185,73,.12)" : "var(--surface2)"};color:${t.pinned ? "var(--gold)" : "var(--muted)"};border:1px solid ${t.pinned ? "rgba(233,185,73,.4)" : "var(--border)"}">
       ${icon(t.pinned ? "pin-off" : "pin", 15)} ${t.pinned ? T("timers.pinned") : T("timers.pinTo")}
     </button>
@@ -3168,6 +3266,38 @@ function renderTimerForm(form) {
     </button>` : ""}
   `, 120);   /* the timer list is embedded in the workout and exercise windows too,
                 so its editor has to sit above every one of them */
+}
+
+/* ── how this timer announces itself ──────────────────────────────────
+   Sound and volume are per timer, not per app, because they're doing
+   different jobs: a 30-second rest between working sets wants a quiet
+   tick you'll hear over the music, and the 5-minute one you set before
+   leaving for the water fountain wants a klaxon.
+
+   Every chip plays as you tap it and the slider previews on release —
+   picking an alert you've never heard is how you end up with a timer
+   you sleep through. */
+function renderSoundPicker(t) {
+  const cur = soundOf(t);
+  const vol = volumeOf(t);
+  const pct = Math.round(vol * 100);
+
+  const chips = SOUND_IDS.map((id) => {
+    const on = id === cur;
+    return `<button data-action="timer-sound" data-s="${id}" class="pb-chip" style="padding:8px 13px;font-size:12.5px;gap:6px;color:${on ? "var(--gold)" : "var(--muted)"};border-color:${on ? "rgba(233,185,73,.5)" : "var(--border)"};background:${on ? "rgba(233,185,73,.1)" : "var(--surface2)"}">
+      ${icon(on ? "volume-2" : "play", 12)} ${soundLabel(id)}
+    </button>`;
+  }).join("");
+
+  return `
+    ${field(T("timers.sound"), `<div style="display:flex;flex-wrap:wrap;gap:7px">${chips}</div>`, T("timers.soundHint"))}
+    ${field(labelWith(T("timers.volume")), `<div style="display:flex;align-items:center;gap:11px">
+      <span data-volicon="on" style="display:${vol === 0 ? "none" : "inline-flex"};color:var(--muted);flex-shrink:0">${icon("volume-2", 17)}</span>
+      <span data-volicon="off" style="display:${vol === 0 ? "inline-flex" : "none"};color:var(--faint);flex-shrink:0">${icon("volume-x", 17)}</span>
+      <input class="pb-range" type="range" min="0" max="1" step="0.05" value="${vol}" data-bind="timer.volume" aria-label="${T("timers.volume")}" style="flex:1;min-width:0">
+      <div id="timerVolPct" class="pb-num" style="width:46px;text-align:right;font-size:14px;font-weight:700;color:${vol === 0 ? "var(--faint)" : "var(--gold)"}">${vol === 0 ? T("timers.muted") : pct + "%"}</div>
+      <button data-action="timer-sound-test" title="${T("timers.test")}" aria-label="${T("timers.test")}" class="pb-btn pb-ghost" style="width:36px;height:34px;border-radius:9px;color:var(--muted);flex-shrink:0">${icon("play", 14)}</button>
+    </div>`, T("timers.volumeHint"))}`;
 }
 
 /* live total + save-button state while typing a duration */
@@ -3180,6 +3310,20 @@ function updateTimerPreview() {
   const btn = document.getElementById("timerSaveBtn");
   if (el) { el.textContent = ok ? fmtClock(total) : "—"; el.style.color = ok ? "var(--gold)" : "var(--faint)"; }
   if (btn) { btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
+
+  /* the volume read-out has to keep up with the slider without a render,
+     or the thumb jumps out from under the finger */
+  const vol = volumeOf(t);
+  const pct = document.getElementById("timerVolPct");
+  if (pct) {
+    pct.textContent = vol === 0 ? T("timers.muted") : Math.round(vol * 100) + "%";
+    pct.style.color = vol === 0 ? "var(--faint)" : "var(--gold)";
+  }
+  /* both speaker icons are already mounted; muting just swaps which one is
+     visible, so lucide never has to redraw mid-drag */
+  const on = document.querySelector('[data-volicon="on"]'), off = document.querySelector('[data-volicon="off"]');
+  if (on) on.style.display = vol === 0 ? "none" : "inline-flex";
+  if (off) off.style.display = vol === 0 ? "inline-flex" : "none";
 }
 
 /* ─────────────────────────── PROFILE ──────────────────────────────── */
@@ -4201,12 +4345,30 @@ const actions = {
     f.t.pinned = !f.t.pinned;
     render();
   },
-  "timer-add": () => { ui.timerForm = { t: { id: uid(), name: "", min: "", sec: "", pinned: false }, isNew: true }; render(); },
+  "timer-add": () => {
+    ui.timerForm = { t: { id: uid(), name: "", min: "", sec: "", pinned: false, sound: DEFAULT_SOUND, volume: DEFAULT_VOLUME }, isNew: true };
+    render();
+  },
   "timer-edit": (el) => {
     const t = (state.timers || []).find((x) => x.id === el.dataset.id);
     if (!t) return;
-    ui.timerForm = { t: { id: t.id, name: t.name, min: Math.floor(t.duration / 60) || "", sec: t.duration % 60 || "", pinned: !!t.pinned }, isNew: false };
+    ui.timerForm = { t: {
+      id: t.id, name: t.name, min: Math.floor(t.duration / 60) || "", sec: t.duration % 60 || "",
+      pinned: !!t.pinned, sound: soundOf(t), volume: volumeOf(t),
+    }, isNew: false };
     render();
+  },
+  /* tapping a sound is also how you hear it — at the volume you've set, so
+     what you're auditioning is what the gym will hear */
+  "timer-sound": (el) => {
+    if (!ui.timerForm) return;
+    ui.timerForm.t.sound = el.dataset.s;
+    playSound(el.dataset.s, volumeOf(ui.timerForm.t) || DEFAULT_VOLUME);
+    render();
+  },
+  "timer-sound-test": () => {
+    if (!ui.timerForm) return;
+    playSound(soundOf(ui.timerForm.t), volumeOf(ui.timerForm.t));
   },
   "timer-preset": (el) => {
     if (!ui.timerForm) return;
@@ -4230,9 +4392,10 @@ const actions = {
       : typedName || T("timers.fallbackName", { time: fmtClock(duration) });
     /* editing the length of a running timer restarts it cleanly rather than
        leaving a countdown that no longer matches its own dial */
+    const alert = { sound: soundOf(form.t), volume: volumeOf(form.t) };
     const row = existing
-      ? { ...existing, name, key: keepKey, duration, pinned: !!form.t.pinned, endsAt: null, remaining: null, doneAt: null }
-      : { id: form.t.id, name, duration, pinned: !!form.t.pinned, endsAt: null, remaining: null, doneAt: null, createdAt: Date.now() };
+      ? { ...existing, name, key: keepKey, duration, pinned: !!form.t.pinned, ...alert, endsAt: null, remaining: null, doneAt: null }
+      : { id: form.t.id, name, duration, pinned: !!form.t.pinned, ...alert, endsAt: null, remaining: null, doneAt: null, createdAt: Date.now() };
     ui.timerForm = null;
     patch({ timers: existing ? state.timers.map((x) => (x.id === row.id ? row : x)) : [...(state.timers || []), row] });
   },
@@ -4452,6 +4615,13 @@ document.addEventListener("input", (e) => {
 });
 document.addEventListener("change", (e) => {
   if (e.target.matches('input[type="file"]')) { handleFile(e.target); return; }
+  /* letting go of the volume slider plays the alert at the level you just
+     chose — the only honest way to pick one */
+  if (e.target.matches("input[type=range]")) {
+    handleBind(e.target);
+    if (ui.timerForm) playSound(soundOf(ui.timerForm.t), volumeOf(ui.timerForm.t));
+    return;
+  }
   if (e.target.matches("select, input[type=date], input[type=color]")) handleBind(e.target);
 });
 

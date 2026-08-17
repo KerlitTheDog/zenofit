@@ -21,7 +21,9 @@
    Spreadsheet → code map:
    · Week number        = MAX(1, INT((date-start)/7)+1)        → weekOf()
    · Muscle group       = INDEX/MATCH on Exercise Library      → muscleOf()
-   · Est. 1RM (Epley)   = ROUND(weight*(1+reps/30),1)          → epley1RM()
+   · Est. 1RM           = was ROUND(weight*(1+reps/30),1);     → est1RM()
+                          now Wathan anchored at one rep, see the
+                          comment over rmCurve() for why it changed
    · Cardio equivalent  = minutes × RPE (session-RPE load)     → cardioScore()
    · "vs. Your Best"    = compare vs earlier rows, same lift   → computeBadges()
    · Dashboard row      = MAXIFS / COUNTIF / MAXIFS(date)      → dashboardRows()
@@ -184,8 +186,6 @@ function exFieldOf(ex, field) {
   return own === DEFAULT_LIBRARY[i][field] ? row[col] : own;
 }
 
-const typeLabel = (t) => (t ? T("type." + t) : "");
-
 /* a timer the app seeded keeps a key so "Rest 1:00" can speak Swedish;
    the moment the user renames it, the key is dropped and this returns theirs */
 const timerLabel = (t) => (t && t.key === "rest" ? `${T("timer.rest")} ${fmtClock(t.duration)}` : (t ? t.name : ""));
@@ -203,31 +203,54 @@ const daysBetween = (a, b) => Math.round((parseDay(b) - parseDay(a)) / 86400000)
 const weekOf = (dateStr, startStr) =>
   !dateStr || !startStr ? 1 : Math.max(1, Math.floor(daysBetween(startStr, dateStr) / 7) + 1);
 
-/* Est. 1RM (Epley): =ROUND(weight*(1+reps/30),1) */
-const epley1RM = (weight, reps) =>
-  weight > 0 && reps > 0 ? Math.round(weight * (1 + reps / 30) * 10) / 10 : null;
+/* ── EST. 1RM: WATHAN'S CURVE, ANCHORED AT ONE REP ────────────────────
+   The spreadsheet estimated a max with Epley, weight × (1 + reps/30), and
+   Epley has a flaw you can see with your own eyes: one rep at 30 kg comes
+   back as a 31 kg max. It is a straight line fitted to multi-rep sets, so
+   it never passes through the one point every lifter can verify — the set
+   they just did FOR a single IS their max that day, not 3.3% under it.
 
-/* ── THE 1RM TABLES (the calculator tab) ──────────────────────────────
-   The calculator itself is the same Epley line the rest of the app runs
-   on, so a max worked out here is the same number the log would give it.
+   The replacement is Wathan's equation, which LeSuer et al. (1997) found
+   the most accurate of the published estimates across bench, squat and
+   deadlift:  1RM = 100·w / (48.8 + 53.4·e^(−0.075·reps)).
 
-   The two tables it prints are that curve read backwards. It comes in two
-   pieces, and they meet exactly at 10 reps / 75%, so the join is invisible:
+   Wathan still reads a single as 98.3% of the max, so it is divided by its
+   own one-rep value. That pins reps = 1 to exactly the weight lifted and
+   leaves the shape of the curve untouched everywhere else:
 
-     · 1–10 reps → 100% − (reps−1)/36. Near the max, Epley's straight line
-       inverts far too generously (it would call a double 94% of a single),
-       so the top of the table walks down in even 1/36 steps instead.
-     · 10+ reps  → 30 / (30 + reps), which is simply Epley solved for the
-       weight instead of the max.
+       1RM = weight ÷ rmCurve(reps)
+       rmCurve(reps) = (48.8 + 53.4·e^(−0.075·reps)) ÷ (48.8 + 53.4·e^(−0.075))
 
-   calcPct(reps) is what one working set is worth as a share of the max;
-   calcReps(pct) is the same curve inverted — how many reps a percentage is
-   good for. It floors, because a table that rounds a percentage UP to a rep
-   you can't finish is the one way a chart like this can hurt you.        */
-const calcPct = (reps) => (reps <= 10 ? 1 - (reps - 1) / 36 : 30 / (30 + reps));
+   Scored against the NSCA rep-max table and the RTS/RPE-10 chart over reps
+   1–12, this beat every other candidate (mean error 0.7% of the max, vs
+   1.2% Brzycki, 1.3% Epley, 3.0% Lombardi, 3.3% Mayhew, 3.4% O'Conner) and
+   it is exact at one rep. It also stays sane past 30 reps, where Brzycki
+   and Lander run through zero into negative weights.
 
-const calcReps = (pct) =>
-  pct >= 0.75 ? Math.floor(1 + 36 * (1 - pct)) : Math.floor((30 * (1 - pct)) / pct);
+   rmCurve(reps) doubles as the calculator's percentage table: it is what
+   one working set is worth as a share of the max. calcReps(pct) is that
+   curve inverted — how many reps a percentage is good for. It floors,
+   because a table that rounds a percentage UP to a rep you can't finish is
+   the one way a chart like this can hurt you.                            */
+const RM_A = 48.8, RM_B = 53.4, RM_K = 0.075;
+const RM_ONE = RM_A + RM_B * Math.exp(-RM_K);        // the raw curve at 1 rep
+
+/* what a set of `reps` is worth as a fraction of the max (1.0 at one rep) */
+const rmCurve = (reps) => (RM_A + RM_B * Math.exp(-RM_K * reps)) / RM_ONE;
+
+const est1RM = (weight, reps) =>
+  weight > 0 && reps > 0 ? Math.round((weight / rmCurve(reps)) * 10) / 10 : null;
+
+const calcPct = (reps) => rmCurve(reps);
+
+/* The curve flattens onto an asymptote at 48.8/RM_ONE ≈ 49.6% of the max,
+   so percentages at or under that have no honest rep answer at all — they
+   come back as Infinity and the table prints them as "off the scale"
+   rather than inventing a number. */
+const calcReps = (pct) => {
+  const x = (pct * RM_ONE - RM_A) / RM_B;
+  return x > 0 ? Math.floor(-Math.log(x) / RM_K) : Infinity;
+};
 
 /* one decimal, no dangling ".0" — 133.3 kg, but 120 kg */
 const trimNum = (n) => String(Math.round(n * 10) / 10);
@@ -236,7 +259,14 @@ const trimNum = (n) => String(Math.round(n * 10) / 10);
 const cardioScore = (minutes, intensity) =>
   minutes > 0 && intensity > 0 ? Math.round(minutes * intensity) : null;
 
+/* Whether a lift is logged in minutes × RPE rather than sets × weight. The
+   Cardio muscle group is what says so; `type` is only still consulted because
+   exercises created before the compound/isolation/cardio picker was dropped
+   may carry "Cardio" there and nothing else. */
 const isCardioEx = (ex) => ex && (ex.type === "Cardio" || ex.muscle === "Cardio");
+
+/* …and the same question asked of a group name, for a record being saved */
+const cardioType = (muscle) => (muscle === "Cardio" ? "Cardio" : "");
 
 /* Dates follow the app's language, not the device's: someone reading the app
    in Svenska on an English phone should get "24 aug", not "Aug 24". */
@@ -272,7 +302,7 @@ const unitOf = (e) => (e && e.unit) || state.settings.units;
 const baseWeight = (e) => convertWeight(+e.weight, unitOf(e), state.settings.units);
 
 const metricOf = (e) =>
-  e.kind === "cardio" ? cardioScore(+e.minutes, +e.intensity) : epley1RM(baseWeight(e), +e.reps);
+  e.kind === "cardio" ? cardioScore(+e.minutes, +e.intensity) : est1RM(baseWeight(e), +e.reps);
 
 /* ─────────────────────── PER-SET LOGGING ────────────────────────────
    Every new entry carries a `setList`: one row per set, each with its own
@@ -302,7 +332,7 @@ const filledSets = (e) => (e.setList || []).filter(setHasData);
 function bestSet(list) {
   let best = null, bestM = -Infinity;
   for (const s of list || []) {
-    const m = epley1RM(+s.weight, +s.reps);
+    const m = est1RM(+s.weight, +s.reps);
     if (m != null && m > bestM) { bestM = m; best = s; }
   }
   return best;
@@ -746,10 +776,12 @@ const ui = {
   progressSelected: null,
   /* the progress graph is an instrument, not a picture: chartView is the
      slice of the series on screen (float index bounds), chartSel the entry
-     whose dot is open, chartFull whether it's taken over the screen */
-  chartView: null,      // {lo, hi} — null means "the whole series"
-  chartSel: null,       // id of the logged entry behind the selected dot
-  chartFull: false,
+     whose dot is open, chartFull which graph has taken over the screen.
+     There are two graphs — "main" on the Progress tab and "ex" inside the
+     exercise window — and each keeps its own zoom and its own selection. */
+  chartView: { main: null, ex: null },   // {lo, hi} — null means "the whole series"
+  chartSel: { main: null, ex: null },    // id of the logged entry behind the selected dot
+  chartFull: null,      // "main" | "ex" | null
   calc: { weight: "", reps: "", unit: null },  // the 1RM calculator's fields
   calcResult: null,     // {weight, reps, oneRM, unit} — the last calculation
   goalEditing: null,    // exercise name whose goal is being edited
@@ -768,7 +800,7 @@ function resetTransient() {
   ui.accordions = {};
   ui.progSeg = "progress";
   ui.progressSelected = null;
-  ui.chartView = null; ui.chartSel = null; ui.chartFull = false;
+  ui.chartView = { main: null, ex: null }; ui.chartSel = { main: null, ex: null }; ui.chartFull = null;
   ui.goalEditing = null;
   ui.volGoalEditing = null;
   ui.libraryQ = "";
@@ -872,8 +904,14 @@ function setAccordion(card, open) {
 
 const B = (t) => `<b style="color:var(--text)">${t}</b>`;
 
-/* chart data captured during render, drawn after mount */
-let chartState = { line: null, bar: null };
+/* Chart data captured during render, drawn after mount. `line` is the
+   Progress tab's graph, `exLine` the copy inside the exercise window; they
+   are separate so one can be open on top of the other without either one
+   redrawing itself with the other's lift. */
+let chartState = { line: null, exLine: null, bar: null };
+
+/* the series a given graph is showing, by scope */
+const lineOf = (scope) => (scope === "ex" ? chartState.exLine : chartState.line);
 
 /* ═══════════════════════ TRANSITION ENGINE ═════════════════════════
    The whole app re-renders on every interaction, so animations must only
@@ -956,7 +994,7 @@ function render() {
   const badges = computeBadges(log);
   const currentWeek = weekOf(todayStr(), settings.startDate);
   if (ui.volumeWeek == null) ui.volumeWeek = currentWeek;
-  chartState = { line: null, bar: null };
+  chartState = { line: null, exLine: null, bar: null };
 
   const tab = ui.tab;
   const titles = { log: T("title.log"), progress: T("title.progress"), library: T("title.library"), timer: T("title.timers"), calc: T("title.calc") };
@@ -1122,12 +1160,12 @@ function renderPinnedPresets() {
   </div>`;
 }
 
-/* One pinned timer: a round dial you tap to start, pause or clear.
-   `controls` adds the explicit pause / reset pair underneath, which is what
-   the dials embedded in the workout and exercise windows get — mid-set,
-   with a bar in your hands, "tap the dial and hope it did the right thing"
-   isn't good enough; there you want the same buttons the Timer tab has. */
-function pinnedTimerDial(t, controls = false) {
+/* One pinned timer: a round dial you tap to start, pause or clear, with the
+   explicit pause / reset pair underneath — mid-set, with a bar in your
+   hands, "tap the dial and hope it did the right thing" isn't good enough,
+   so every pinned dial gets the same buttons the Timer tab's cards have,
+   wherever it appears: Home, the workout window and the exercise window. */
+function pinnedTimerDial(t) {
   const phase = timerPhase(t);
   const left = timerRemaining(t);
   const done = phase === "done";
@@ -1155,7 +1193,7 @@ function pinnedTimerDial(t, controls = false) {
      the row doesn't jump around when one of three timers starts */
   const ctl = (a, ic, label, gold) =>
     `<button data-action="${a}" data-id="${t.id}" title="${label}" aria-label="${label}" class="pb-btn ${gold ? "pb-gold" : "pb-ghost"}" style="flex:1;min-width:0;padding:7px 0">${icon(ic, 13)}</button>`;
-  const pair = !controls || phase === "idle" ? ""
+  const pair = phase === "idle" ? ""
     : done
       ? ctl("timer-start", "rotate-ccw", T("timers.again"), true) + ctl("timer-reset", "check", T("timers.doneBtn"))
       : phase === "paused"
@@ -1249,7 +1287,7 @@ function renderHome(settings, currentWeek, unit) {
       ${accordion("howto", T("acc.howto.title"), icon("info", 16, 'style="color:var(--blue)"'), T("acc.howto.body"))}
       ${accordion("presets", T("acc.presets.title"), icon("layers", 16, 'style="color:var(--gold)"'), T("acc.presets.body"))}
       ${accordion("sets", T("acc.sets.title"), icon("list-checks", 16, 'style="color:var(--red)"'), T("acc.sets.body"))}
-      ${accordion("epley", T("acc.epley.title"), icon("trending-up", 16, 'style="color:var(--green)"'), T("acc.epley.body"))}
+      ${accordion("onerm", T("acc.rm.title"), icon("trending-up", 16, 'style="color:var(--green)"'), T("acc.rm.body", { unit }))}
       ${accordion("cardio", T("acc.cardio.title"), icon("timer", 16, 'style="color:#a07ec2"'), T("acc.cardio.body"))}
       ${accordion("goal", T("acc.goal.title"), icon("trophy", 16, 'style="color:var(--gold)"'), T("acc.goal.body", { unit }))}
       ${accordion("units", T("acc.units.title"), icon("ruler", 16, 'style="color:var(--steel)"'), T("acc.units.body"))}
@@ -1654,14 +1692,14 @@ function renderProgress(log, library, goals, badges, settings, unit) {
   chartState.bar = { data: wkData };
 
   /* a dot from a lift you're no longer looking at can't stay selected */
-  if (ui.chartSel && !chartData.some((d) => d.e.id === ui.chartSel)) ui.chartSel = null;
-  if (!chartState.line) ui.chartFull = false;
+  if (ui.chartSel.main && !chartData.some((d) => d.e.id === ui.chartSel.main)) ui.chartSel.main = null;
+  if (!chartState.line && ui.chartFull === "main") ui.chartFull = null;
 
   const goalRows = rows.map((r, i) => renderGoalRow(r, unit, i === rows.length - 1, sel === r.name)).join("");
 
   const detail = series.length > 0
     ? `<div class="pb-card pb-scroll" data-scrollkey="prog-detail" style="margin-bottom:20px;max-height:210px;overflow-y:auto">
-        ${[...series].reverse().map((e) => `<button data-action="chart-pick" data-id="${e.id}" style="width:100%;text-align:left;display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--border-soft);font-size:13px;color:var(--text);background:${ui.chartSel === e.id ? "rgba(233,185,73,.08)" : "transparent"}">
+        ${[...series].reverse().map((e) => `<button data-action="chart-pick" data-scope="main" data-id="${e.id}" style="width:100%;text-align:left;display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--border-soft);font-size:13px;color:var(--text);background:${ui.chartSel.main === e.id ? "rgba(233,185,73,.08)" : "transparent"}">
           <span style="color:var(--muted);width:84px;flex-shrink:0">${fmtShort(e.date)}</span>
           <span style="flex:1;color:var(--faint);font-size:12px">${e.kind === "cardio" ? `${esc(e.minutes)} min × RPE ${esc(e.intensity)}` : `${esc(e.reps)} × ${esc(e.weight)} ${unitOf(e)}`}</span>
           <span class="pb-num" style="font-weight:700;font-size:15.5px;color:${badges[e.id]?.badge === "pr" ? "var(--gold)" : "var(--text)"}">${e.m}</span>
@@ -1689,9 +1727,9 @@ function renderProgress(log, library, goals, badges, settings, unit) {
         </select>
       </div>
       ${chartData.length >= 2
-        ? `${chartToolbar(false)}
-           <div data-linechart style="position:relative;width:100%;height:210px;touch-action:pan-y"></div>
-           <div data-linedetail>${renderPointDetail()}</div>`
+        ? `${chartToolbar(false, "main")}
+           <div data-linechart="main" style="position:relative;width:100%;height:210px;touch-action:pan-y"></div>
+           <div data-linedetail="main">${renderPointDetail("main")}</div>`
         : `<div style="height:130px;display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:13px;text-align:center;padding:0 24px;line-height:1.5">
             ${sel ? T("prog.chartHint") : T("prog.chartHintAny")}
           </div>`}
@@ -1724,14 +1762,14 @@ function renderProgPlaceholder() {
    Zoom, reset and fullscreen sit above the plot rather than hiding behind
    a gesture, because a chart you can only zoom by pinching is a chart half
    the people looking at it never zoom at all. */
-function chartToolbar(full) {
-  return `<div data-charttoolbar="${full ? "full" : "inline"}">${chartToolbarInner(full)}</div>`;
+function chartToolbar(full, scope = "main") {
+  return `<div data-charttoolbar="${scope}" data-full="${full ? 1 : 0}">${chartToolbarInner(full, scope)}</div>`;
 }
 
-function chartToolbarInner(full) {
+function chartToolbarInner(full, scope = "main") {
   const btn = (action, ic, label) =>
-    `<button data-action="${action}" title="${label}" aria-label="${label}" class="pb-btn pb-ghost" style="width:34px;height:32px;border-radius:9px;color:var(--muted);flex-shrink:0">${icon(ic, 15)}</button>`;
-  const zoomed = !!ui.chartView;
+    `<button data-action="${action}" data-scope="${scope}" title="${label}" aria-label="${label}" class="pb-btn pb-ghost" style="width:34px;height:32px;border-radius:9px;color:var(--muted);flex-shrink:0">${icon(ic, 15)}</button>`;
+  const zoomed = !!ui.chartView[scope];
   return `<div style="display:flex;align-items:center;gap:6px;padding:0 8px 8px">
     ${btn("chart-zoom-in", "zoom-in", T("chart.zoomIn"))}
     ${btn("chart-zoom-out", "zoom-out", T("chart.zoomOut"))}
@@ -1743,10 +1781,10 @@ function chartToolbarInner(full) {
 
 /* What one dot is: the set that made it, the day it happened, and whatever
    was written down at the time. Nothing selected yet says so. */
-function renderPointDetail() {
-  const line = chartState.line;
+function renderPointDetail(scope = "main") {
+  const line = lineOf(scope);
   if (!line) return "";
-  const p = line.data.find((d) => d.e.id === ui.chartSel);
+  const p = line.data.find((d) => d.e.id === ui.chartSel[scope]);
   if (!p)
     return `<div style="font-size:11.5px;color:var(--faint);line-height:1.5;padding:6px 10px 2px;text-align:center">${T("chart.tapHint")}</div>`;
 
@@ -1772,19 +1810,20 @@ function renderPointDetail() {
 /* Fullscreen: the same chart, the same selection, just given the whole
    phone. Opened from the toolbar, closed back to exactly where it was. */
 function renderChartFull() {
-  const line = chartState.line;
+  const scope = ui.chartFull;
+  const line = lineOf(scope);
   if (!line) return "";
   return fullScreen(95, `
     <div style="display:flex;align-items:center;gap:10px;padding:14px 16px 10px;border-bottom:1px solid var(--border-soft)">
-      <button data-action="chart-exit-full" style="color:var(--muted);padding:4px">${icon("x", 21)}</button>
+      <button data-action="chart-exit-full" data-scope="${scope}" style="color:var(--muted);padding:4px">${icon("x", 21)}</button>
       <div style="flex:1;min-width:0">
         <div class="pb-num" style="font-size:17px;font-weight:700;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(exLabel(line.name))}</div>
         <div style="font-size:11.5px;color:var(--faint)">${line.cardio ? T("prog.sessionLoad") : T("prog.est1rm", { unit: line.unit })}</div>
       </div>
     </div>
-    <div style="padding:10px 8px 0">${chartToolbar(true)}</div>
-    <div data-linechart style="position:relative;flex:1;min-height:120px;margin:0 8px;touch-action:none"></div>
-    <div class="pb-scroll" data-linedetail style="max-height:44%;overflow-y:auto;padding:0 12px 18px">${renderPointDetail()}</div>
+    <div style="padding:10px 8px 0">${chartToolbar(true, scope)}</div>
+    <div data-linechart="${scope}" style="position:relative;flex:1;min-height:120px;margin:0 8px;touch-action:none"></div>
+    <div class="pb-scroll" data-linedetail="${scope}" style="max-height:44%;overflow-y:auto;padding:0 12px 18px">${renderPointDetail(scope)}</div>
   `, "chartFull");
 }
 
@@ -1834,9 +1873,9 @@ function renderGoalRow(r, unit, last, active) {
    works for the barbell in front of you at a gym you're visiting once.
 
    The maths is calcPct/calcReps at the top of the file, which is the same
-   Epley the log uses, so a max worked out here matches the one a logged
-   set would produce. Units are just a label: the answer comes back in
-   whatever went in, because every step of it is a ratio.               */
+   anchored Wathan curve the log runs on, so a max worked out here matches
+   the one a logged set would produce. Units are just a label: the answer
+   comes back in whatever went in, because every step of it is a ratio. */
 
 const CALC_PERCENTS = [100, 95, 90, 85, 80, 75, 70, 65, 60, 55, 50];
 const CALC_MAX_REPS = 30;
@@ -1885,10 +1924,15 @@ function renderCalc() {
   /* every row is built off the UNROUNDED max — rounding once, at the end of
      each row, is what keeps 95% of a 133.3 kg max reading 126.7 and not the
      126.6 you get from rounding twice */
-  const pctRows = CALC_PERCENTS.map((p, i) => calcRow(
-    [`${p}%`, `${trimNum(res.exact * p / 100)} ${u}`, calcReps(p / 100)],
-    i === CALC_PERCENTS.length - 1, p === 100,
-  )).join("");
+  const pctRows = CALC_PERCENTS.map((p, i) => {
+    /* past the bottom of the table one rep costs almost nothing, so the
+       honest answer is "more than this table goes", not a made-up count */
+    const r = calcReps(p / 100);
+    return calcRow(
+      [`${p}%`, `${trimNum(res.exact * p / 100)} ${u}`, r > CALC_MAX_REPS ? `${CALC_MAX_REPS}+` : r],
+      i === CALC_PERCENTS.length - 1, p === 100,
+    );
+  }).join("");
 
   /* and the same thing read the other way: what one rep count is worth. The
      percentage is read back off the weight actually printed, so the row is
@@ -1975,7 +2019,7 @@ function renderLibraryList(library) {
         ${ex.image ? `<img src="${esc(ex.image)}" alt="" style="width:38px;height:38px;border-radius:8px;object-fit:cover;flex-shrink:0;border:1px solid var(--border)">` : ""}
         <div style="flex:1;min-width:0">
           <div style="font-weight:600;font-size:14px">${esc(exLabelOf(ex))}${newFlag(ex)}</div>
-          <div style="font-size:11.5px;color:var(--faint)">${typeLabel(ex.type)}${exFieldOf(ex, "equipment") ? ` · ${esc(exFieldOf(ex, "equipment"))}` : ""}</div>
+          <div style="font-size:11.5px;color:var(--faint)">${esc(exFieldOf(ex, "equipment"))}</div>
         </div>
         ${ex.video ? icon("youtube", 15, 'style="color:var(--red);flex-shrink:0"') : ""}
         ${icon("info", 15, 'style="color:var(--faint);flex-shrink:0"')}
@@ -2355,6 +2399,20 @@ function renderExerciseWindow(library) {
     : (library.find((x) => x.name === ui.exWin.name) ||
         { name: ui.exWin.name, muscle: "—", type: "", equipment: "", alternatives: "", note: "", image: "", video: "", custom: false, missing: true });
 
+  /* What the log has to say about this lift. Built here rather than in the
+     view body because the graph's series has to be handed to the chart
+     engine (chartState.exLine) during render, before it paints. */
+  const hist = editing || isNew ? null : exerciseHistory(ex.name, state.log);
+  if (hist && hist.chart.length >= 2)
+    chartState.exLine = {
+      data: hist.chart, goal: state.goals[ex.name] ?? null,
+      unit: hist.unit, name: ex.name, cardio: hist.cardio,
+    };
+  /* a dot that is no longer in the series can't stay selected, and a
+     fullscreen copy of a graph that no longer exists has to fold away */
+  if (ui.chartSel.ex && !(hist && hist.chart.some((d) => d.e.id === ui.chartSel.ex))) ui.chartSel.ex = null;
+  if (!chartState.exLine && ui.chartFull === "ex") ui.chartFull = null;
+
   const canSave = !!(ex.name && ex.name.trim() && ex.muscle && ex.muscle.trim());
   const headerRight = editing
     ? `<button data-action="exwin-save" id="exwinSaveBtn" class="pb-btn pb-gold" style="padding:8px 16px;font-size:13.5px;opacity:${canSave ? 1 : 0.45}" ${canSave ? "" : "disabled"}>${icon("check", 15)} ${T("common.save")}</button>`
@@ -2367,12 +2425,35 @@ function renderExerciseWindow(library) {
       ${headerRight}
     </div>
     <div class="pb-scroll" data-scrollkey="exwin" style="flex:1;overflow-y:auto;padding:16px 16px 40px">
-      ${editing ? exWindowEditBody(ex, library) : exWindowViewBody(ex)}
+      ${editing ? exWindowEditBody(ex, library) : exWindowViewBody(ex, hist)}
     </div>
   `, "exWin");
 }
 
-function exWindowViewBody(ex) {
+/* ── one lift's whole history, for the panel at the bottom of its window ──
+   Every entry that produced a number, oldest first, each carrying the entry
+   behind it so a tapped dot can still say what the session was. PR flags are
+   worked out here from the running best rather than borrowed from
+   computeBadges(), because only this one lift is in question.            */
+function exerciseHistory(name, log) {
+  const series = chronoSort(log)
+    .filter((e) => e.exercise === name)
+    .map((e) => ({ ...e, m: metricOf(e) }))
+    .filter((e) => e.m != null);
+
+  let best = null, run = null;
+  const chart = series.map((e) => {
+    const badge = run == null ? "first" : e.m > run ? "pr" : e.m === run ? "match" : "below";
+    run = run == null ? e.m : Math.max(run, e.m);
+    if (!best || e.m > best.m) best = e;
+    return { x: fmtShort(e.date), y: e.m, e, badge };
+  });
+
+  const cardio = !!(best && best.kind === "cardio");
+  return { series, chart, best, cardio, unit: cardio ? T("unit.pts") : state.settings.units };
+}
+
+function exWindowViewBody(ex, hist) {
   const vid = youtubeId(ex.video);
   const detailField = (label, v, empty) => `<div style="margin-bottom:16px">
     <div class="pb-label" style="margin-bottom:5px">${label}</div>
@@ -2383,7 +2464,6 @@ function exWindowViewBody(ex) {
     <div class="pb-num" style="font-size:23px;font-weight:700;line-height:1.15;margin-bottom:9px">${esc(exLabelOf(ex))}</div>
     <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px">
       ${chip(esc(groupLabel(ex.muscle)), colorFor(ex.muscle))}
-      ${ex.type ? chip(typeLabel(ex.type)) : ""}
       ${needsDetails(ex)
         ? `${chip(T("lib.newFlag"), "var(--blue)")}
            <button data-action="dismiss-new" data-name="${esc(ex.name)}" class="pb-chip" style="color:var(--faint);gap:5px">${icon("check", 11)} ${T("ex.dismiss")}</button>`
@@ -2414,7 +2494,63 @@ function exWindowViewBody(ex) {
     ${detailField(T("ex.details"), exFieldOf(ex, "note"), ex.missing ? T("ex.gone") : T("ex.noDetails"))}
     ${detailField(T("ex.equipment"), exFieldOf(ex, "equipment"), T("ex.notFilled"))}
     ${detailField(T("ex.alternatives"), exFieldOf(ex, "alternatives"), T("ex.notFilled"))}
+
+    ${exWindowProgress(ex, hist)}
   `;
+}
+
+/* ── the lift's own progress panel ────────────────────────────────────
+   Your best ever on this movement, then the same graph the Progress tab
+   draws for it — the whole point being that you can look a lift up, see
+   what it is, and see where you are on it without leaving the page.
+
+   The graph is the real one, gestures and all, drawn from the "ex" scope
+   so zooming it here never disturbs the chart on the Progress tab. */
+function exWindowProgress(ex, hist) {
+  if (!hist) return "";
+  const { best, chart, unit, cardio } = hist;
+  const label = cardio ? T("prog.sessionLoad") : T("prog.est1rm", { unit });
+
+  if (!best)
+    return `
+      ${sectionTitle(T("ex.progressTitle"))}
+      <div class="pb-card" style="padding:24px;text-align:center;color:var(--faint);font-size:13px;line-height:1.6">
+        ${icon("trending-up", 24, 'style="margin:0 auto 9px;display:block"')}
+        ${T("ex.progressEmpty")}
+      </div>
+      <div style="height:8px"></div>`;
+
+  const bUnit = unitOf(best);   // the plate stack it was actually logged on
+  return `
+    ${sectionTitle(T("ex.progressTitle"), `<span style="font-size:11px;color:var(--faint)">${label}</span>`)}
+
+    <div class="pb-card" style="padding:14px 15px;margin-bottom:12px;border-color:rgba(233,185,73,.45);background:rgba(233,185,73,.06)">
+      <div style="display:flex;align-items:flex-end;gap:12px">
+        <div style="flex:1;min-width:0">
+          <div class="pb-label" style="margin-bottom:3px">${cardio ? T("ex.bestSession") : T("ex.bestSet")}</div>
+          <div class="pb-num" style="font-size:32px;font-weight:700;line-height:1;color:var(--gold)">
+            ${best.m}<span style="font-size:14px;color:var(--muted);font-weight:600"> ${unit}</span>
+          </div>
+        </div>
+        <div style="text-align:right;font-size:12px;color:var(--muted);line-height:1.5">
+          <div style="font-weight:600;color:var(--text)">${cardio
+            ? `${esc(best.minutes)} min × RPE ${esc(best.intensity)}`
+            : `${esc(best.reps)} × ${esc(best.weight)} ${bUnit}`}</div>
+          <div>${fmtDate(best.date)}</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="pb-card" style="padding:14px 8px 8px;margin-bottom:8px">
+      ${chart.length >= 2
+        ? `${chartToolbar(false, "ex")}
+           <div data-linechart="ex" style="position:relative;width:100%;height:200px;touch-action:pan-y"></div>
+           <div data-linedetail="ex">${renderPointDetail("ex")}</div>`
+        : `<div style="height:120px;display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:13px;text-align:center;padding:0 24px;line-height:1.5">
+            ${T("ex.progressOne")}
+          </div>`}
+    </div>
+    <div style="height:8px"></div>`;
 }
 
 function exWindowEditBody(f, library) {
@@ -2449,7 +2585,6 @@ function exWindowEditBody(f, library) {
   return `
     ${field(T("ex.nameRequired"), `<input class="pb-input" data-bind="exwin.name" value="${esc(exLabelOf(f))}" placeholder="—">`)}
     ${field(T("ex.groupRequired"), musclePicker, T("ex.groupHint"))}
-    ${field(T("ex.typeLabel"), `<select class="pb-input" data-bind="exwin.type">${["Compound", "Isolation", "Cardio"].map((t) => `<option value="${t}"${f.type === t ? " selected" : ""}>${typeLabel(t)}</option>`).join("")}</select>`)}
 
     ${field(T("ex.photo"), imageBlock, T("ex.photoHint"))}
 
@@ -2578,7 +2713,7 @@ function renderPickerList(library) {
         <button data-action="pick-exercise" data-id="${ex.id}" style="flex:1;min-width:0;display:flex;align-items:center;gap:10px;padding:12px 4px 12px 14px;text-align:left;color:var(--text)">
           <div style="flex:1;min-width:0">
             <div style="font-weight:600;font-size:14px">${esc(exLabelOf(ex))}</div>
-            <div style="font-size:11.5px;color:var(--faint)">${esc(exFieldOf(ex, "equipment") || typeLabel(ex.type))}</div>
+            <div style="font-size:11.5px;color:var(--faint)">${esc(exFieldOf(ex, "equipment"))}</div>
           </div>
           ${icon("plus", 16, 'style="color:var(--gold);flex-shrink:0"')}
         </button>
@@ -2676,7 +2811,7 @@ function renderSetList(f, unit) {
   const top = bestSet(filled);
 
   const rows = list.map((s, i) => {
-    const m = epley1RM(+s.weight, +s.reps);
+    const m = est1RM(+s.weight, +s.reps);
     const isBest = top && s.id === top.id && filled.length > 1;
     const blank = !setHasData(s);
     return `<div class="pb-card" style="display:flex;align-items:center;margin-bottom:8px;overflow:hidden${blank ? ";border:1px dashed rgba(233,185,73,.55)" : ""}">
@@ -2762,7 +2897,7 @@ function renderEntryFields(form, unit) {
           <div id="entryMetric" class="pb-num" style="font-size:30px;font-weight:700;color:var(--gold);line-height:1.05">${metric ?? "—"}</div>
         </div>
         <div id="entryBadge" style="flex:1;text-align:right;font-size:13px;font-weight:700;color:${preview === "pr" ? "var(--gold)" : preview === "first" ? "var(--blue)" : "var(--muted)"}">
-          ${preview ? BADGE_TEXT[preview] : cardio ? T("entry.cardioFormula") : T("entry.epleyFormula")}
+          ${preview ? BADGE_TEXT[preview] : cardio ? T("entry.cardioFormula") : T("entry.rmFormula")}
         </div>
       </div>
       ${!cardio && eUnit !== unit ? `<div style="font-size:11.5px;color:var(--faint);margin:8px 2px 0;line-height:1.5">
@@ -2786,7 +2921,7 @@ function renderEntryFields(form, unit) {
 /* the single-set editor — same idea as the entry form, one level down */
 function renderSetForm(form, unit) {
   const { s, isNew, index } = form;
-  const m = epley1RM(+s.weight, +s.reps);
+  const m = est1RM(+s.weight, +s.reps);
   const ok = setHasData(s);
   return sheet(isNew ? T("setForm.add", { n: index + 1 }) : T("setForm.edit", { n: index + 1 }), "setForm", `
     <div style="display:flex;gap:10px">
@@ -2800,7 +2935,7 @@ function renderSetForm(form, unit) {
         <div class="pb-label">${T("entry.est1rm", { unit })}</div>
         <div id="setMetric" class="pb-num" style="font-size:26px;font-weight:700;color:var(--gold);line-height:1.05">${m ?? "—"}</div>
       </div>
-      <div style="flex:1;text-align:right;font-size:12px;color:var(--faint)">${T("entry.epleyFormula")}</div>
+      <div style="flex:1;text-align:right;font-size:12px;color:var(--faint)">${T("entry.rmFormula")}</div>
     </div>
 
     <button id="setSaveBtn" data-action="save-set" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:14px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
@@ -2816,7 +2951,7 @@ function renderSetForm(form, unit) {
 function updateSetPreview() {
   if (!ui.setForm) return;
   const s = ui.setForm.s;
-  const m = epley1RM(+s.weight, +s.reps);
+  const m = est1RM(+s.weight, +s.reps);
   const el = document.getElementById("setMetric");
   const btn = document.getElementById("setSaveBtn");
   if (el) el.textContent = m ?? "—";
@@ -2832,7 +2967,7 @@ function updateEntryPreview() {
   if (m) m.textContent = metric ?? "—";
   if (b) {
     b.style.color = preview === "pr" ? "var(--gold)" : preview === "first" ? "var(--blue)" : "var(--muted)";
-    b.textContent = preview ? BADGE_TEXT[preview] : cardio ? T("entry.cardioFormula") : T("entry.epleyFormula");
+    b.textContent = preview ? BADGE_TEXT[preview] : cardio ? T("entry.cardioFormula") : T("entry.rmFormula");
   }
   if (s) { s.disabled = !valid; s.style.opacity = valid ? 1 : 0.45; }
 }
@@ -3230,7 +3365,7 @@ function renderTimerList() {
     ${sectionTitle(T("timers.listTitle"), `<span style="font-size:11px;color:var(--faint)">${T("timers.listHint")}</span>`)}
     ${pinned.length
       ? `<div class="pb-card" style="padding:14px 12px 15px">
-          <div style="display:flex;align-items:flex-start;gap:6px">${pinned.map((t) => pinnedTimerDial(t, true)).join("")}</div>
+          <div style="display:flex;align-items:flex-start;gap:6px">${pinned.map((t) => pinnedTimerDial(t)).join("")}</div>
         </div>`
       : `<div class="pb-card" style="padding:16px;font-size:12.5px;color:var(--faint);line-height:1.5;text-align:center">
           ${T("home.noPinnedTimers", { icon: icon("pin", 11) })}
@@ -3453,13 +3588,23 @@ function drawCharts() {
    1. The view (which slice of the series is on screen) and the selection
       live in `ui`, not in this file's closures, so a re-render never
       resets what you were looking at.
-   2. Every [data-linechart] on the page is painted from the same state.
-      The card in the tab and the fullscreen window are the same chart
-      drawn twice; they can't drift apart.
+   2. Every [data-linechart] of the same SCOPE is painted from the same
+      state. The card in the tab and the fullscreen window are the same
+      chart drawn twice; they can't drift apart.
+
+   The scope is the value of the [data-linechart] attribute: "main" for the
+   Progress tab's graph and "ex" for the copy at the bottom of the exercise
+   window. Each scope has its own series (chartState.line / .exLine), its
+   own zoom (ui.chartView[scope]) and its own selected dot, so the exercise
+   window can sit on top of the Progress tab without either one hijacking
+   the other. Every function down here takes the scope with it.
 
    Gestures redraw the chart while they're still going, so the in-flight
    pointer state has to outlive a redraw too — hence the module-level
    pointer map instead of variables inside the paint function.         */
+
+/* which graph a tapped control belongs to — anything unmarked is the tab's */
+const chartScope = (el) => (el && el.dataset.scope) || "main";
 
 const CHART_MIN_SPAN = 1;         // never zoom past two points on screen
 const CHART_TAP_SLOP = 7;         // px of movement still counted as a tap
@@ -3469,46 +3614,46 @@ let chartClipId = 0;              // unique <clipPath> ids, one per painted copy
 
 /* the visible index window, clamped against the data every time it's read,
    so nothing can leave a view pointing off the end of a shorter series */
-function chartWindow(n) {
-  const v = ui.chartView || { lo: 0, hi: n - 1 };
+function chartWindow(n, scope) {
+  const v = ui.chartView[scope] || { lo: 0, hi: n - 1 };
   const span = Math.min(Math.max(v.hi - v.lo, CHART_MIN_SPAN), n - 1);
   const lo = Math.max(0, Math.min(v.lo, n - 1 - span));
   return { lo, hi: lo + span };
 }
 
 /* zoom around a focal index — the point under the fingers stays put */
-function chartZoom(factor, focus) {
-  const line = chartState.line;
+function chartZoom(factor, focus, scope) {
+  const line = lineOf(scope);
   if (!line || line.data.length < 2) return;
   const n = line.data.length;
-  const { lo, hi } = chartWindow(n);
+  const { lo, hi } = chartWindow(n, scope);
   const span = hi - lo;
   const fi = focus == null ? (lo + hi) / 2 : focus;
   const t = span > 0 ? (fi - lo) / span : 0.5;
   const next = Math.min(Math.max(span / factor, CHART_MIN_SPAN), n - 1);
   const nlo = fi - t * next;
-  ui.chartView = next >= n - 1 ? null : { lo: nlo, hi: nlo + next };
+  ui.chartView[scope] = next >= n - 1 ? null : { lo: nlo, hi: nlo + next };
   drawLineChart();
   refreshChartToolbars();
 }
 
-function chartPan(dIndex) {
-  const line = chartState.line;
+function chartPan(dIndex, scope) {
+  const line = lineOf(scope);
   if (!line) return;
-  const { lo, hi } = chartWindow(line.data.length);
-  ui.chartView = { lo: lo + dIndex, hi: hi + dIndex };
+  const { lo, hi } = chartWindow(line.data.length, scope);
+  ui.chartView[scope] = { lo: lo + dIndex, hi: hi + dIndex };
   drawLineChart();
 }
 
 /* Selecting a dot repaints the chart and rewrites the detail panels in
    place. A full render() here would rebuild the page under the finger
    mid-gesture, so this is deliberately surgical. */
-function chartSelect(id) {
-  ui.chartSel = id;
+function chartSelect(id, scope) {
+  ui.chartSel[scope] = id;
   drawLineChart();
-  document.querySelectorAll("[data-linedetail]").forEach((el) => { el.innerHTML = renderPointDetail(); });
+  document.querySelectorAll(`[data-linedetail="${scope}"]`).forEach((el) => { el.innerHTML = renderPointDetail(scope); });
   /* keep the session list under the chart in step with the dot */
-  document.querySelectorAll('[data-action="chart-pick"]').forEach((el) => {
+  document.querySelectorAll(`[data-action="chart-pick"][data-scope="${scope}"]`).forEach((el) => {
     el.style.background = el.dataset.id === id ? "rgba(233,185,73,.08)" : "transparent";
   });
   if (window.lucide) lucide.createIcons();
@@ -3518,7 +3663,7 @@ function chartSelect(id) {
    are rebuilt whenever the view changes */
 function refreshChartToolbars() {
   document.querySelectorAll("[data-charttoolbar]").forEach((el) => {
-    el.innerHTML = chartToolbarInner(el.dataset.charttoolbar === "full");
+    el.innerHTML = chartToolbarInner(el.dataset.full === "1", el.dataset.charttoolbar);
   });
   if (window.lucide) lucide.createIcons();
 }
@@ -3528,8 +3673,10 @@ function drawLineChart() {
 }
 
 function paintLineChart(wrap) {
-  if (!chartState.line) { wrap.innerHTML = ""; return; }
-  const { data, goal } = chartState.line;
+  const scope = wrap.dataset.linechart || "main";
+  const line = lineOf(scope);
+  if (!line) { wrap.innerHTML = ""; return; }
+  const { data, goal } = line;
   const n = data.length;
   const W = wrap.clientWidth, H = wrap.clientHeight;
   if (n < 2 || !W || !H) return;
@@ -3542,7 +3689,7 @@ function paintLineChart(wrap) {
         cGold = themeColor("--gold"), cDot = themeColor("--bg"), cGreen = themeColor("--green"),
         cText = themeColor("--text");
 
-  const { lo, hi } = chartWindow(n);
+  const { lo, hi } = chartWindow(n, scope);
   const span = hi - lo;
   /* one point of margin either side keeps the line entering and leaving the
      frame instead of starting in mid-air at the edge of the zoom */
@@ -3592,7 +3739,7 @@ function paintLineChart(wrap) {
   /* line + dots, clipped to the plot so a zoom can't spill over the axis */
   svg += `<g clip-path="url(#${cid})">`;
   svg += `<path d="${monotonePath(pts)}" fill="none" stroke="${cGold}" stroke-width="2.4"/>`;
-  const sel = data.findIndex((d) => d.e.id === ui.chartSel);
+  const sel = data.findIndex((d) => d.e.id === ui.chartSel[scope]);
   /* dots thin out when zoomed all the way out on a long history, but the
      selected one is always drawn */
   const dSkip = plotW / Math.max(1, span) < 7 ? Math.ceil(7 / Math.max(0.5, plotW / Math.max(1, span))) : 1;
@@ -3610,7 +3757,7 @@ function paintLineChart(wrap) {
 
   /* the zoom read-out, so it's never a mystery which part of the history
      you're looking at */
-  const zoomTag = ui.chartView
+  const zoomTag = ui.chartView[scope]
     ? `<div style="position:absolute;top:4px;right:8px;font-size:10px;font-weight:700;letter-spacing:.04em;color:var(--gold);background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:2px 6px">
         ${T("chart.showing", { n: Math.min(n, Math.round(span) + 1), total: n })}
       </div>`
@@ -3633,7 +3780,7 @@ function paintLineChart(wrap) {
       chartGesture = {
         mode: "pinch", moved: true,
         dist: Math.max(1, Math.abs(a.x - b.x)),
-        win: chartWindow(n),
+        win: chartWindow(n, scope),
         focus: Math.max(0, Math.min(n - 1, idxAt((a.x + b.x) / 2 - r.left))),
       };
     } else {
@@ -3655,14 +3802,14 @@ function paintLineChart(wrap) {
       const next = Math.min(Math.max(span0 * (g.dist / dist), CHART_MIN_SPAN), n - 1);
       const t = span0 > 0 ? (g.focus - g.win.lo) / span0 : 0.5;
       const nlo = g.focus - t * next;
-      ui.chartView = next >= n - 1 ? null : { lo: nlo, hi: nlo + next };
+      ui.chartView[scope] = next >= n - 1 ? null : { lo: nlo, hi: nlo + next };
       drawLineChart();
       refreshChartToolbars();
       return;
     }
     if (Math.abs(p.x - p.x0) > CHART_TAP_SLOP || Math.abs(p.y - p.y0) > CHART_TAP_SLOP) chartGesture.moved = true;
-    if (!chartGesture.moved || !ui.chartView) return;   // unzoomed there's nowhere to pan
-    chartPan(-((p.x - prevX) / plotW) * span);
+    if (!chartGesture.moved || !ui.chartView[scope]) return;   // unzoomed there's nowhere to pan
+    chartPan(-((p.x - prevX) / plotW) * span, scope);
   };
 
   wrap.onpointerup = (e) => {
@@ -3679,7 +3826,7 @@ function paintLineChart(wrap) {
         if (d < bd) { bd = d; best = i; }
       }
       endGesture(e.pointerId);
-      chartSelect(best >= 0 && bd < 34 ? data[best].e.id : null);
+      chartSelect(best >= 0 && bd < 34 ? data[best].e.id : null, scope);
       return;
     }
     endGesture(e.pointerId);
@@ -3689,10 +3836,10 @@ function paintLineChart(wrap) {
   wrap.onwheel = (e) => {
     e.preventDefault();
     const r = wrap.getBoundingClientRect();
-    chartZoom(e.deltaY < 0 ? 1.3 : 1 / 1.3, Math.max(0, Math.min(n - 1, idxAt(e.clientX - r.left))));
+    chartZoom(e.deltaY < 0 ? 1.3 : 1 / 1.3, Math.max(0, Math.min(n - 1, idxAt(e.clientX - r.left))), scope);
   };
   /* a double-click is the desktop shortcut back to the whole series */
-  wrap.ondblclick = () => { ui.chartView = null; drawLineChart(); refreshChartToolbars(); };
+  wrap.ondblclick = () => { ui.chartView[scope] = null; drawLineChart(); refreshChartToolbars(); };
 }
 
 function drawBarChart() {
@@ -3943,30 +4090,36 @@ const actions = {
     const e = state.log.find((x) => x.id === el.dataset.id);
     if (e) { ui.entryForm = { f: { ...e }, isDraft: false }; render(); }
   },
-  "prog-seg": (el) => { ui.progSeg = el.dataset.id; ui.chartFull = false; render(); },
+  "prog-seg": (el) => { ui.progSeg = el.dataset.id; ui.chartFull = null; render(); },
   "select-progress": (el) => {
     ui.progressSelected = el.dataset.name;
-    ui.chartView = null; ui.chartSel = null;   // a different lift is a different chart
+    ui.chartView.main = null; ui.chartSel.main = null;   // a different lift is a different chart
     render();
   },
 
-  /* ── the progress graph ───────────────────────────────────────────── */
-  "chart-zoom-in": () => chartZoom(1.6, null),
-  "chart-zoom-out": () => chartZoom(1 / 1.6, null),
-  "chart-reset": () => { ui.chartView = null; drawLineChart(); refreshChartToolbars(); },
-  "chart-full": () => { ui.chartFull = true; render(); },
-  "chart-exit-full": () => { ui.chartFull = false; render(); },
+  /* ── the progress graph ───────────────────────────────────────────────
+     Every one of these carries the scope of the graph it was tapped on, so
+     the same buttons drive the Progress tab's chart and the exercise
+     window's copy without either reaching into the other. */
+  "chart-zoom-in": (el) => chartZoom(1.6, null, chartScope(el)),
+  "chart-zoom-out": (el) => chartZoom(1 / 1.6, null, chartScope(el)),
+  "chart-reset": (el) => { ui.chartView[chartScope(el)] = null; drawLineChart(); refreshChartToolbars(); },
+  "chart-full": (el) => { ui.chartFull = chartScope(el); render(); },
+  "chart-exit-full": () => { ui.chartFull = null; render(); },
   /* picking a session from the list under the chart moves the dot too */
-  "chart-pick": (el) => chartSelect(ui.chartSel === el.dataset.id ? null : el.dataset.id),
+  "chart-pick": (el) => {
+    const scope = chartScope(el);
+    chartSelect(ui.chartSel[scope] === el.dataset.id ? null : el.dataset.id, scope);
+  },
 
   /* ── 1RM calculator ───────────────────────────────────────────────── */
   "calc-run": () => {
     const w = +decimalize(ui.calc.weight), r = Math.round(+decimalize(ui.calc.reps));
-    const oneRM = epley1RM(w, r);
+    const oneRM = est1RM(w, r);
     if (oneRM == null) return;                     // nothing typed yet
     /* oneRM is the number on screen; `exact` is the same max unrounded, which
        is what the two tables are built from — see renderCalc */
-    ui.calcResult = { weight: w, reps: r, oneRM, exact: w * (1 + r / 30), unit: ui.calc.unit || state.settings.units };
+    ui.calcResult = { weight: w, reps: r, oneRM, exact: w / rmCurve(r), unit: ui.calc.unit || state.settings.units };
     render();
   },
 
@@ -4109,13 +4262,16 @@ const actions = {
   },
 
   "add-exercise": () => {
-    ui.exWinDraft = { id: uid(), name: "", muscle: "", type: "Compound", equipment: "", alternatives: "", note: "", image: "", video: "", custom: true };
+    ui.exWinDraft = { id: uid(), name: "", muscle: "", type: "", equipment: "", alternatives: "", note: "", image: "", video: "", custom: true };
     ui.exWin = { isNew: true }; ui.exWinEdit = true; render();
   },
   /* open the detail window (read-only) — every "info" button lands here.
      Exercises are keyed by name across the app, so we look up by name. */
   "open-exercise-window": (el) => {
     ui.exWin = { name: el.dataset.name };
+    /* a different lift is a different graph, so its zoom and its open dot
+       start clean rather than inheriting the last exercise's */
+    ui.chartView.ex = null; ui.chartSel.ex = null;
     ui.exWinEdit = false; ui.exWinDraft = null; render();
   },
   "exwin-close": () => { ui.exWin = null; ui.exWinEdit = false; ui.exWinDraft = null; render(); },
@@ -4133,7 +4289,11 @@ const actions = {
   "exwin-save": () => {
     const f = ui.exWinDraft;
     if (!f || !(f.name.trim() && f.muscle.trim())) return;
-    const ex = { ...f, name: f.name.trim(), muscle: f.muscle.trim() };
+    const muscle = f.muscle.trim();
+    /* compound vs isolation was noise nobody filed anything under, so the
+       picker is gone; the only thing `type` still decides is whether the
+       lift is logged in minutes, and the muscle group already knows that. */
+    const ex = { ...f, name: f.name.trim(), muscle, type: cardioType(muscle) };
     const exists = state.library.some((x) => x.id === ex.id);
     ui.exWin = { name: ex.name }; ui.exWinEdit = false; ui.exWinDraft = null;
     patch({ library: exists ? state.library.map((x) => (x.id === ex.id ? ex : x)) : [...state.library, ex] });
@@ -4249,7 +4409,7 @@ const actions = {
   "quick-add-start": () => { ui.pickerQuick = { name: ui.pickerQ.trim(), muscle: "" }; render(); },
   "quick-add-muscle": (el) => {
     const g = el.dataset.g;
-    const ex = { id: uid(), name: ui.pickerQuick.name, muscle: g, type: g === "Cardio" ? "Cardio" : "Compound", equipment: "", alternatives: "", note: "", custom: true };
+    const ex = { id: uid(), name: ui.pickerQuick.name, muscle: g, type: cardioType(g), equipment: "", alternatives: "", note: "", custom: true };
     ui.picking = false; ui.pickerQ = ""; ui.pickerQuick = null;
     ui.entryForm = { f: newEntry(ex.name, ex.muscle, isCardioEx(ex) ? "cardio" : "strength"), isDraft: true };
     patch({ library: [...state.library, ex] });
@@ -4545,7 +4705,7 @@ function handleBind(el) {
     ui.workoutSheet.date = v; render();
   } else if (bind === "progressSel") {
     ui.progressSelected = v;
-    ui.chartView = null; ui.chartSel = null;   // a different lift is a different chart
+    ui.chartView.main = null; ui.chartSel.main = null;   // a different lift is a different chart
     render();
   } else if (bind === "calcUnit") {
     /* the calculator is pure ratios, so the unit is only ever a label: the

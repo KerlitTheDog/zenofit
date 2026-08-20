@@ -1774,7 +1774,7 @@ function chartToolbarInner(full, scope = "main") {
     ${btn("chart-zoom-in", "zoom-in", T("chart.zoomIn"))}
     ${btn("chart-zoom-out", "zoom-out", T("chart.zoomOut"))}
     ${zoomed ? btn("chart-reset", "rotate-ccw", T("chart.reset")) : ""}
-    <div style="flex:1;min-width:0;font-size:10.5px;color:var(--faint);text-align:right;line-height:1.3">${T("chart.hint")}</div>
+    <div style="flex:1;min-width:0;font-size:10.5px;color:var(--faint);text-align:right;line-height:1.3">${T(full ? "chart.hintFull" : "chart.hint")}</div>
     ${btn(full ? "chart-exit-full" : "chart-full", full ? "minimize-2" : "maximize-2", full ? T("chart.exitFull") : T("chart.full"))}
   </div>`;
 }
@@ -1822,7 +1822,7 @@ function renderChartFull() {
       </div>
     </div>
     <div style="padding:10px 8px 0">${chartToolbar(true, scope)}</div>
-    <div data-linechart="${scope}" style="position:relative;flex:1;min-height:120px;margin:0 8px;touch-action:none"></div>
+    <div data-linechart="${scope}" data-chartfull="1" style="position:relative;flex:1;min-height:120px;margin:0 8px;touch-action:none"></div>
     <div class="pb-scroll" data-linedetail="${scope}" style="max-height:44%;overflow-y:auto;padding:0 12px 18px">${renderPointDetail(scope)}</div>
   `, "chartFull");
 }
@@ -2002,7 +2002,7 @@ const needsDetails = (ex) =>
   !!(ex && ex.custom) && !ex.dismissedNew && !ex.equipment && !ex.alternatives && !ex.note;
 
 const newFlag = (ex) => needsDetails(ex)
-  ? '<span style="font-size:10px;color:var(--blue);margin-left:6px;font-weight:700;letter-spacing:.06em">${T("lib.newFlag")}</span>'
+  ? `<span style="font-size:10px;color:var(--blue);margin-left:6px;font-weight:700;letter-spacing:.06em">${T("lib.newFlag")}</span>`
   : "";
 
 function renderLibraryList(library) {
@@ -2473,6 +2473,13 @@ function exWindowViewBody(ex, hist) {
       ${T("ex.newExplain")}
     </div>` : ""}
 
+    ${ex.missing ? "" : `<button data-action="log-exercise" data-name="${esc(ex.name)}" class="pb-btn pb-gold" style="width:100%;padding:15px 0;font-size:16px;border-radius:14px">
+      ${icon("plus", 19, 'stroke-width="2.6"')} ${T("ex.logBtn")}
+    </button>
+    <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:8px 2px 18px">
+      ${ui.workoutSheet ? T("ex.logHintOpen") : T("ex.logHint")}
+    </div>`}
+
     ${ex.image
       ? `<img src="${esc(ex.image)}" alt="${esc(exLabelOf(ex))}" style="width:100%;max-height:300px;object-fit:cover;border-radius:14px;border:1px solid var(--border);margin-bottom:18px;display:block">`
       : ""}
@@ -2683,8 +2690,9 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
 /* exercise picker with quick-add (name + muscle only, like the sheet) */
 function renderPickerList(library) {
   const q = ui.pickerQ, quick = ui.pickerQuick;
-  /* two different lists on one screen: you can pick an uncategorized lift, but
-     you can never file a new one into the bucket by hand */
+  /* two different lists on one screen: allGroups() shows the bucket so an
+     uncategorized lift can still be picked, libraryGroups() is what a new one
+     can be filed under — the bucket is never a choice, only a Skip. */
   const groups = allGroups(library);
   const pickable = libraryGroups(library);
   const match = library.filter((x) => !q || x.name.toLowerCase().includes(q.toLowerCase()));
@@ -2703,6 +2711,9 @@ function renderPickerList(library) {
         ${pickable.map((g) => `<button data-action="quick-add-muscle" data-g="${esc(g)}" class="pb-chip" style="padding:8px 14px;font-size:13px;color:${colorFor(g)};border-color:${colorFor(g)}55;background:${colorFor(g)}14">${esc(groupLabel(g))}</button>`).join("")}
         <button data-action="group-new" data-then="quickadd" title="${T("groups.newMuscleGroup")}" class="pb-chip" style="padding:8px 12px;font-size:13px;color:var(--gold);border-color:rgba(233,185,73,.4);background:rgba(233,185,73,.08)">${icon("plus", 13, 'stroke-width="2.6"')}</button>
       </div>
+      <button data-action="quick-add-muscle" data-g="${esc(UNCATEGORIZED)}" class="pb-btn pb-ghost" style="width:100%;padding:10px 0;font-size:13px;margin-top:10px;border-style:dashed;color:var(--muted)">
+        ${icon("skip-forward", 14)} ${T("pick.skipMuscle")}
+      </button>
       <div style="font-size:11.5px;color:var(--faint);margin-top:10px">${T("pick.quickHint")}</div>
     </div>`;
   }
@@ -3540,6 +3551,22 @@ function niceTicks(min, max, count = 5, integers = false) {
   return ticks;
 }
 
+/* niceTicks' other half: when the axis has been dragged or pinched to a
+   domain of its own, that domain is the answer and the ticks have to live
+   inside it rather than rounding it outward — otherwise every pan would
+   nudge the view it was meant to be reading. */
+function ticksWithin(min, max, count = 5) {
+  if (!(max > min)) return [min];
+  const step0 = (max - min) / (count - 1);
+  const mag = Math.pow(10, Math.floor(Math.log10(Math.abs(step0))));
+  const norm = step0 / mag;
+  const step = (norm >= 5 ? 10 : norm >= 2 ? 5 : norm >= 1 ? 2 : 1) * mag;
+  const out = [];
+  for (let v = Math.ceil(min / step) * step; v <= max + step / 1e6; v += step)
+    out.push(Math.round(v * 1000) / 1000);
+  return out;
+}
+
 /* monotone cubic interpolation (Fritsch–Carlson) — recharts' type="monotone" */
 function monotonePath(pts) {
   const n = pts.length;
@@ -3583,6 +3610,12 @@ function drawCharts() {
    admired: pinch or scroll to zoom, drag to pan, tap a dot to read the
    session behind it, and blow the whole thing up to fill the phone.
 
+   It does not stop at your data. The window can be pulled out past the
+   whole history and pushed off either end of it, and in fullscreen the
+   vertical axis moves too, because a graph that ends at your best set
+   looks like a ceiling. Zoom out and the sessions you have shrink into a
+   corner, and the empty space in front of them is the rest of the year.
+
    Two rules make that survive the app's render-everything model:
 
    1. The view (which slice of the series is on screen) and the selection
@@ -3606,23 +3639,70 @@ function drawCharts() {
 /* which graph a tapped control belongs to — anything unmarked is the tab's */
 const chartScope = (el) => (el && el.dataset.scope) || "main";
 
-const CHART_MIN_SPAN = 1;         // never zoom past two points on screen
+const CHART_MIN_SPAN = 0.5;       // zoom right in between two sessions
 const CHART_TAP_SLOP = 7;         // px of movement still counted as a tap
 const chartPointers = new Map();  // live pointers on a plot, by pointerId
 let chartGesture = null;          // {mode:"pan"|"pinch", …} while one is running
 let chartClipId = 0;              // unique <clipPath> ids, one per painted copy
 
-/* the visible index window, clamped against the data every time it's read,
-   so nothing can leave a view pointing off the end of a shorter series */
+/* The last vertical domain each scope was actually painted with, so a gesture
+   that starts moving the y axis has somewhere to start from. It is written on
+   every paint, which always happens before a finger can land. */
+const chartYSeen = { main: null, ex: null };
+
+/* ── how far you're allowed to go ─────────────────────────────────────
+   The graph used to stop dead at the first and last session, which reads
+   like the end of the road: two points filled the frame and there was
+   nowhere left to look. There is nothing after your last set yet, and
+   that empty space is the point — you can pull back until the history is
+   a small thing in the corner and the rest of the year is in front of
+   you. So the window is allowed well past both ends of the data, and the
+   only rule left is that some of the line always stays on screen, so
+   there is always something to find your way back by. */
+const chartMaxSpan = (n) => Math.max((n - 1) * 6, 24);
+
+/* the visible index window, clamped every time it's read so nothing can
+   leave a view pointing somewhere it could never be scrolled back from */
 function chartWindow(n, scope) {
-  const v = ui.chartView[scope] || { lo: 0, hi: n - 1 };
-  const span = Math.min(Math.max(v.hi - v.lo, CHART_MIN_SPAN), n - 1);
-  const lo = Math.max(0, Math.min(v.lo, n - 1 - span));
+  const full = Math.max(n - 1, 1);
+  const v = ui.chartView[scope] || { lo: 0, hi: full };
+  const span = Math.min(Math.max(v.hi - v.lo, CHART_MIN_SPAN), chartMaxSpan(n));
+  const pad = span * 0.9;   // the history may be pushed almost, never quite, off
+  const lo = Math.max(-pad, Math.min(v.lo, full - span + pad));
   return { lo, hi: lo + span };
 }
 
-/* zoom around a focal index — the point under the fingers stays put */
-function chartZoom(factor, focus, scope) {
+/* the vertical half of the view, or null while it's still auto-fitting */
+const chartYView = (scope) => {
+  const v = ui.chartView[scope];
+  return v && v.yLo != null && v.yHi != null ? { lo: v.yLo, hi: v.yHi } : null;
+};
+
+/* Every write goes through here so a horizontal move can't drop the vertical
+   view it wasn't thinking about, or the other way round — and so the same
+   "never quite off screen" rule chartWindow applies sideways applies upward
+   too, since a graph dragged past its own numbers is a blank page. */
+function setChartView(scope, v) {
+  let y = v.yLo != null && v.yHi != null ? { lo: v.yLo, hi: v.yHi } : chartYView(scope);
+  if (y) {
+    const line = lineOf(scope);
+    const ys = (line ? line.data : []).map((d) => d.y);
+    const h = y.hi - y.lo;
+    if (ys.length && h > 0) {
+      const lo = Math.max(Math.min(...ys) - h * 0.9, Math.min(y.lo, Math.max(...ys) - h * 0.1));
+      y = { lo, hi: lo + h };
+    }
+  }
+  ui.chartView[scope] = y ? { lo: v.lo, hi: v.hi, yLo: y.lo, yHi: y.hi } : { lo: v.lo, hi: v.hi };
+}
+
+/* Zoom around a focal index — whatever is under the fingers stays put.
+   `fy` is the value under them; pass it (with the domain the gesture
+   started from) to zoom both axes at once, leave it out and the vertical
+   axis carries on fitting itself to what's on screen, which is what makes
+   a zoomed-in plateau readable. A y axis already moved by hand is scaled
+   along regardless, so the picture can't come out stretched. */
+function chartZoom(factor, focus, scope, fy, y0) {
   const line = lineOf(scope);
   if (!line || line.data.length < 2) return;
   const n = line.data.length;
@@ -3630,19 +3710,40 @@ function chartZoom(factor, focus, scope) {
   const span = hi - lo;
   const fi = focus == null ? (lo + hi) / 2 : focus;
   const t = span > 0 ? (fi - lo) / span : 0.5;
-  const next = Math.min(Math.max(span / factor, CHART_MIN_SPAN), n - 1);
+  const next = Math.min(Math.max(span / factor, CHART_MIN_SPAN), chartMaxSpan(n));
   const nlo = fi - t * next;
-  ui.chartView[scope] = next >= n - 1 ? null : { lo: nlo, hi: nlo + next };
+  const v = { lo: nlo, hi: nlo + next };
+
+  const base = y0 || chartYView(scope);
+  if (base) {
+    /* however much the x axis really moved after its clamps, the y axis
+       moves by the same, so the two never drift out of proportion */
+    const h = base.hi - base.lo;
+    const nh = span > 0 ? h * (next / span) : h;
+    const cy = fy == null ? (base.lo + base.hi) / 2 : fy;
+    const ty = h > 0 ? (cy - base.lo) / h : 0.5;
+    v.yLo = cy - ty * nh;
+    v.yHi = v.yLo + nh;
+  }
+  setChartView(scope, v);
   drawLineChart();
   refreshChartToolbars();
 }
 
-function chartPan(dIndex, scope) {
+function chartPan(dIndex, dValue, scope) {
   const line = lineOf(scope);
   if (!line) return;
+  const fresh = !ui.chartView[scope];   // dragging an unzoomed graph is still a view
   const { lo, hi } = chartWindow(line.data.length, scope);
-  ui.chartView[scope] = { lo: lo + dIndex, hi: hi + dIndex };
+  const v = { lo: lo + dIndex, hi: hi + dIndex };
+  if (dValue) {
+    const base = chartYView(scope) || chartYSeen[scope];
+    if (base) { v.yLo = base.lo + dValue; v.yHi = base.hi + dValue; }
+  }
+  setChartView(scope, v);
   drawLineChart();
+  /* the toolbar only changes on the frame the reset button appears */
+  if (fresh) refreshChartToolbars();
 }
 
 /* Selecting a dot repaints the chart and rewrites the detail panels in
@@ -3697,12 +3798,19 @@ function paintLineChart(wrap) {
   const shown = data.slice(Math.max(0, Math.floor(lo)), Math.min(n - 1, Math.ceil(hi)) + 1);
   const vals = (shown.length ? shown : data).map((d) => d.y);
 
-  const ticks = niceTicks(Math.min(...vals), Math.max(...vals), 5);
-  const yMin = ticks[0], yMax = ticks[ticks.length - 1];
+  /* Vertical domain: the axis fits itself to whatever is on screen until the
+     moment you move it yourself, and from then on it's yours — that's what
+     lets you leave room above the line for the sets you haven't done yet. */
+  const yView = chartYView(scope);
+  const ticks = yView ? ticksWithin(yView.lo, yView.hi, 5) : niceTicks(Math.min(...vals), Math.max(...vals), 5);
+  const yMin = yView ? yView.lo : ticks[0];
+  const yMax = yView ? yView.hi : ticks[ticks.length - 1];
+  chartYSeen[scope] = { lo: yMin, hi: yMax };   // where a y gesture starts from
   const yOf = (v) => bottom - ((v - yMin) / (yMax - yMin || 1)) * plotH;
   const xOf = (i) => left + ((i - lo) / span) * plotW;
-  /* the inverse, for hit-testing and for zooming around a finger */
+  /* the inverses, for hit-testing and for zooming around a finger */
   const idxAt = (px) => lo + ((px - left) / plotW) * span;
+  const valAt = (py) => yMin + ((bottom - py) / (plotH || 1)) * (yMax - yMin);
 
   const pts = data.map((d, i) => ({ x: +xOf(i).toFixed(2), y: +yOf(d.y).toFixed(2), i }));
   const cid = "pbclip" + (++chartClipId);
@@ -3712,22 +3820,28 @@ function paintLineChart(wrap) {
 
   /* horizontal grid */
   for (const t of ticks) svg += `<line x1="${left}" x2="${right}" y1="${yOf(t).toFixed(2)}" y2="${yOf(t).toFixed(2)}" stroke="${cGrid}" stroke-dasharray="3 5"/>`;
-  /* one vertical guide per visible point, thinned out when they crowd */
-  const vSkip = Math.max(1, Math.ceil((i1 - i0 + 1) / 12));
-  for (let i = i0; i <= i1; i += vSkip) {
-    const x = pts[i].x;
+  /* One vertical guide per session slot, thinned out when they crowd — drawn
+     across the whole window rather than only where the data is, so the space
+     in front of your last session reads as the same graph continuing and not
+     as the graph having run out. The slots are counted off the data, so they
+     hold still while you drag instead of shuffling under your finger. */
+  const g0 = Math.ceil(lo) - 1, g1 = Math.floor(hi) + 1;
+  const vSkip = Math.max(1, Math.ceil((span + 1) / 12));
+  for (let i = g0; i <= g1; i++) {
+    if (((i % vSkip) + vSkip) % vSkip !== 0) continue;
+    const x = xOf(i);
     if (x < left - 1 || x > right + 1) continue;
-    svg += `<line x1="${x}" x2="${x}" y1="${top}" y2="${bottom}" stroke="${cGrid}" stroke-dasharray="3 5"/>`;
+    svg += `<line x1="${x.toFixed(2)}" x2="${x.toFixed(2)}" y1="${top}" y2="${bottom}" stroke="${cGrid}" stroke-dasharray="3 5"/>`;
   }
-  /* axes + labels */
+  /* axes + labels — only real sessions have a date to write under them */
   svg += `<line x1="${left}" x2="${right}" y1="${bottom}" y2="${bottom}" stroke="${cAxis}"/>`;
   for (const t of ticks) svg += `<text x="${left - 6}" y="${(yOf(t) + 3.5).toFixed(2)}" fill="${cTick}" font-size="10.5" text-anchor="end">${t}</text>`;
-  const lSkip = Math.max(1, Math.ceil((i1 - i0 + 1) / 7));
-  for (let i = i0; i <= i1; i++) {
-    if ((i - i0) % lSkip !== 0 && i !== i1) continue;
-    const x = pts[i].x;
+  const lSkip = Math.max(1, Math.ceil((span + 1) / 7));
+  for (let i = Math.max(0, g0); i <= Math.min(n - 1, g1); i++) {
+    if (i % lSkip !== 0) continue;
+    const x = xOf(i);
     if (x < left + 4 || x > right - 4) continue;
-    svg += `<text x="${x}" y="${bottom + 14}" fill="${cTick}" font-size="10.5" text-anchor="middle">${esc(data[i].x)}</text>`;
+    svg += `<text x="${x.toFixed(2)}" y="${bottom + 14}" fill="${cTick}" font-size="10.5" text-anchor="middle">${esc(data[i].x)}</text>`;
   }
   /* goal reference line, drawn only while it's inside the visible domain */
   if (goal != null && goal >= yMin && goal <= yMax) {
@@ -3757,9 +3871,9 @@ function paintLineChart(wrap) {
 
   /* the zoom read-out, so it's never a mystery which part of the history
      you're looking at */
-  const zoomTag = ui.chartView[scope]
+  const zoomTag = ui.chartView[scope] && shown.length < n
     ? `<div style="position:absolute;top:4px;right:8px;font-size:10px;font-weight:700;letter-spacing:.04em;color:var(--gold);background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:2px 6px">
-        ${T("chart.showing", { n: Math.min(n, Math.round(span) + 1), total: n })}
+        ${T("chart.showing", { n: shown.length, total: n })}
       </div>`
     : "";
   wrap.innerHTML = svg + zoomTag;
@@ -3771,17 +3885,26 @@ function paintLineChart(wrap) {
     else if (chartGesture) chartGesture.moved = true;   // no tap on the way out of a pinch
   };
 
+  /* A pinch is a real two-axis zoom and a drag moves both ways, but only
+     where the page isn't already using the vertical: the card in the tab
+     has to stay scrollable under a thumb, so there it's left/right only.
+     Fullscreen is the graph and nothing else, so there it's both. */
+  const freeY = wrap.dataset.chartfull === "1";
+
   wrap.onpointerdown = (e) => {
     chartPointers.set(e.pointerId, { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, t: Date.now() });
     try { wrap.setPointerCapture(e.pointerId); } catch { /* mouse on some builds */ }
     if (chartPointers.size >= 2) {
       const [a, b] = [...chartPointers.values()];
       const r = wrap.getBoundingClientRect();
+      const mx = (a.x + b.x) / 2 - r.left, my = (a.y + b.y) / 2 - r.top;
       chartGesture = {
         mode: "pinch", moved: true,
-        dist: Math.max(1, Math.abs(a.x - b.x)),
+        dist: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
         win: chartWindow(n, scope),
-        focus: Math.max(0, Math.min(n - 1, idxAt((a.x + b.x) / 2 - r.left))),
+        focus: Math.max(lo, Math.min(hi, idxAt(mx))),
+        y: { lo: yMin, hi: yMax },
+        focusY: Math.max(yMin, Math.min(yMax, valAt(my))),
       };
     } else {
       chartGesture = { mode: "pan", moved: false };
@@ -3791,25 +3914,24 @@ function paintLineChart(wrap) {
   wrap.onpointermove = (e) => {
     const p = chartPointers.get(e.pointerId);
     if (!p || !chartGesture) return;
-    const prevX = p.x;
+    const prevX = p.x, prevY = p.y;
     p.x = e.clientX; p.y = e.clientY;
 
     if (chartGesture.mode === "pinch" && chartPointers.size >= 2) {
       const [a, b] = [...chartPointers.values()];
-      const dist = Math.max(1, Math.abs(a.x - b.x));
+      const dist = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
       const g = chartGesture;
       const span0 = g.win.hi - g.win.lo;
-      const next = Math.min(Math.max(span0 * (g.dist / dist), CHART_MIN_SPAN), n - 1);
-      const t = span0 > 0 ? (g.focus - g.win.lo) / span0 : 0.5;
-      const nlo = g.focus - t * next;
-      ui.chartView[scope] = next >= n - 1 ? null : { lo: nlo, hi: nlo + next };
-      drawLineChart();
-      refreshChartToolbars();
+      /* replayed from where the pinch started rather than accumulated frame
+         by frame, so pinching out and back in lands where it began */
+      ui.chartView[scope] = { lo: g.win.lo, hi: g.win.hi, yLo: g.y.lo, yHi: g.y.hi };
+      chartZoom(dist / g.dist, g.focus, scope, g.focusY, g.y);
       return;
     }
     if (Math.abs(p.x - p.x0) > CHART_TAP_SLOP || Math.abs(p.y - p.y0) > CHART_TAP_SLOP) chartGesture.moved = true;
-    if (!chartGesture.moved || !ui.chartView[scope]) return;   // unzoomed there's nowhere to pan
-    chartPan(-((p.x - prevX) / plotW) * span, scope);
+    if (!chartGesture.moved) return;
+    const dy = freeY ? ((p.y - prevY) / plotH) * (yMax - yMin) : 0;
+    chartPan(-((p.x - prevX) / plotW) * span, dy, scope);
   };
 
   wrap.onpointerup = (e) => {
@@ -3836,7 +3958,7 @@ function paintLineChart(wrap) {
   wrap.onwheel = (e) => {
     e.preventDefault();
     const r = wrap.getBoundingClientRect();
-    chartZoom(e.deltaY < 0 ? 1.3 : 1 / 1.3, Math.max(0, Math.min(n - 1, idxAt(e.clientX - r.left))), scope);
+    chartZoom(e.deltaY < 0 ? 1.3 : 1 / 1.3, Math.max(lo, Math.min(hi, idxAt(e.clientX - r.left))), scope);
   };
   /* a double-click is the desktop shortcut back to the whole series */
   wrap.ondblclick = () => { ui.chartView[scope] = null; drawLineChart(); refreshChartToolbars(); };
@@ -4274,6 +4396,33 @@ const actions = {
     ui.chartView.ex = null; ui.chartSel.ex = null;
     ui.exWinEdit = false; ui.exWinDraft = null; render();
   },
+  /* ── straight from the library into the set list ──────────────────
+     The long way round to logging one lift is New Workout → Add exercise
+     → find it again in the picker, which is three screens to reach a page
+     you were already looking at. This is the short way: it opens today's
+     workout behind you and drops you in this exercise's entry form.
+
+     "Today's workout" is whichever one is already going — the window you
+     have open, or the day you parked earlier and never saved — so a
+     shortcut can never split one day in two. Nothing is logged until the
+     day itself is saved, exactly as if you had walked there.          */
+  "log-exercise": (el) => {
+    const name = el.dataset.name;
+    const ex = state.library.find((x) => x.name === name);
+    if (!ex) return;
+    if (!ui.workoutSheet) {
+      const today = todayStr();
+      const parked = (state.dayDrafts || []).find((d) => d.date === today);
+      ui.workoutSheet = parked
+        ? { date: parked.date, entries: clone(parked.entries), draftId: parked.id }
+        : { date: today, entries: [] };
+    }
+    ui.exWin = null; ui.exWinEdit = false; ui.exWinDraft = null;
+    ui.picking = false; ui.pickerQ = ""; ui.pickerQuick = null;
+    ui.entryForm = { f: newEntry(ex.name, ex.muscle, isCardioEx(ex) ? "cardio" : "strength"), isDraft: true };
+    ui.setForm = null;
+    render();
+  },
   "exwin-close": () => { ui.exWin = null; ui.exWinEdit = false; ui.exWinDraft = null; render(); },
   "exwin-edit": () => {
     const ex = state.library.find((x) => x.name === ui.exWin.name);
@@ -4407,6 +4556,10 @@ const actions = {
   "close-picker": () => { ui.picking = false; ui.pickerQ = ""; ui.pickerQuick = null; render(); },
   "picker-seg": (el) => { ui.pickerSeg = el.dataset.id; if (el.dataset.id === "exercises") { ui.pickerQuick = null; } render(); },
   "quick-add-start": () => { ui.pickerQuick = { name: ui.pickerQ.trim(), muscle: "" }; render(); },
+  /* The name is the only thing that has to be answered here — "Skip for now"
+     sends the same el with the bucket as its group, so a lift invented in the
+     middle of a set can be logged now and filed later. It lands in
+     Uncategorized still wearing its NEW flag, which is the reminder. */
   "quick-add-muscle": (el) => {
     const g = el.dataset.g;
     const ex = { id: uid(), name: ui.pickerQuick.name, muscle: g, type: cardioType(g), equipment: "", alternatives: "", note: "", custom: true };

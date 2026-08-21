@@ -412,22 +412,37 @@ function entrySummary(e, unit, withRpe = false) {
    training, but it would not be an improvement on the estimate, and this
    card only ever promises an improvement.
 
-   Which one is marked as the suggestion follows double progression: climb
-   the reps until you're at the top of the range you actually work this
-   lift in, then take the weight up instead and start climbing again. That
-   range is read off your own history — the median top-set rep count over
-   your last few sessions on the lift, held between 5 and 12 — because a
-   fixed "go to 12" is nonsense for someone who lives on triples. The
-   median rather than the maximum on purpose: one big set shouldn't move
-   the ceiling, or adding a rep would keep raising the bar it just cleared
-   and the weight would never go up.
+   NEITHER OPTION IS RECOMMENDED OVER THE OTHER, and that is deliberate.
 
-   The other option is always right there next to it. The app suggests,
-   the lifter decides.                                                 */
+   This used to run double progression — climb the reps to the top of your
+   range, then take the weight up — with the top of the range inferred from
+   the median top-set reps of your recent sessions. It was wrong twice over.
 
-const SUG_REP_FLOOR = 5;     // never insist on fewer reps than this before adding weight
-const SUG_REP_CEIL = 12;     // …nor more, the estimate is at its best under 12
-const SUG_LOOKBACK = 6;      // sessions of this lift that define its rep range
+   Wrong mechanically: that median is taken over a window that INCLUDES
+   last session, so for the app to decide you were under your range, more
+   than half your recent sessions had to have more reps than the most
+   recent one — your reps had to have just gone DOWN. The only thing that
+   drops your reps is adding weight, and the weight option here holds the
+   reps (see above), so the one state that unlocked "+1 rep" was a state
+   that following the app could never produce. The ceiling sat wherever you
+   already were and the answer was "add weight" forever, whichever option
+   you actually took.
+
+   Wrong in principle, which is the half worth remembering: the range was
+   INFERRED. The log records what you did, never what you were aiming for,
+   and a rep range is an intention. Crowning an option on the strength of a
+   guess about your program is the same mistake as a progress bar filling
+   toward a goal you never set — see the volume list, which had it too.
+
+   So both options are shown identically and the app ranks them by the one
+   thing it can work out exactly: WHICH IS THE SMALLER STEP, meaning which
+   raises the estimate least. That lands on the extra rep in the 8-12 range
+   and on the extra weight down on heavy triples — where one more rep is
+   worth far more than a plate — which is true, useful, and assumes nothing
+   about anyone's programming. The smaller step is listed first and marked
+   as such; the other is right beside it, the same size and the same
+   colour. The app measures, the lifter decides.                        */
+
 const SUG_CARDIO_MIN = 2;    // minutes added on the cardio equivalent
 const RPE_MAX = 10;
 
@@ -441,13 +456,6 @@ const weightStep = (unit, w) =>
    unit, so a suggestion is comparable with every other figure on screen. */
 const metricFor = (weight, reps, unit) =>
   est1RM(convertWeight(weight, unit, state.settings.units), reps);
-
-const median = (xs) => {
-  const a = [...xs].sort((x, y) => x - y);
-  if (!a.length) return null;
-  const i = (a.length - 1) / 2;
-  return Number.isInteger(i) ? a[i] : (a[Math.floor(i)] + a[Math.ceil(i)]) / 2;
-};
 
 /* Every earlier outing of this lift, oldest first — the same "strictly
    before" window the vs-your-best preview uses, so the two never disagree
@@ -475,9 +483,17 @@ function entryBest(f) {
   return +f.reps > 0 && +f.weight > 0 ? metricFor(+f.weight, +f.reps, unitOf(f)) : null;
 }
 
-/* The whole card in one object: what last time was, the ways over it, and
-   which one the app would take. `null` only when there is nothing useful
-   to say at all. */
+/* Rank two ways over the bar by how far each one moves the estimate, and
+   say which is the smaller — `null` when they tie, because marking one of
+   two equal steps would be inventing a preference again. */
+function bySmallestStep(options) {
+  const sorted = [...options].sort((a, b) => a.m - b.m);
+  const smaller = sorted.length > 1 && sorted[0].m < sorted[1].m ? sorted[0].kind : null;
+  return { options: sorted, smaller };
+}
+
+/* The whole card in one object: what last time was, and the ways over it.
+   `null` only when there is nothing useful to say at all. */
 function setSuggestion(f, isDraft) {
   if (!f) return null;
   const earlier = earlierOutings(f, isDraft);
@@ -506,7 +522,7 @@ function setSuggestion(f, isDraft) {
      .filter((o) => o.m > prevM);
     if (!options.length) return { kind: "first" };
     return { kind: "cardio", prev: { minutes: mins, intensity: rpe, m: prevM, date: lastDate },
-             options, pick: options[0].kind, now, done };
+             ...bySmallestStep(options), now, done };
   }
 
   /* the set that carried that session, in the unit THIS entry is being
@@ -526,15 +542,8 @@ function setSuggestion(f, isDraft) {
    .filter((o) => o.m != null && o.m > base);
   if (!options.length) return { kind: "first" };
 
-  /* the top of the rep range this lifter works this lift in */
-  const seen = earlier.slice(-SUG_LOOKBACK).map((e) => +e.reps).filter((r) => r > 0);
-  const ceiling = Math.max(SUG_REP_FLOOR,
-    Math.min(SUG_REP_CEIL, Math.round(median(seen) ?? reps)));
-  const wanted = reps < ceiling ? "reps" : "weight";
-  const pick = options.some((o) => o.kind === wanted) ? wanted : options[0].kind;
-
   return { kind: "step", prev: { reps, weight, m: prevM, date: lastDate },
-           base, options, pick, unit: fu, now, done };
+           base, ...bySmallestStep(options), unit: fu, now, done };
 }
 
 /* "vs. Your Best" — compares against strictly earlier entries of the same
@@ -3231,7 +3240,7 @@ function renderSetList(f, unit) {
 
 const sugWeight = (w) => String(Math.round(w * 100) / 100);
 
-function sugOption(o, picked, unit, fill) {
+function sugOption(o, smaller, unit, fill) {
   const label = o.kind === "reps" ? T("sug.optRep")
     : o.kind === "weight" ? T("sug.optWeight", { n: sugWeight(o.step), unit })
     : o.kind === "minutes" ? T("sug.optMin", { n: SUG_CARDIO_MIN })
@@ -3242,10 +3251,15 @@ function sugOption(o, picked, unit, fill) {
   const data = o.minutes != null
     ? `data-min="${o.minutes}" data-rpe="${o.intensity}"`
     : `data-reps="${o.reps}" data-weight="${sugWeight(o.weight)}"`;
-  return `<button data-action="${fill}" ${data} style="flex:1;min-width:0;text-align:left;padding:9px 10px;border-radius:11px;color:var(--text);background:${picked ? "rgba(233,185,73,.09)" : "var(--surface)"};border:1px solid ${picked ? "rgba(233,185,73,.5)" : "var(--border)"}">
-    <div style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:${picked ? "var(--gold)" : "var(--faint)"}">${label}</div>
+  /* identical framing on both — the only difference allowed is the quiet
+     tag saying which one moves the estimate less */
+  return `<button data-action="${fill}" ${data} style="flex:1;min-width:0;text-align:left;padding:9px 10px;border-radius:11px;color:var(--text);background:var(--surface);border:1px solid var(--border)">
+    <div style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)">${label}</div>
     <div class="pb-num" style="font-size:14px;font-weight:700;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${line}</div>
-    <div style="font-size:10.5px;color:var(--faint);margin-top:1px">${T("sug.gives", { n: o.m })}</div>
+    <div style="display:flex;align-items:baseline;gap:5px;margin-top:1px">
+      <span style="font-size:10.5px;color:var(--faint)">${T("sug.gives", { n: o.m })}</span>
+      ${smaller ? `<span style="font-size:9.5px;color:var(--steel);white-space:nowrap">${T("sug.smaller")}</span>` : ""}
+    </div>
   </button>`;
 }
 
@@ -3279,11 +3293,13 @@ function renderSuggestion(form, unit) {
       <div style="flex:1;font-size:12.5px;color:var(--muted);line-height:1.5">${T("sug.ahead", { n: s.prev.m, now: s.now, unit: cardio ? T("unit.pts") : unit })}</div>
     </div>`);
 
+  const mUnit = cardio ? T("unit.pts") : unit;
   return wrap(head + `<div style="display:flex;gap:8px">
-      ${s.options.map((o) => sugOption(o, o.kind === s.pick, eUnit, "sug-use")).join("")}
+      ${s.options.map((o) => sugOption(o, o.kind === s.smaller, eUnit, "sug-use")).join("")}
     </div>
     <div style="font-size:11px;color:var(--faint);margin-top:9px;line-height:1.45">
-      ${T(cardio ? "sug.hintCardio" : "sug.hint", { n: s.prev.m, unit: cardio ? T("unit.pts") : unit })}
+      ${T(s.options.length > 1 ? (s.smaller ? "sug.hint" : "sug.hintTied") : "sug.hintOne",
+          { n: s.prev.m, unit: mUnit })}
     </div>`);
 }
 
@@ -3375,16 +3391,16 @@ function renderSetForm(form, unit) {
      only on a NEW set, because correcting an old one is not a decision
      about what to lift next */
   const sug = isNew && ui.entryForm ? setSuggestion(ui.entryForm.f, ui.entryForm.isDraft) : null;
-  const picked = sug && sug.kind === "step" && !sug.done
-    ? sug.options.find((o) => o.kind === sug.pick) : null;
-  /* …and not when the set already IS the suggestion, which is what you get
-     coming here by tapping it on the card behind this sheet */
-  const pick = picked && !(+s.reps === picked.reps && +s.weight === picked.weight) ? picked : null;
-  const target = pick
-    ? `<button data-action="sug-fill" data-reps="${pick.reps}" data-weight="${sugWeight(pick.weight)}" class="pb-btn pb-ghost" style="width:100%;padding:10px 12px;justify-content:flex-start;gap:8px;font-size:13px;margin-bottom:14px;border-style:dashed;border-color:rgba(233,185,73,.45);color:var(--gold)">
-        ${icon("target", 14)} ${T("sug.tryThis", { reps: pick.reps, weight: sugWeight(pick.weight), unit })}
-        <span style="margin-left:auto;color:var(--faint);font-size:11.5px">${T("sug.gives", { n: pick.m })}</span>
-      </button>`
+  /* both of them, same as the card behind this sheet — minus whichever one
+     the open set already IS, which is what you get by tapping it there */
+  const opts = sug && sug.kind === "step" && !sug.done
+    ? sug.options.filter((o) => !(+s.reps === o.reps && +s.weight === o.weight))
+    : [];
+  const target = opts.length
+    ? `<div class="pb-label" style="margin-bottom:6px">${T("sug.tryLabel")}</div>
+       <div style="display:flex;gap:8px;margin-bottom:14px">
+         ${opts.map((o) => sugOption(o, o.kind === sug.smaller && opts.length > 1, unit, "sug-fill")).join("")}
+       </div>`
     : "";
   return sheet(isNew ? T("setForm.add", { n: index + 1 }) : T("setForm.edit", { n: index + 1 }), "setForm", `
     <div style="display:flex;gap:10px">

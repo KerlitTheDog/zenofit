@@ -28,6 +28,8 @@
    · "vs. Your Best"    = compare vs earlier rows, same lift   → computeBadges()
    · Dashboard row      = MAXIFS / COUNTIF / MAXIFS(date)      → dashboardRows()
    · Weekly volume      = SUMIFS(sets, week, muscle)           → volumeForWeek()
+                          …or the last 7 days, if the user asked for
+                          that in Profile                        → volumeInRange()
    · Deload             = planned by hand, not inferred        → deloadStatus()
    · Body trend check   = first/last/Δ/count                   → bodyTrend()
    ═══════════════════════════════════════════════════════════════════════════ */
@@ -203,6 +205,27 @@ const daysBetween = (a, b) => Math.round((parseDay(b) - parseDay(a)) / 86400000)
 const weekOf = (dateStr, startStr) =>
   !dateStr || !startStr ? 1 : Math.max(1, Math.floor(daysBetween(startStr, dateStr) / 7) + 1);
 
+/* ── A WEEK, OR ANY SEVEN DAYS ────────────────────────────────────────
+   The spreadsheet counted in program weeks: week 1 opens on your start
+   date and every seventh day turns the page. That is right for a program
+   run to a calendar, and it is still what the app does by default.
+
+   It is wrong for the other way people train, where the split simply
+   comes round in order and which day it lands on is an accident — chest,
+   then back whenever back happens next. A Sunday and a Monday session are
+   the same session to that lifter, but a program week puts a wall between
+   them and calls one of the two weeks light.
+
+   Profile → Volume period switches every seven-day sum in the app to a
+   WINDOW instead: the seven days ENDING on the day you're reading, which
+   moves with you. Pick the 7th on the calendar and you get the 1st to the
+   7th; pick the 8th and you get the 2nd to the 8th.
+
+   Deloads are deliberately untouched by the setting. They are dates you
+   put in the calendar yourself, never something derived from a week
+   number, so there is nothing in them for a rolling window to change. */
+const rollingWeeks = () => (state.settings.weekMode || "program") === "rolling";
+
 /* ── EST. 1RM: WATHAN'S CURVE, ANCHORED AT ONE REP ────────────────────
    The spreadsheet estimated a max with Epley, weight × (1 + reps/30), and
    Epley has a flaw you can see with your own eyes: one rep at 30 kg comes
@@ -366,6 +389,154 @@ function entrySummary(e, unit, withRpe = false) {
     (withRpe && e.rpe ? ` · RPE ${esc(e.rpe)}` : "");
 }
 
+/* ── SET SUGGESTIONS: THE SMALLEST STEP THAT IS STILL A STEP ──────────
+   The log exists to make you add something each time, so the app should
+   not leave you working out what "a bit more than last time" is while
+   you're standing at the rack with a bar in your hands.
+
+   The bar is LAST TIME, not your all-time best. A lifetime PR is the
+   wrong thing to chase on an ordinary Tuesday: it is often months old,
+   set fresh on a good day, and unbeatable on a normal one, so a target
+   built on it is a target you learn to ignore. The session before this
+   one is a number you can actually take today, and taking it over and
+   over is what an all-time PR is made of anyway.
+
+   Two ways over that bar, because they are the two things you can change:
+
+     · one more rep at the same weight
+     · the smallest real weight step at the same reps
+
+   Both are scored through est1RM and only offered when they genuinely
+   come out above the set they're beating. Holding the reps on the heavier
+   option is deliberate — dropping reps as the weight goes up is normal
+   training, but it would not be an improvement on the estimate, and this
+   card only ever promises an improvement.
+
+   Which one is marked as the suggestion follows double progression: climb
+   the reps until you're at the top of the range you actually work this
+   lift in, then take the weight up instead and start climbing again. That
+   range is read off your own history — the median top-set rep count over
+   your last few sessions on the lift, held between 5 and 12 — because a
+   fixed "go to 12" is nonsense for someone who lives on triples. The
+   median rather than the maximum on purpose: one big set shouldn't move
+   the ceiling, or adding a rep would keep raising the bar it just cleared
+   and the weight would never go up.
+
+   The other option is always right there next to it. The app suggests,
+   the lifter decides.                                                 */
+
+const SUG_REP_FLOOR = 5;     // never insist on fewer reps than this before adding weight
+const SUG_REP_CEIL = 12;     // …nor more, the estimate is at its best under 12
+const SUG_LOOKBACK = 6;      // sessions of this lift that define its rep range
+const SUG_CARDIO_MIN = 2;    // minutes added on the cardio equivalent
+const RPE_MAX = 10;
+
+/* The smallest jump a normal gym can actually make: 1.25 kg a side, or
+   2.5 lb a side. Light lifts get the half step, because 2.5 kg on a 12 kg
+   lateral raise is a 20% week. */
+const weightStep = (unit, w) =>
+  unit === "lbs" ? (w >= 65 ? 5 : 2.5) : (w >= 30 ? 2.5 : 1.25);
+
+/* An est. 1RM for numbers that aren't on an entry yet, in the default
+   unit, so a suggestion is comparable with every other figure on screen. */
+const metricFor = (weight, reps, unit) =>
+  est1RM(convertWeight(weight, unit, state.settings.units), reps);
+
+const median = (xs) => {
+  const a = [...xs].sort((x, y) => x - y);
+  if (!a.length) return null;
+  const i = (a.length - 1) / 2;
+  return Number.isInteger(i) ? a[i] : (a[Math.floor(i)] + a[Math.ceil(i)]) / 2;
+};
+
+/* Every earlier outing of this lift, oldest first — the same "strictly
+   before" window the vs-your-best preview uses, so the two never disagree
+   about what counts as earlier. Rows being edited are excluded: a session
+   cannot be its own benchmark. */
+function earlierOutings(f, isDraft) {
+  const draft = ui.workoutSheet;
+  const editingIds = draft && draft.editing ? new Set(draft.originalIds || []) : null;
+  const date = f.date || (isDraft && draft ? draft.date : null) || todayStr();
+  return chronoSort(state.log).filter((e) =>
+    e.exercise === f.exercise && e.id !== f.id &&
+    !(editingIds && editingIds.has(e.id)) &&
+    (e.date < date || (e.date === date && e.createdAt < (f.createdAt || 0))));
+}
+
+/* What this entry has managed so far, so the card can stand down once
+   you've already gone past last time. */
+function entryBest(f) {
+  if (!f) return null;
+  if (f.kind === "cardio") return cardioScore(+f.minutes, +f.intensity);
+  if (isDetailed(f)) {
+    const b = bestSet(filledSets(f));
+    return b ? metricFor(+b.weight, +b.reps, unitOf(f)) : null;
+  }
+  return +f.reps > 0 && +f.weight > 0 ? metricFor(+f.weight, +f.reps, unitOf(f)) : null;
+}
+
+/* The whole card in one object: what last time was, the ways over it, and
+   which one the app would take. `null` only when there is nothing useful
+   to say at all. */
+function setSuggestion(f, isDraft) {
+  if (!f) return null;
+  const earlier = earlierOutings(f, isDraft);
+  if (!earlier.length) return { kind: "first" };
+
+  /* the last DAY you trained it, and the best entry within that day */
+  const lastDate = earlier[earlier.length - 1].date;
+  let prev = null, prevM = -Infinity;
+  for (const e of earlier) {
+    if (e.date !== lastDate) continue;
+    const m = metricOf(e);
+    if (m != null && m > prevM) { prevM = m; prev = e; }
+  }
+  if (!prev) return { kind: "first" };
+
+  const now = entryBest(f);
+  const done = now != null && now > prevM;
+
+  if (f.kind === "cardio") {
+    const mins = Math.round(+prev.minutes), rpe = Math.round(+prev.intensity);
+    if (!(mins > 0 && rpe > 0)) return { kind: "first" };
+    const options = [
+      { kind: "minutes", minutes: mins + SUG_CARDIO_MIN, intensity: rpe },
+      { kind: "intensity", minutes: mins, intensity: Math.min(RPE_MAX, rpe + 1) },
+    ].map((o) => ({ ...o, m: cardioScore(o.minutes, o.intensity) }))
+     .filter((o) => o.m > prevM);
+    if (!options.length) return { kind: "first" };
+    return { kind: "cardio", prev: { minutes: mins, intensity: rpe, m: prevM, date: lastDate },
+             options, pick: options[0].kind, now, done };
+  }
+
+  /* the set that carried that session, in the unit THIS entry is being
+     typed in — you should be able to read the suggestion straight onto
+     the plates in front of you */
+  const eu = unitOf(prev), fu = unitOf(f);
+  const reps = Math.round(+prev.reps);
+  const weight = Math.round(convertWeight(+prev.weight, eu, fu) * 100) / 100;
+  if (!(reps > 0 && weight > 0)) return { kind: "first" };
+
+  const base = metricFor(weight, reps, fu);
+  const step = weightStep(fu, weight);
+  const options = [
+    { kind: "reps", reps: reps + 1, weight, step: 1 },
+    { kind: "weight", reps, weight: Math.round((weight + step) * 100) / 100, step },
+  ].map((o) => ({ ...o, m: metricFor(o.weight, o.reps, fu) }))
+   .filter((o) => o.m != null && o.m > base);
+  if (!options.length) return { kind: "first" };
+
+  /* the top of the rep range this lifter works this lift in */
+  const seen = earlier.slice(-SUG_LOOKBACK).map((e) => +e.reps).filter((r) => r > 0);
+  const ceiling = Math.max(SUG_REP_FLOOR,
+    Math.min(SUG_REP_CEIL, Math.round(median(seen) ?? reps)));
+  const wanted = reps < ceiling ? "reps" : "weight";
+  const pick = options.some((o) => o.kind === wanted) ? wanted : options[0].kind;
+
+  return { kind: "step", prev: { reps, weight, m: prevM, date: lastDate },
+           base, options, pick, unit: fu, now, done };
+}
+
 /* "vs. Your Best" — compares against strictly earlier entries of the same
    exercise, exactly like the sheet's row-above MAXIFS window. */
 function computeBadges(log) {
@@ -441,6 +612,42 @@ function volumeForWeek(log, library, startDate, week) {
   return out;
 }
 
+/* The same sum over any inclusive span of days. Program weeks keep using
+   volumeForWeek — weekOf() floors everything before the start date into
+   week 1, and a date range would quietly drop those rows — so this is
+   only ever asked for the rolling window, which has no such edge. */
+function volumeInRange(log, library, from, to) {
+  const out = {};
+  for (const e of log) {
+    if (e.date < from || e.date > to) continue;
+    if (e.kind === "cardio") out.Cardio = (out.Cardio || 0) + (+e.minutes || 0);
+    else {
+      const m = muscleOf(e.exercise, library, e.muscle);
+      out[m] = (out[m] || 0) + (+e.sets || 0);
+    }
+  }
+  return out;
+}
+
+/* The Progress tab's sets-per-week bars, cut into seven-day blocks
+   counting back from today rather than from the program start date. The
+   last bar is always the week you're standing in. */
+const ROLLING_BLOCKS_MAX = 26;
+
+function rollingSetBlocks(log, today = todayStr()) {
+  const first = log.reduce((m, e) => (m == null || e.date < m ? e.date : m), null);
+  const span = first ? Math.max(0, daysBetween(first, today)) : 0;
+  const blocks = Math.min(ROLLING_BLOCKS_MAX, Math.floor(span / 7) + 1);
+  const out = [];
+  for (let i = blocks - 1; i >= 0; i--) {
+    const to = addDays(today, -7 * i), from = addDays(to, -6);
+    const sets = log.reduce((a, e) =>
+      a + (e.kind !== "cardio" && e.date >= from && e.date <= to ? (+e.sets || 0) : 0), 0);
+    out.push({ w: fmtShort(to), sets });
+  }
+  return out;
+}
+
 /* ── DELOADS: PLANNED, NOT GUESSED ────────────────────────────────────
    The app used to infer a deload was due by watching for five hard weeks
    in a row. It was guessing at something only the lifter knows — a light
@@ -491,6 +698,11 @@ const isoOf = (d) =>
 
 const monthOf = (dayStr) => String(dayStr).slice(0, 7);          // "2026-08"
 
+const addDays = (dayStr, n) => {
+  const d = parseDay(dayStr);
+  return isoOf(new Date(d.getFullYear(), d.getMonth(), d.getDate() + n));
+};
+
 function addMonths(monthStr, n) {
   const [y, m] = monthStr.split("-").map(Number);
   const d = new Date(y, m - 1 + n, 1);
@@ -505,6 +717,10 @@ function weekRange(week, startStr) {
   const to = new Date(from.getFullYear(), from.getMonth(), from.getDate() + 6);
   return { from: isoOf(from), to: isoOf(to) };
 }
+
+/* The rolling equivalent of weekRange: the seven days ending on a day,
+   which is what the Volume tab reads when the period is "last 7 days". */
+const windowEnding = (dayStr) => ({ from: addDays(dayStr, -6), to: dayStr });
 
 /* The 6×7 block of days a month grid draws, Monday-first, including the
    leading and trailing days of the neighbouring months that fill it out. */
@@ -556,14 +772,14 @@ const seedTimers = () =>
   }));
 
 const defaultState = () => ({
-  version: 8,
-  settings: { name: "", units: "kg", startDate: todayStr(), daysPerWeek: 4, theme: "dark", lang: "en" },
+  version: 9,
+  settings: { name: "", units: "kg", startDate: todayStr(), daysPerWeek: 4, theme: "dark", lang: "en", weekMode: "program" },
   library: DEFAULT_LIBRARY,
   groups: DEFAULT_GROUPS.map((g) => ({ ...g })),   // [{name,key?,color}] — user-editable
   log: [],        // {id,date,exercise,muscle,kind,sets,reps,weight,rpe,unit,minutes,intensity,notes,createdAt,setList?}
   body: [],       // {id,date,weight,waist,chest,arm,thigh,glutes,notes}
   goals: {},      // { [exerciseName]: number }
-  volumeGoals: {},// { [muscleGroup]: targetSetsPerWeek } — user's own weekly set target
+  volumeGoals: {},// { [muscleGroup]: target sets per period } — user's own volume target
   presets: [],    // [{id,name,description,pinned,exercises:[{exercise,muscle,kind}],createdAt}]
   timers: seedTimers(), // [{id,name,duration,endsAt,remaining,doneAt,pinned,createdAt}]
   dayDrafts: [],  // [{id,date,entries,savedAt}] — workout days you backed out of, see closeWorksheet()
@@ -674,6 +890,15 @@ function migrate(s) {
     s.timers = (s.timers || []).map((t) => ({ sound: DEFAULT_SOUND, volume: DEFAULT_VOLUME, ...t }));
     s.version = 8;
   }
+  if (v < 9) {
+    /* v9 added the choice between program weeks and a rolling last-7-days
+       window. Everyone already on the app has been reading program weeks,
+       so that is what they keep — the setting only ever moves if they
+       move it. */
+    if (!s.settings) s.settings = {};
+    if (s.settings.weekMode !== "rolling") s.settings.weekMode = "program";
+    s.version = 9;
+  }
   return s;
 }
 
@@ -771,7 +996,10 @@ const ui = {
   deloadPick: null,     // {start} while tapping out a new deload's two ends
   deloadForm: null,     // {id, start, end, isNew} — the deload editor
   accordions: {},   // all accordions start collapsed
-  volumeWeek: null,
+  volumeWeek: null,     // program-week mode: which week the Volume tab is reading
+  volAnchor: null,      // rolling mode: the LAST of the seven days it is reading
+  presetOrder: false,   // Library → Presets is in drag-to-reorder mode
+  pinnedOrder: false,   // …the pinned strip on Home is
   progSeg: "progress",  // progress | placeholder — Progress sub-tab
   progressSelected: null,
   /* the progress graph is an instrument, not a picture: chartView is the
@@ -806,7 +1034,10 @@ function resetTransient() {
   ui.libraryQ = "";
   ui.libraryFilter = "All";
   ui.librarySeg = "exercises";
+  ui.presetOrder = false;
+  ui.pinnedOrder = false;
   ui.volumeWeek = weekOf(todayStr(), state.settings.startDate);
+  ui.volAnchor = todayStr();
 }
 
 /* ─────────────────────────── HTML HELPERS ──────────────────────────── */
@@ -1010,7 +1241,7 @@ function render() {
     html += `<div style="display:flex;align-items:center;gap:10px;padding:14px 16px 10px;position:sticky;top:0;z-index:20;background:var(--bg);border-bottom:1px solid var(--border-soft)">
       <img src="logoC.png" alt="${T("a11y.logo")}" width="30" height="30" style="width:30px;height:30px;object-fit:contain;border-radius:8px;display:block;flex-shrink:0">
       <div class="pb-num" style="font-size:19px;font-weight:700;flex:1">${titles[tab]}</div>
-      ${chip(T("common.wkShort", { n: currentWeek }), "var(--gold)")}
+      ${rollingWeeks() ? "" : chip(T("common.wkShort", { n: currentWeek }), "var(--gold)")}
       <button data-action="open-body" title="${T("a11y.bodyBtn")}" style="color:var(--muted);padding:4px">${icon("ruler", 20)}</button>
       <button data-action="open-profile" style="color:var(--muted);padding:4px">${icon("settings", 20)}</button>
     </div>`;
@@ -1145,6 +1376,15 @@ function renderPinnedPresets() {
       ${T("home.noPinnedPresets", { icon: icon("pin", 11) })}
     </div>`;
 
+  if (ui.pinnedOrder && pinned.length > 1)
+    return `<div class="pb-card2" style="overflow:hidden">
+      ${pinned.map((p, i) => reorderRow("pinned", i, pinned.length,
+        esc(p.name), TN("move", (p.exercises || []).length))).join("")}
+    </div>
+    <div style="font-size:11.5px;color:var(--faint);line-height:1.5;padding:9px 2px 0">
+      ${T("home.pinnedReorderHint", { icon: icon("grip-vertical", 11) })}
+    </div>`;
+
   return `<div class="pb-card2" style="overflow:hidden">
     ${pinned.map((p, i) => {
       const exs = p.exercises || [];
@@ -1208,8 +1448,14 @@ function pinnedTimerDial(t) {
 
 function renderPinnedModule() {
   const timers = pinnedTimers();
+  const pinned = (state.presets || []).filter((p) => p.pinned);
+  const order = pinned.length > 1
+    ? `<button data-action="pinned-reorder" style="display:flex;align-items:center;gap:4px;font-size:11px;font-weight:700;letter-spacing:.04em;color:${ui.pinnedOrder ? "var(--gold)" : "var(--faint)"};padding:2px 0">
+        ${icon(ui.pinnedOrder ? "check" : "arrow-up-down", 12)} ${ui.pinnedOrder ? T("preset.reorderDone") : T("preset.reorder")}
+      </button>`
+    : "";
   return `<div class="pb-card" style="margin-top:14px;padding:13px 14px 15px">
-    ${sectionTitle(T("home.pinnedPresets"))}
+    ${sectionTitle(T("home.pinnedPresets"), order)}
     ${renderPinnedPresets()}
     <div class="pb-hairline" style="margin:15px 0 12px"></div>
     ${sectionTitle(T("home.pinnedTimers"))}
@@ -1270,7 +1516,7 @@ function renderHome(settings, currentWeek, unit) {
       ${settings.name ? T("home.readyName", { name: esc(settings.name.split(" ")[0]) }) : T("home.ready")}
     </div>
     <div style="color:var(--muted);font-size:13.5px;margin-top:3px;margin-bottom:16px">
-      ${T("home.weekLine", { n: currentWeek })}
+      ${rollingWeeks() ? T("home.rollingLine") : T("home.weekLine", { n: currentWeek })}
     </div>
 
     <button data-action="new-workout" class="pb-btn pb-gold" style="width:100%;padding:16px 0;font-size:16.5px;border-radius:14px">
@@ -1360,7 +1606,8 @@ function renderHistory(log, library, badges, settings, unit) {
 
   return drafts + dates.map((date) => {
     const entries = byDate[date].sort((a, b) => a.createdAt - b.createdAt);
-    const wk = weekOf(date, settings.startDate);
+    /* a program-week label, and nothing to say in rolling mode */
+    const wk = rollingWeeks() ? null : weekOf(date, settings.startDate);
     const sets = entries.filter((e) => e.kind !== "cardio").reduce((a, e) => a + (+e.sets || 0), 0);
     const mins = entries.filter((e) => e.kind === "cardio").reduce((a, e) => a + (+e.minutes || 0), 0);
     const rows = entries.map((e) => {
@@ -1388,7 +1635,7 @@ function renderHistory(log, library, badges, settings, unit) {
     return `<div class="pb-card" style="margin-bottom:12px;overflow:hidden">
       <button data-action="edit-day" data-date="${date}" title="${T("log.editDay")}" style="width:100%;display:flex;align-items:center;gap:8px;padding:11px 14px;border-bottom:1px solid var(--border-soft);color:var(--text);text-align:left">
         <div class="pb-num" style="font-weight:700;font-size:16.5px;flex:1">${fmtDate(date)}</div>
-        ${chip(T("common.week", { n: wk }), "var(--gold)")}
+        ${wk ? chip(T("common.week", { n: wk }), "var(--gold)") : ""}
         ${sets > 0 ? chip(sets + " " + T("unit.sets")) : ""}
         ${mins > 0 ? chip(mins + " " + T("unit.min"), "#a07ec2") : ""}
         ${icon("pencil", 14, 'style="color:var(--faint);flex-shrink:0;margin-left:2px"')}
@@ -1420,16 +1667,17 @@ function dayMarks(log, library) {
   return out;
 }
 
-function renderCalendar(log, library, settings, week) {
+function renderCalendar(log, library, marks, range, legend) {
   const month = ui.calMonth || monthOf(todayStr());
   const today = todayStr();
-  const marks = dayMarks(log, library);
-  const range = weekRange(week, settings.startDate);
   const picking = ui.deloadPick;
 
   const cells = monthGrid(month).map((c) => {
     const dl = deloadOn(state.deloads, c.iso);
+    /* "in the period on screen" — the program week, or the seven days
+       ending on the day you picked, depending on the setting */
     const inWeek = c.iso >= range.from && c.iso <= range.to;
+    const anchor = rollingWeeks() && c.iso === range.to;
     const isToday = c.iso === today;
     const groups = marks[c.iso] ? [...marks[c.iso]].slice(0, 3) : [];
     const pickStart = picking && picking.start === c.iso;
@@ -1441,6 +1689,7 @@ function renderCalendar(log, library, settings, week) {
       : inWeek ? "var(--surface2)"
       : "transparent";
     const border = isToday ? "1px solid var(--gold)"
+      : anchor ? "1px solid var(--steel)"
       : dl ? "1px dashed rgba(233,185,73,.5)"
       : "1px solid transparent";
 
@@ -1484,7 +1733,7 @@ function renderCalendar(log, library, settings, week) {
     ${hint}
 
     <div style="display:flex;flex-wrap:wrap;gap:12px;margin-top:11px;font-size:10.5px;color:var(--faint)">
-      <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:10px;height:10px;border-radius:3px;background:var(--surface2)"></span>${T("vol.legendWeek", { n: week })}</span>
+      <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:10px;height:10px;border-radius:3px;background:var(--surface2)"></span>${legend}</span>
       <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:10px;height:10px;border-radius:3px;background:rgba(233,185,73,.13);border:1px dashed rgba(233,185,73,.5)"></span>${T("vol.legendDeload")}</span>
       <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:4px;height:4px;border-radius:2px;background:var(--muted)"></span>${T("vol.legendTrained")}</span>
     </div>
@@ -1547,40 +1796,53 @@ function renderDeloadForm() {
 }
 
 function renderVolume(log, library, settings, currentWeek) {
+  const rolling = rollingWeeks();
   const week = ui.volumeWeek;
+  const anchor = ui.volAnchor || todayStr();
   const groups = libraryGroups(library);
   for (const e of log) { const m = e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, library, e.muscle); if (!groups.includes(m)) groups.push(m); }
 
-  const vol = volumeForWeek(log, library, settings.startDate, week);
+  /* the period on screen, and the one before it — the comparison an
+     untargeted group is given instead of a bar it never asked for */
+  const range = rolling ? windowEnding(anchor) : weekRange(week, settings.startDate);
+  const before = rolling ? windowEnding(addDays(anchor, -7)) : weekRange(week - 1, settings.startDate);
+  const firstLogged = log.reduce((m, e) => (m == null || e.date < m ? e.date : m), null);
+  const hasBefore = firstLogged != null && (rolling ? before.to >= firstLogged : week > 1);
+
+  const vol = rolling ? volumeInRange(log, library, range.from, range.to)
+    : volumeForWeek(log, library, settings.startDate, week);
+  const prevVol = !hasBefore ? null
+    : rolling ? volumeInRange(log, library, before.from, before.to)
+    : volumeForWeek(log, library, settings.startDate, week - 1);
   const targets = state.volumeGoals || {};
-  const strengthVals = groups.filter((g) => g !== "Cardio").map((g) => vol[g] || 0);
-  const max = Math.max(1, ...strengthVals);
-  const range = weekRange(week, settings.startDate);
 
   const rows = groups.map((g, i) => {
     const isCardio = g === "Cardio";
     const bucket = g === UNCATEGORIZED;
     const v = vol[g] || 0;
     const unit = isCardio ? T("unit.min") : T("unit.sets");
-    /* A personal weekly target takes over the assessment when the user sets one.
-       Everyone's "enough" is different. Muscle groups target sets; cardio targets
-       minutes.
+    /* A personal target takes over the assessment when the user sets one.
+       Everyone's "enough" is different. Muscle groups target sets; cardio
+       targets minutes, and the bar fills as the period goes on.
 
-       Without a target the app has no business calling a group neglected — it
-       doesn't know your split. A week with no chest work is a rest from chest,
-       not a failure, and there's no honest way to tell those apart until you've
-       said what you were aiming for. So an untargeted group is only ever flagged
-       "Low", relative to the biggest group you actually trained this week. */
+       WITHOUT A TARGET THERE IS NO BAR. A progress bar is a promise that
+       something is being progressed towards, and until you have said what
+       you are aiming for the app has nothing honest to put at the far end
+       of it — the old one filled against the biggest group you happened to
+       train that week, so the bar moved for reasons that had nothing to do
+       with you. It has no business calling a group neglected either: a week
+       with no chest work is a rest from chest, not a failure, and nothing
+       can tell those apart without a plan to read it against.
+
+       So an untargeted group states the one thing it can stand behind —
+       how this period compares with the one before it — and leaves the ⌖
+       button there for when you do want a bar to go with it. */
     const target = targets[g] > 0 ? targets[g] : null;
     const editing = ui.volGoalEditing === g;
     const done = target && v >= target;
+    const pct = target ? Math.min(1, v / target) : 0;
 
-    const pct = target ? Math.min(1, v / target)
-      : isCardio ? Math.min(1, v / 60)
-      : v / max;
-
-    /* one quiet line of status, never a shouty chip — the bar already
-       carries the information, the words only name it */
+    /* one quiet line of status, never a shouty chip */
     let note = "";
     if (target) {
       note = v === 0 ? `<span style="color:var(--red)">${T("vol.neglected")}</span>`
@@ -1588,8 +1850,12 @@ function renderVolume(log, library, settings, currentWeek) {
         : T("vol.toGo", { n: Math.round((target - v) * 10) / 10, unit });
     } else if (bucket) {
       note = T("vol.noGroup");
-    } else if (!isCardio && v > 0 && max >= 6 && v < max / 3) {
-      note = T("vol.low");
+    } else if (prevVol && (v > 0 || (prevVol[g] || 0) > 0)) {
+      const d = Math.round((v - (prevVol[g] || 0)) * 10) / 10;
+      const period = T(rolling ? "vol.periodRolling" : "vol.periodWeek");
+      note = d > 0 ? T("vol.more", { n: d, unit, period })
+        : d < 0 ? T("vol.fewer", { n: -d, unit, period })
+        : T("vol.same", { period });
     }
 
     const barColor = done ? "var(--green)" : colorFor(g, i);
@@ -1613,22 +1879,29 @@ function renderVolume(log, library, settings, currentWeek) {
         <div class="pb-num" style="font-weight:700;font-size:16px;color:${v ? "var(--text)" : "var(--faint)"}">${v}<span style="font-size:10px;color:var(--faint);font-weight:600"> ${unit}</span></div>
         ${targetCell}
       </div>
-      <div style="height:5px;background:var(--surface2);border-radius:3px;margin-top:7px;overflow:hidden">
+      ${target ? `<div style="height:5px;background:var(--surface2);border-radius:3px;margin-top:7px;overflow:hidden">
         <div style="height:100%;width:${Math.round(pct * 100)}%;background:${barColor};opacity:.85;border-radius:3px;transition:width .25s"></div>
-      </div>
-      ${note ? `<div style="font-size:11px;color:var(--faint);margin-top:5px">${note}</div>` : ""}
+      </div>` : ""}
+      ${note ? `<div style="font-size:11px;color:var(--faint);margin-top:${target ? 5 : 4}px">${note}</div>` : ""}
     </div>`;
   }).join("");
 
+  const today = todayStr();
+  const title = rolling ? T("vol.window") : T("common.week", { n: week });
+  const sub = `${fmtShort(range.from)} – ${fmtShort(range.to)}` +
+    (rolling ? (range.to === today ? " · " + T("vol.upToToday") : "")
+      : (week === currentWeek ? " · " + T("vol.thisWeek") : ""));
+
   return `<div class="">
-    ${renderCalendar(log, library, settings, week)}
+    ${renderCalendar(log, library, dayMarks(log, library), range,
+      rolling ? T("vol.legendWindow") : T("vol.legendWeek", { n: week }))}
     ${renderDeloadPlanner()}
 
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
       <button data-action="vol-prev" class="pb-btn pb-ghost" style="width:32px;height:32px;flex-shrink:0">${icon("chevron-left", 16)}</button>
       <div style="flex:1;min-width:0;text-align:center">
-        <div class="pb-num" style="font-size:17px;font-weight:700;line-height:1.1">${T("common.week", { n: week })}</div>
-        <div style="font-size:10.5px;color:var(--faint)">${fmtShort(range.from)} – ${fmtShort(range.to)}${week === currentWeek ? " · " + T("vol.thisWeek") : ""}</div>
+        <div class="pb-num" style="font-size:17px;font-weight:700;line-height:1.1">${title}</div>
+        <div style="font-size:10.5px;color:var(--faint)">${sub}</div>
       </div>
       <button data-action="vol-next" class="pb-btn pb-ghost" style="width:32px;height:32px;flex-shrink:0">${icon("chevron-right", 16)}</button>
     </div>
@@ -1636,7 +1909,7 @@ function renderVolume(log, library, settings, currentWeek) {
     <div class="pb-card" style="padding:4px 14px">${rows}</div>
 
     <div style="font-size:11.5px;color:var(--faint);margin:10px 4px 0;line-height:1.5">
-      ${T("vol.help", { icon: icon("target", 11) })}
+      ${T(rolling ? "vol.helpRolling" : "vol.help", { icon: icon("target", 11) })}
     </div>
     <div style="height:6px"></div>
   </div>`;
@@ -1679,9 +1952,16 @@ function renderProgress(log, library, goals, badges, settings, unit) {
      session behind the number instead of just showing it again */
   const chartData = series.map((e) => ({ x: fmtShort(e.date), y: e.m, e, badge: badges[e.id]?.badge || null }));
 
-  const { sets: wkSets } = weeklyTotals(log, settings.startDate);
-  const maxWk = Math.max(1, ...Object.keys(wkSets).map(Number));
-  const wkData = Array.from({ length: maxWk }, (_, i) => ({ w: "W" + (i + 1), sets: wkSets[i + 1] || 0 }));
+  /* the same bars, counted in whichever seven days the app is set to */
+  const rolling = rollingWeeks();
+  let wkData;
+  if (rolling) {
+    wkData = rollingSetBlocks(log);
+  } else {
+    const { sets: wkSets } = weeklyTotals(log, settings.startDate);
+    const maxWk = Math.max(1, ...Object.keys(wkSets).map(Number));
+    wkData = Array.from({ length: maxWk }, (_, i) => ({ w: "W" + (i + 1), sets: wkSets[i + 1] || 0 }));
+  }
 
   if (chartData.length >= 2)
     chartState.line = {
@@ -1737,7 +2017,7 @@ function renderProgress(log, library, goals, badges, settings, unit) {
 
     ${detail}
 
-    ${sectionTitle(T("prog.weeklySets"))}
+    ${sectionTitle(T(rolling ? "prog.rollingSets" : "prog.weeklySets"))}
     <div class="pb-card" style="padding:14px 8px 4px;margin-bottom:16px">
       <div id="barChart" style="position:relative;width:100%;height:140px"></div>
     </div>
@@ -2050,7 +2330,7 @@ function renderGroupSheet(library) {
       ${icon("plus", 16)} ${T("groups.new")}
     </button>
     <div class="pb-card" id="groupList" style="overflow:hidden;margin-bottom:12px">
-      ${groups.map((g, i) => `<div data-grouprow style="display:flex;align-items:center;background:var(--surface);border-bottom:${i < groups.length - 1 ? "1px solid var(--border-soft)" : "none"}">
+      ${groups.map((g, i) => `<div data-dragrow="group" style="display:flex;align-items:center;background:var(--surface);border-bottom:${i < groups.length - 1 ? "1px solid var(--border-soft)" : "none"}">
         <span data-drag-handle class="pb-drag" title="${T("groups.dragTitle")}" style="flex-shrink:0;padding:12px 4px 12px 11px;color:var(--faint);display:flex">${icon("grip-vertical", 16)}</span>
         <button data-action="group-edit" data-g="${esc(g)}" style="flex:1;min-width:0;display:flex;align-items:center;gap:11px;padding:11px 14px 11px 6px;text-align:left;color:var(--text)">
           <span style="width:20px;height:20px;border-radius:7px;background:${colorFor(g, i)};flex-shrink:0;border:1px solid var(--border)"></span>
@@ -2070,30 +2350,38 @@ function renderGroupSheet(library) {
 
 /* ── DRAG TO REORDER ──────────────────────────────────────────────────
    The order of state.groups IS the order groups appear in, everywhere, so
-   reordering here is the one place the user arranges their own library.
+   reordering is the one place the user arranges their own library. The
+   same is true of presets: the order in Library → Presets is the order
+   they come out of the picker and off the home screen.
 
    Pointer events rather than HTML5 drag-and-drop: `dragstart` never fires
    on touch, and this is a phone app first. The drag runs entirely on
    inline transforms without a re-render — render() rebuilds #app wholesale
-   and would drop the node mid-gesture — and only commits on release. */
+   and would drop the node mid-gesture — and only commits on release.
+
+   One gesture, several lists: a row says which list it belongs to with
+   `data-dragrow="<kind>"`, and DRAG_COMMIT says who to hand the finished
+   from → to to. Adding another reorderable list is a row attribute and one
+   more line in that table. */
 
 let dragCtx = null;
 
-function startGroupDrag(ev, handle) {
-  const row = handle.closest("[data-grouprow]");
+function startRowDrag(ev, handle) {
+  const row = handle.closest("[data-dragrow]");
   if (!row || !row.parentElement) return;
-  const rows = [...row.parentElement.children].filter((n) => n.hasAttribute("data-grouprow"));
+  const kind = row.dataset.dragrow;
+  const rows = [...row.parentElement.children].filter((n) => n.dataset.dragrow === kind);
   const from = rows.indexOf(row);
   if (from < 0) return;
 
-  dragCtx = { row, rows, from, to: from, h: row.offsetHeight, y0: ev.clientY };
+  dragCtx = { row, rows, from, to: from, kind, h: row.offsetHeight, y0: ev.clientY };
   Object.assign(row.style, { position: "relative", zIndex: "2", background: "var(--raise)", boxShadow: "0 8px 20px rgba(0,0,0,.35)" });
   document.body.style.userSelect = "none";
   try { handle.setPointerCapture(ev.pointerId); } catch { /* mouse without capture is fine */ }
   ev.preventDefault();
 }
 
-function moveGroupDrag(ev) {
+function moveRowDrag(ev) {
   if (!dragCtx) return;
   const { rows, from, h } = dragCtx;
   const dy = ev.clientY - dragCtx.y0;
@@ -2112,16 +2400,16 @@ function moveGroupDrag(ev) {
   ev.preventDefault();
 }
 
-function endGroupDrag() {
+function endRowDrag() {
   if (!dragCtx) return;
-  const { from, to, rows } = dragCtx;
+  const { from, to, rows, kind } = dragCtx;
   rows.forEach((n) => {
     n.style.transform = ""; n.style.transition = ""; n.style.boxShadow = "";
     n.style.zIndex = ""; n.style.background = ""; n.style.position = "";
   });
   document.body.style.userSelect = "";
   dragCtx = null;
-  if (from !== to) reorderGroups(from, to);
+  if (from !== to && DRAG_COMMIT[kind]) DRAG_COMMIT[kind](from, to);
 }
 
 /* Keep each group's colour and its built-in key; only the order changes. */
@@ -2134,13 +2422,45 @@ function reorderGroups(from, to) {
   patch({ groups: names.map((n) => (byName[n] ? { ...byName[n] } : { name: n, color: colorFor(n) })) });
 }
 
+/* Reordering presets moves them in state.presets, which is the one list
+   every other view is a slice of. The pinned strip on Home is such a
+   slice, so dragging there rewrites only the slots the pinned presets
+   already occupy and leaves the unpinned ones exactly where they sit —
+   otherwise arranging your home screen would silently shuffle the
+   library behind it. */
+function reorderPresets(from, to) {
+  const all = [...(state.presets || [])];
+  if (from >= all.length || to >= all.length) return;
+  const [moved] = all.splice(from, 1);
+  all.splice(to, 0, moved);
+  patch({ presets: all });
+}
+
+function reorderPinnedPresets(from, to) {
+  const all = state.presets || [];
+  const slots = all.map((p, i) => (p.pinned ? i : -1)).filter((i) => i >= 0);
+  if (from >= slots.length || to >= slots.length) return;
+  const order = slots.map((i) => all[i]);
+  const [moved] = order.splice(from, 1);
+  order.splice(to, 0, moved);
+  const next = [...all];
+  slots.forEach((slot, k) => { next[slot] = order[k]; });
+  patch({ presets: next });
+}
+
+const DRAG_COMMIT = {
+  group: reorderGroups,
+  preset: reorderPresets,
+  pinned: reorderPinnedPresets,
+};
+
 document.addEventListener("pointerdown", (e) => {
   const h = e.target.closest("[data-drag-handle]");
-  if (h) startGroupDrag(e, h);
+  if (h) startRowDrag(e, h);
 });
-document.addEventListener("pointermove", moveGroupDrag);
-document.addEventListener("pointerup", endGroupDrag);
-document.addEventListener("pointercancel", endGroupDrag);
+document.addEventListener("pointermove", moveRowDrag);
+document.addEventListener("pointerup", endRowDrag);
+document.addEventListener("pointercancel", endRowDrag);
 
 function renderGroupForm() {
   const f = ui.groupForm;
@@ -2270,15 +2590,59 @@ const presetExerciseList = (exs) =>
     <span style="width:8px;height:8px;border-radius:4px;background:${colorFor(ex.muscle)};flex-shrink:0"></span>${esc(exLabel(ex.exercise))}
   </div>`).join("");
 
+/* ── PUTTING THEM IN YOUR OWN ORDER ───────────────────────────────────
+   Presets arrive in the order they were saved, which is the order you
+   happened to invent them in and nothing to do with the order you train
+   them. Reordering is a mode rather than a permanent grip handle on every
+   card: the cards are the thing you tap to start a workout, and a handle
+   living on them would be one mis-tap away from starting the wrong day.
+
+   The list on the Library tab arranges every preset. The strip on Home
+   arranges the pinned ones, in place, without disturbing the rest. */
+
+function reorderRow(kind, i, n, title, sub, tail = "") {
+  return `<div data-dragrow="${kind}" style="display:flex;align-items:center;background:var(--surface);border-bottom:${i < n - 1 ? "1px solid var(--border-soft)" : "none"}">
+    <span data-drag-handle class="pb-drag" title="${T("preset.dragTitle")}" style="flex-shrink:0;padding:13px 4px 13px 11px;color:var(--faint);display:flex">${icon("grip-vertical", 16)}</span>
+    <div style="flex:1;min-width:0;padding:11px 6px">
+      <div style="font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${title}</div>
+      <div style="font-size:11.5px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${sub}</div>
+    </div>
+    ${tail}
+  </div>`;
+}
+
+/* the header of a list that can be rearranged: the toggle, or Done */
+function reorderBar(action, on, label) {
+  return `<div style="display:flex;justify-content:flex-end;margin:-2px 2px 10px">
+    <button data-action="${action}" class="pb-chip" style="padding:6px 11px;font-size:11.5px;color:${on ? "var(--gold)" : "var(--muted)"};border-color:${on ? "rgba(233,185,73,.45)" : "var(--border)"};background:${on ? "rgba(233,185,73,.08)" : "var(--surface2)"}">
+      ${icon(on ? "check" : "arrow-up-down", 12)} ${on ? T("preset.reorderDone") : label}
+    </button>
+  </div>`;
+}
+
+function renderPresetOrder(presets) {
+  return reorderBar("preset-reorder", true, "") + `<div class="pb-card" style="overflow:hidden;margin-bottom:12px">
+    ${presets.map((p, i) => reorderRow("preset", i, presets.length,
+      esc(p.name),
+      TN("move", (p.exercises || []).length) + (p.pinned ? " · " + T("preset.pinned") : ""),
+      p.pinned ? icon("pin", 13, 'style="color:var(--gold);flex-shrink:0;margin-right:13px"') : "")).join("")}
+  </div>
+  <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 4px 10px">
+    ${T("preset.reorderHint", { icon: icon("grip-vertical", 11) })}
+  </div>`;
+}
+
 function renderPresets() {
   const presets = state.presets || [];
+  if (ui.presetOrder && presets.length > 1) return renderPresetOrder(presets);
   if (!presets.length)
     return `<div class="pb-card" style="padding:26px;text-align:center;color:var(--muted);font-size:13.5px;line-height:1.65">
       ${icon("layers", 26, 'style="margin:0 auto 10px;display:block;color:var(--faint)"')}
       ${T("preset.empty")}
     </div>`;
 
-  return presets.map((p) => {
+  return (presets.length > 1 ? reorderBar("preset-reorder", false, T("preset.reorder")) : "") +
+    presets.map((p) => {
     const exs = p.exercises || [];
     return `<div class="pb-card" style="margin-bottom:12px;overflow:hidden">
       <div style="padding:13px 14px">
@@ -2611,7 +2975,7 @@ function exWindowEditBody(f, library) {
 /* ─────────────────────── WORKOUT SHEET (new day) ──────────────────── */
 
 function renderWorkoutSheet(draft, library, log, settings, unit) {
-  const wk = weekOf(draft.date, settings.startDate);
+  const wk = rollingWeeks() ? null : weekOf(draft.date, settings.startDate);
   /* when editing an existing day, its own rows already live in the log — drop
      them from the comparison base so the "vs your best" preview isn't counting
      the very rows being edited. */
@@ -2654,7 +3018,7 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
     <div style="display:flex;align-items:center;gap:10px;padding:14px 16px 10px;border-bottom:1px solid var(--border-soft)">
       <button data-action="close-worksheet" title="${draft.editing ? T("wo.close") : T("wo.closeKeep")}" style="color:var(--muted);padding:4px">${icon("x", 21)}</button>
       <div class="pb-num" style="font-size:19px;font-weight:700;flex:1">${draft.editing ? T("wo.edit") : T("wo.new")}</div>
-      ${chip(T("common.week", { n: wk }), "var(--gold)")}
+      ${wk ? chip(T("common.week", { n: wk }), "var(--gold)") : ""}
       ${draft.editing ? `<button data-action="delete-day" title="${T("wo.deleteDay")}" style="color:var(--red);padding:4px">${icon("trash-2", 19)}</button>` : ""}
     </div>
 
@@ -2851,6 +3215,78 @@ function renderSetList(f, unit) {
     </div>`}`;
 }
 
+/* ── THE SUGGESTION, WHERE YOU ARE STANDING ───────────────────────────
+   It goes at the TOP OF THE EXERCISE WINDOW, above Add set, not inside
+   the little editor where the numbers are typed. That window is the one
+   moment you are deciding what to do — you have walked to the rack, you
+   have not loaded it yet — and by the time the set editor is open you
+   have already made the call and are only writing it down. The editor
+   still gets a one-line version of the same target, because that is
+   where you find out you were one rep short.
+
+   Both are tap-to-load: the card opens a new set with the suggestion in
+   it, the line fills the set you already have open. Nothing is ever
+   filled in for you without a tap — the log has to stay a record of what
+   you did, never of what the app hoped you would do. */
+
+const sugWeight = (w) => String(Math.round(w * 100) / 100);
+
+function sugOption(o, picked, unit, fill) {
+  const label = o.kind === "reps" ? T("sug.optRep")
+    : o.kind === "weight" ? T("sug.optWeight", { n: sugWeight(o.step), unit })
+    : o.kind === "minutes" ? T("sug.optMin", { n: SUG_CARDIO_MIN })
+    : T("sug.optRpe");
+  const line = o.minutes != null
+    ? T("sug.cardioSet", { min: o.minutes, rpe: o.intensity })
+    : `${o.reps} × ${sugWeight(o.weight)} ${unit}`;
+  const data = o.minutes != null
+    ? `data-min="${o.minutes}" data-rpe="${o.intensity}"`
+    : `data-reps="${o.reps}" data-weight="${sugWeight(o.weight)}"`;
+  return `<button data-action="${fill}" ${data} style="flex:1;min-width:0;text-align:left;padding:9px 10px;border-radius:11px;color:var(--text);background:${picked ? "rgba(233,185,73,.09)" : "var(--surface)"};border:1px solid ${picked ? "rgba(233,185,73,.5)" : "var(--border)"}">
+    <div style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:${picked ? "var(--gold)" : "var(--faint)"}">${label}</div>
+    <div class="pb-num" style="font-size:14px;font-weight:700;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${line}</div>
+    <div style="font-size:10.5px;color:var(--faint);margin-top:1px">${T("sug.gives", { n: o.m })}</div>
+  </button>`;
+}
+
+function renderSuggestion(form, unit) {
+  const { f, isDraft } = form;
+  const s = setSuggestion(f, isDraft);
+  if (!s) return "";
+
+  const wrap = (body) => `<div class="pb-card2" style="padding:12px 13px;margin-bottom:14px">${body}</div>`;
+
+  if (s.kind === "first")
+    return wrap(`<div style="display:flex;gap:9px;align-items:flex-start">
+      ${icon("flag", 15, 'style="color:var(--blue);flex-shrink:0;margin-top:1px"')}
+      <div style="flex:1;font-size:12.5px;color:var(--muted);line-height:1.5">${T("sug.first")}</div>
+    </div>`);
+
+  const cardio = s.kind === "cardio";
+  const eUnit = cardio ? "" : s.unit;
+  const last = cardio
+    ? T("sug.cardioSet", { min: s.prev.minutes, rpe: s.prev.intensity })
+    : `${s.prev.reps} × ${sugWeight(s.prev.weight)} ${eUnit}`;
+
+  const head = `<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:9px">
+    <div class="pb-label" style="flex:1;min-width:0">${T("sug.title")}</div>
+    <div style="font-size:11px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${T("sug.lastTime", { set: last, date: fmtShort(s.prev.date) })}</div>
+  </div>`;
+
+  if (s.done)
+    return wrap(head + `<div style="display:flex;gap:9px;align-items:flex-start">
+      ${icon("check-circle", 15, 'style="color:var(--green);flex-shrink:0;margin-top:1px"')}
+      <div style="flex:1;font-size:12.5px;color:var(--muted);line-height:1.5">${T("sug.ahead", { n: s.prev.m, now: s.now, unit: cardio ? T("unit.pts") : unit })}</div>
+    </div>`);
+
+  return wrap(head + `<div style="display:flex;gap:8px">
+      ${s.options.map((o) => sugOption(o, o.kind === s.pick, eUnit, "sug-use")).join("")}
+    </div>
+    <div style="font-size:11px;color:var(--faint);margin-top:9px;line-height:1.45">
+      ${T(cardio ? "sug.hintCardio" : "sug.hint", { n: s.prev.m, unit: cardio ? T("unit.pts") : unit })}
+    </div>`);
+}
+
 function renderEntryFields(form, unit) {
   const { f, isDraft } = form;
   const { cardio, metric, preview, valid } = entryComputed();
@@ -2897,6 +3333,7 @@ function renderEntryFields(form, unit) {
     <div class="pb-scroll" data-scrollkey="entryform" style="flex:1;overflow-y:auto;padding:10px 16px 120px">
       ${!isDraft ? field("Date", `<input type="date" class="pb-input" data-bind="entry.date" value="${esc(f.date)}">`) : ""}
       ${convert}
+      ${renderSuggestion(form, unit)}
       ${inputs}
       ${field(T("entry.notes"), `<textarea class="pb-input" rows="2" data-bind="entry.notes" placeholder="—" style="resize:none">${esc(f.notes)}</textarea>`,
         detailed ? T("entry.notesHint") : "")}
@@ -2934,11 +3371,27 @@ function renderSetForm(form, unit) {
   const { s, isNew, index } = form;
   const m = est1RM(+s.weight, +s.reps);
   const ok = setHasData(s);
+  /* the same target as the card behind this sheet, one line, one tap —
+     only on a NEW set, because correcting an old one is not a decision
+     about what to lift next */
+  const sug = isNew && ui.entryForm ? setSuggestion(ui.entryForm.f, ui.entryForm.isDraft) : null;
+  const picked = sug && sug.kind === "step" && !sug.done
+    ? sug.options.find((o) => o.kind === sug.pick) : null;
+  /* …and not when the set already IS the suggestion, which is what you get
+     coming here by tapping it on the card behind this sheet */
+  const pick = picked && !(+s.reps === picked.reps && +s.weight === picked.weight) ? picked : null;
+  const target = pick
+    ? `<button data-action="sug-fill" data-reps="${pick.reps}" data-weight="${sugWeight(pick.weight)}" class="pb-btn pb-ghost" style="width:100%;padding:10px 12px;justify-content:flex-start;gap:8px;font-size:13px;margin-bottom:14px;border-style:dashed;border-color:rgba(233,185,73,.45);color:var(--gold)">
+        ${icon("target", 14)} ${T("sug.tryThis", { reps: pick.reps, weight: sugWeight(pick.weight), unit })}
+        <span style="margin-left:auto;color:var(--faint);font-size:11.5px">${T("sug.gives", { n: pick.m })}</span>
+      </button>`
+    : "";
   return sheet(isNew ? T("setForm.add", { n: index + 1 }) : T("setForm.edit", { n: index + 1 }), "setForm", `
     <div style="display:flex;gap:10px">
       <div style="flex:1">${field(labelWith(T("setForm.reps")), `<input class="pb-input" ${NUM} data-bind="set.reps" value="${esc(s.reps)}" placeholder="—" data-autofocus>`)}</div>
       <div style="flex:1">${field(labelWith(T("setForm.weight"), unitSelect(unit)), `<input class="pb-input" ${NUM} data-bind="set.weight" value="${esc(s.weight)}" placeholder="—">`)}</div>
     </div>
+    ${target}
     ${field(T("entry.rpe"), `<input class="pb-input" ${NUM} data-bind="set.rpe" value="${esc(s.rpe)}" placeholder="—">`, T("setForm.rpeHint"))}
 
     <div class="pb-card2" style="padding:11px 14px;display:flex;align-items:center;gap:12px;margin-bottom:14px">
@@ -3495,6 +3948,12 @@ function renderProfile(f) {
           return `<button data-action="profile-theme" data-t="${t}" class="pb-btn" style="flex:1;padding:11px 0;background:${on ? "var(--gold)" : "var(--surface2)"};color:${on ? "var(--gold-ink)" : "var(--muted)"};border:1px solid ${on ? "var(--gold)" : "var(--border)"}">${icon(ic, 15)} ${label}</button>`;
         }).join("")}
       </div>`)}
+      ${field(T("profile.weekMode"), `<div style="display:flex;gap:8px">
+        ${[["program", T("profile.weekProgram"), "calendar-days"], ["rolling", T("profile.weekRolling"), "history"]].map(([m, label, ic]) => {
+          const on = (f.weekMode || "program") === m;
+          return `<button data-action="profile-weekmode" data-m="${m}" class="pb-btn" style="flex:1;padding:11px 0;font-size:13.5px;background:${on ? "var(--gold)" : "var(--surface2)"};color:${on ? "var(--gold-ink)" : "var(--muted)"};border:1px solid ${on ? "var(--gold)" : "var(--border)"}">${icon(ic, 15)} ${label}</button>`;
+        }).join("")}
+      </div>`, T((f.weekMode || "program") === "rolling" ? "profile.weekRollingHint" : "profile.weekProgramHint"))}
       ${field(T("profile.startDate"), `<input type="date" class="pb-input" data-bind="profile.startDate" value="${esc(f.startDate)}">`, T("profile.startDateHint"))}
       ${field(T("profile.daysPerWeek"), `<input class="pb-input" ${NUM} data-bind="profile.daysPerWeek" value="${esc(f.daysPerWeek)}">`)}
 
@@ -4060,11 +4519,16 @@ function dropDayDraft(id) {
   patch({ dayDrafts: (state.dayDrafts || []).filter((d) => d.id !== id) });
 }
 
-/* Stepping the week with the arrows scrolls the calendar to match, so the
-   highlighted band never wanders off the month you're looking at. */
-function syncCalToWeek() {
-  const r = weekRange(ui.volumeWeek, state.settings.startDate);
+/* Stepping the period with the arrows scrolls the calendar to match, so
+   the highlighted band never wanders off the month you're looking at. */
+function volStep(dir) {
+  if (rollingWeeks()) ui.volAnchor = addDays(ui.volAnchor || todayStr(), dir * 7);
+  else ui.volumeWeek = Math.max(1, ui.volumeWeek + dir);
+  const r = rollingWeeks()
+    ? windowEnding(ui.volAnchor)
+    : weekRange(ui.volumeWeek, state.settings.startDate);
   if (monthOf(r.from) !== ui.calMonth && monthOf(r.to) !== ui.calMonth) ui.calMonth = monthOf(r.from);
+  render();
 }
 
 function commitWorkout(draft) {
@@ -4115,9 +4579,19 @@ const actions = {
     if (ui.profileLangWas) state.settings.lang = ui.profileLangWas;
     render();
   },
-  "save-profile": () => { const f = ui.profileDraft; ui.showProfile = false; ui.profileDraft = null; applyTheme(f.theme); patch({ settings: f }); },
+  "save-profile": () => {
+    const f = ui.profileDraft;
+    ui.showProfile = false; ui.profileDraft = null;
+    applyTheme(f.theme);
+    /* the two modes read different pointers, so both are reset to "now" —
+       otherwise switching lands you on a period you never chose */
+    ui.volumeWeek = weekOf(todayStr(), f.startDate);
+    ui.volAnchor = todayStr();
+    patch({ settings: f });
+  },
   "profile-units": (el) => { ui.profileDraft.units = el.dataset.u; render(); },
   "profile-theme": (el) => { ui.profileDraft.theme = el.dataset.t; applyTheme(el.dataset.t); render(); },
+  "profile-weekmode": (el) => { ui.profileDraft.weekMode = el.dataset.m; render(); },
   "reset-all": () => {
     if (confirm(T("profile.confirmReset"))) {
       ui.showProfile = false; ui.profileDraft = null;
@@ -4143,11 +4617,19 @@ const actions = {
   },
   "log-seg": (el) => {
     ui.logSeg = el.dataset.id;
-    if (ui.logSeg === "volume") ui.volumeWeek = weekOf(todayStr(), state.settings.startDate);
+    /* opening the tab always lands on now, whichever way "now" is counted */
+    if (ui.logSeg === "volume") {
+      ui.volumeWeek = weekOf(todayStr(), state.settings.startDate);
+      ui.volAnchor = todayStr();
+    }
     render();
   },
-  "vol-prev": () => { ui.volumeWeek = Math.max(1, ui.volumeWeek - 1); syncCalToWeek(); render(); },
-  "vol-next": () => { ui.volumeWeek = ui.volumeWeek + 1; syncCalToWeek(); render(); },
+  /* One period back or forward. In rolling mode that is a whole seven-day
+     window, not a single day — stepping a day at a time would make the
+     arrows useless for the comparison underneath, and a single day is what
+     tapping the calendar is for. */
+  "vol-prev": () => { volStep(-1); },
+  "vol-next": () => { volStep(1); },
 
   /* ── calendar & deloads ───────────────────────────────────────────── */
   "cal-prev": () => { ui.calMonth = addMonths(ui.calMonth || monthOf(todayStr()), -1); render(); },
@@ -4169,6 +4651,8 @@ const actions = {
     }
     const existing = deloadOn(state.deloads, day);
     if (existing) { ui.deloadForm = { ...existing, isNew: false }; render(); return; }
+    /* in rolling mode the day you tapped becomes the LAST of the seven */
+    ui.volAnchor = day;
     ui.volumeWeek = Math.max(1, weekOf(day, state.settings.startDate));
     render();
   },
@@ -4492,7 +4976,9 @@ const actions = {
   },
 
   /* ── presets ──────────────────────────────────────────────────────── */
-  "library-seg": (el) => { ui.librarySeg = el.dataset.id; render(); },
+  "library-seg": (el) => { ui.librarySeg = el.dataset.id; ui.presetOrder = false; render(); },
+  "preset-reorder": () => { ui.presetOrder = !ui.presetOrder; render(); },
+  "pinned-reorder": () => { ui.pinnedOrder = !ui.pinnedOrder; render(); },
   "save-as-preset": () => {
     if (!ui.workoutSheet || !ui.workoutSheet.entries.length) return;
     ui.presetForm = { name: "", description: "" };
@@ -4585,6 +5071,33 @@ const actions = {
     const orphan = isDraft && entryHasData(f) && !ui.workoutSheet.entries.some((x) => x.id === f.id);
     if (orphan && !confirm(T("entry.confirmDiscard"))) return;
     ui.entryForm = null; ui.setForm = null; render();
+  },
+
+  /* ── set suggestions ──────────────────────────────────────────────── */
+  /* from the card at the top of the exercise window: open a new set with
+     the suggestion already in it, ready to be changed or saved as it is */
+  "sug-use": (el) => {
+    const f = ui.entryForm && ui.entryForm.f;
+    if (!f) return;
+    const d = el.dataset;
+    if (f.kind === "cardio") {
+      ui.entryForm.f = { ...f, minutes: d.min, intensity: d.rpe };
+      render(); return;
+    }
+    if (isDetailed(f)) {
+      ui.setForm = { s: newSet(d.reps, d.weight, ""), isNew: true, index: (f.setList || []).length };
+    } else {
+      /* an older top-set entry has no set list to open — fill its fields,
+         and give it a set count if it hasn't got one yet */
+      ui.entryForm.f = { ...f, reps: d.reps, weight: d.weight, sets: +f.sets > 0 ? f.sets : "1" };
+    }
+    render();
+  },
+  /* from the line inside the set editor: fill the set that is already open */
+  "sug-fill": (el) => {
+    if (!ui.setForm) return;
+    ui.setForm.s = { ...ui.setForm.s, reps: el.dataset.reps, weight: el.dataset.weight };
+    render();
   },
 
   /* ── per-set logging (Detailed mode) ──────────────────────────────── */

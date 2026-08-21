@@ -1008,7 +1008,8 @@ const ui = {
   volumeWeek: null,     // program-week mode: which week the Volume tab is reading
   volAnchor: null,      // rolling mode: the LAST of the seven days it is reading
   presetOrder: false,   // Library → Presets is in drag-to-reorder mode
-  pinnedOrder: false,   // …the pinned strip on Home is
+  pinnedOrder: false,   // …the pinned preset strip on Home is
+  timerOrder: false,    // …the pinned timer dials are, wherever they appear
   progSeg: "progress",  // progress | placeholder — Progress sub-tab
   progressSelected: null,
   /* the progress graph is an instrument, not a picture: chartView is the
@@ -1045,6 +1046,7 @@ function resetTransient() {
   ui.librarySeg = "exercises";
   ui.presetOrder = false;
   ui.pinnedOrder = false;
+  ui.timerOrder = false;
   ui.volumeWeek = weekOf(todayStr(), state.settings.startDate);
   ui.volAnchor = todayStr();
 }
@@ -1387,7 +1389,7 @@ function renderPinnedPresets() {
 
   if (ui.pinnedOrder && pinned.length > 1)
     return `<div class="pb-card2" style="overflow:hidden">
-      ${pinned.map((p, i) => reorderRow("pinned", i, pinned.length,
+      ${pinned.map((p, i) => reorderRow("pinnedPreset", i, pinned.length,
         esc(p.name), TN("move", (p.exercises || []).length))).join("")}
     </div>
     <div style="font-size:11.5px;color:var(--faint);line-height:1.5;padding:9px 2px 0">
@@ -1455,21 +1457,39 @@ function pinnedTimerDial(t) {
   </div>`;
 }
 
+/* The three dials become three rows while you rearrange them: a dial is
+   a control you tap to start a rest, so it can't also be the thing you
+   grab and drag. Same reasoning as the preset cards. */
+function renderPinnedTimerOrder(timers) {
+  return `<div class="pb-card2" style="overflow:hidden">
+    ${timers.map((t, i) => reorderRow("pinnedTimer", i, timers.length,
+      esc(timerLabel(t)), fmtClock(t.duration))).join("")}
+  </div>
+  <div style="font-size:11.5px;color:var(--faint);line-height:1.5;padding:9px 2px 0">
+    ${T("timers.reorderHint", { icon: icon("grip-vertical", 11) })}
+  </div>`;
+}
+
+/* the little Reorder / Done toggle that sits in a section title */
+function orderToggle(action, on, show) {
+  if (!show) return "";
+  return `<button data-action="${action}" style="display:flex;align-items:center;gap:4px;font-size:11px;font-weight:700;letter-spacing:.04em;color:${on ? "var(--gold)" : "var(--faint)"};padding:2px 0">
+    ${icon(on ? "check" : "arrow-up-down", 12)} ${on ? T("preset.reorderDone") : T("preset.reorder")}
+  </button>`;
+}
+
 function renderPinnedModule() {
   const timers = pinnedTimers();
   const pinned = (state.presets || []).filter((p) => p.pinned);
-  const order = pinned.length > 1
-    ? `<button data-action="pinned-reorder" style="display:flex;align-items:center;gap:4px;font-size:11px;font-weight:700;letter-spacing:.04em;color:${ui.pinnedOrder ? "var(--gold)" : "var(--faint)"};padding:2px 0">
-        ${icon(ui.pinnedOrder ? "check" : "arrow-up-down", 12)} ${ui.pinnedOrder ? T("preset.reorderDone") : T("preset.reorder")}
-      </button>`
-    : "";
   return `<div class="pb-card" style="margin-top:14px;padding:13px 14px 15px">
-    ${sectionTitle(T("home.pinnedPresets"), order)}
+    ${sectionTitle(T("home.pinnedPresets"), orderToggle("pinned-reorder", ui.pinnedOrder, pinned.length > 1))}
     ${renderPinnedPresets()}
     <div class="pb-hairline" style="margin:15px 0 12px"></div>
-    ${sectionTitle(T("home.pinnedTimers"))}
+    ${sectionTitle(T("home.pinnedTimers"), orderToggle("timer-reorder", ui.timerOrder, timers.length > 1))}
     ${timers.length
-      ? `<div style="display:flex;align-items:flex-start;gap:6px">${timers.map((t) => pinnedTimerDial(t)).join("")}</div>`
+      ? (ui.timerOrder && timers.length > 1
+        ? renderPinnedTimerOrder(timers)
+        : `<div style="display:flex;align-items:flex-start;gap:6px">${timers.map((t) => pinnedTimerDial(t)).join("")}</div>`)
       : `<div style="font-size:12.5px;color:var(--faint);line-height:1.5;padding:0 2px">
           ${T("home.noPinnedTimers", { icon: icon("pin", 11) })}
         </div>`}
@@ -1539,13 +1559,23 @@ function renderHome(settings, currentWeek, unit) {
     <div style="margin-top:22px">
       ${sectionTitle(T("home.howThisWorks"))}
 
+      <!-- These are a REFERENCE, not a tour: each one answers a question the
+           app cannot answer by being tapped. A rule that decides what happens
+           to someone's data (what counts, what is dropped, what a preset
+           saves, where the numbers live) belongs here. Narration of the
+           interface does not — nobody needs to be told that + adds an
+           exercise, and the same detail volunteered mid-set is noise. -->
       ${accordion("howto", T("acc.howto.title"), icon("info", 16, 'style="color:var(--blue)"'), T("acc.howto.body"))}
-      ${accordion("presets", T("acc.presets.title"), icon("layers", 16, 'style="color:var(--gold)"'), T("acc.presets.body"))}
-      ${accordion("sets", T("acc.sets.title"), icon("list-checks", 16, 'style="color:var(--red)"'), T("acc.sets.body"))}
+      ${accordion("counts", T("acc.counts.title"), icon("list-checks", 16, 'style="color:var(--red)"'), T("acc.counts.body"))}
+      ${accordion("beating", T("acc.progress.title"), icon("trophy", 16, 'style="color:var(--gold)"'), T("acc.progress.body", { unit }))}
       ${accordion("onerm", T("acc.rm.title"), icon("trending-up", 16, 'style="color:var(--green)"'), T("acc.rm.body", { unit }))}
+      ${accordion("volume", T("acc.volume.title"), icon("calendar-days", 16, 'style="color:var(--steel)"'), T("acc.volume.body", { icon: icon("target", 11) }))}
+      ${accordion("presets", T("acc.presets.title"), icon("layers", 16, 'style="color:var(--gold)"'), T("acc.presets.body"))}
+      ${accordion("library", T("acc.library.title"), icon("book-open", 16, 'style="color:#a07ec2"'), T("acc.library.body"))}
+      ${accordion("timers", T("acc.timers.title"), icon("bell-ring", 16, 'style="color:var(--blue)"'), T("acc.timers.body"))}
       ${accordion("cardio", T("acc.cardio.title"), icon("timer", 16, 'style="color:#a07ec2"'), T("acc.cardio.body"))}
-      ${accordion("goal", T("acc.goal.title"), icon("trophy", 16, 'style="color:var(--gold)"'), T("acc.goal.body", { unit }))}
       ${accordion("units", T("acc.units.title"), icon("ruler", 16, 'style="color:var(--steel)"'), T("acc.units.body"))}
+      ${accordion("data", T("acc.data.title"), icon("settings", 16, 'style="color:var(--muted)"'), T("acc.data.body"))}
     </div>
 
     <div style="height:8px"></div>
@@ -2445,22 +2475,39 @@ function reorderPresets(from, to) {
   patch({ presets: all });
 }
 
-function reorderPinnedPresets(from, to) {
-  const all = state.presets || [];
-  const slots = all.map((p, i) => (p.pinned ? i : -1)).filter((i) => i >= 0);
-  if (from >= slots.length || to >= slots.length) return;
-  const order = slots.map((i) => all[i]);
+/* Rearranging a pinned strip is the same move whichever strip it is: the
+   strip is a filtered view of one master list, so the reorder rewrites only
+   the slots the pinned items already occupy and every unpinned item stays
+   exactly where it sits. */
+function reorderPinnedIn(list, from, to) {
+  const slots = list.map((x, i) => (x.pinned ? i : -1)).filter((i) => i >= 0);
+  if (from >= slots.length || to >= slots.length) return null;
+  const order = slots.map((i) => list[i]);
   const [moved] = order.splice(from, 1);
   order.splice(to, 0, moved);
-  const next = [...all];
+  const next = [...list];
   slots.forEach((slot, k) => { next[slot] = order[k]; });
-  patch({ presets: next });
+  return next;
+}
+
+function reorderPinnedPresets(from, to) {
+  const next = reorderPinnedIn(state.presets || [], from, to);
+  if (next) patch({ presets: next });
+}
+
+/* pinnedTimers() takes the first MAX_PINNED_TIMERS pinned rows in
+   state.timers order, so this is what decides which dial sits where on
+   Home and at the foot of the workout and exercise windows alike. */
+function reorderPinnedTimers(from, to) {
+  const next = reorderPinnedIn(state.timers || [], from, to);
+  if (next) patch({ timers: next });
 }
 
 const DRAG_COMMIT = {
   group: reorderGroups,
   preset: reorderPresets,
-  pinned: reorderPinnedPresets,
+  pinnedPreset: reorderPinnedPresets,
+  pinnedTimer: reorderPinnedTimers,
 };
 
 document.addEventListener("pointerdown", (e) => {
@@ -3361,7 +3408,7 @@ function renderEntryFields(form, unit) {
           <div id="entryMetric" class="pb-num" style="font-size:30px;font-weight:700;color:var(--gold);line-height:1.05">${metric ?? "—"}</div>
         </div>
         <div id="entryBadge" style="flex:1;text-align:right;font-size:13px;font-weight:700;color:${preview === "pr" ? "var(--gold)" : preview === "first" ? "var(--blue)" : "var(--muted)"}">
-          ${preview ? BADGE_TEXT[preview] : cardio ? T("entry.cardioFormula") : T("entry.rmFormula")}
+          ${preview ? BADGE_TEXT[preview] : cardio ? T("entry.cardioFormula") : ""}
         </div>
       </div>
       ${!cardio && eUnit !== unit ? `<div style="font-size:11.5px;color:var(--faint);margin:8px 2px 0;line-height:1.5">
@@ -3410,12 +3457,9 @@ function renderSetForm(form, unit) {
     ${target}
     ${field(T("entry.rpe"), `<input class="pb-input" ${NUM} data-bind="set.rpe" value="${esc(s.rpe)}" placeholder="—">`, T("setForm.rpeHint"))}
 
-    <div class="pb-card2" style="padding:11px 14px;display:flex;align-items:center;gap:12px;margin-bottom:14px">
-      <div>
-        <div class="pb-label">${T("entry.est1rm", { unit })}</div>
-        <div id="setMetric" class="pb-num" style="font-size:26px;font-weight:700;color:var(--gold);line-height:1.05">${m ?? "—"}</div>
-      </div>
-      <div style="flex:1;text-align:right;font-size:12px;color:var(--faint)">${T("entry.rmFormula")}</div>
+    <div class="pb-card2" style="padding:11px 14px;margin-bottom:14px">
+      <div class="pb-label">${T("entry.est1rm", { unit })}</div>
+      <div id="setMetric" class="pb-num" style="font-size:26px;font-weight:700;color:var(--gold);line-height:1.05">${m ?? "—"}</div>
     </div>
 
     <button id="setSaveBtn" data-action="save-set" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:14px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
@@ -3447,7 +3491,7 @@ function updateEntryPreview() {
   if (m) m.textContent = metric ?? "—";
   if (b) {
     b.style.color = preview === "pr" ? "var(--gold)" : preview === "first" ? "var(--blue)" : "var(--muted)";
-    b.textContent = preview ? BADGE_TEXT[preview] : cardio ? T("entry.cardioFormula") : T("entry.rmFormula");
+    b.textContent = preview ? BADGE_TEXT[preview] : cardio ? T("entry.cardioFormula") : "";
   }
   if (s) { s.disabled = !valid; s.style.opacity = valid ? 1 : 0.45; }
 }
@@ -3841,11 +3885,17 @@ function renderTimerList() {
   if (!(state.timers || []).length) return "";
   const pinned = pinnedTimers();
 
+  const right = pinned.length > 1
+    ? orderToggle("timer-reorder", ui.timerOrder, true)
+    : `<span style="font-size:11px;color:var(--faint)">${T("timers.listHint")}</span>`;
+
   return `<div style="margin-top:22px">
-    ${sectionTitle(T("timers.listTitle"), `<span style="font-size:11px;color:var(--faint)">${T("timers.listHint")}</span>`)}
+    ${sectionTitle(T("timers.listTitle"), right)}
     ${pinned.length
       ? `<div class="pb-card" style="padding:14px 12px 15px">
-          <div style="display:flex;align-items:flex-start;gap:6px">${pinned.map((t) => pinnedTimerDial(t)).join("")}</div>
+          ${ui.timerOrder && pinned.length > 1
+            ? renderPinnedTimerOrder(pinned)
+            : `<div style="display:flex;align-items:flex-start;gap:6px">${pinned.map((t) => pinnedTimerDial(t)).join("")}</div>`}
         </div>`
       : `<div class="pb-card" style="padding:16px;font-size:12.5px;color:var(--faint);line-height:1.5;text-align:center">
           ${T("home.noPinnedTimers", { icon: icon("pin", 11) })}
@@ -4995,6 +5045,7 @@ const actions = {
   "library-seg": (el) => { ui.librarySeg = el.dataset.id; ui.presetOrder = false; render(); },
   "preset-reorder": () => { ui.presetOrder = !ui.presetOrder; render(); },
   "pinned-reorder": () => { ui.pinnedOrder = !ui.pinnedOrder; render(); },
+  "timer-reorder": () => { ui.timerOrder = !ui.timerOrder; render(); },
   "save-as-preset": () => {
     if (!ui.workoutSheet || !ui.workoutSheet.entries.length) return;
     ui.presetForm = { name: "", description: "" };

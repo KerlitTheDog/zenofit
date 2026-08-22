@@ -697,6 +697,124 @@ function deloadStatus(list, today = todayStr()) {
   return null;
 }
 
+/* ── PLANNING: A DATED INTENTION, NOT A RECORD ────────────────────────
+   A PLAN is the workout you have decided to do on a day that has not
+   happened yet. It lives in state.plans as {id, date, name, entries[]},
+   and its entries are ordinary entry objects — the same shape the log
+   uses — so the whole builder (the picker, presets, the set list, the
+   set editor, the "beat last time" card) is reused verbatim to write one.
+
+   WHAT MAKES IT A PLAN IS THAT IT IS NOT THE LOG.
+   Nothing in state.plans is ever counted: not sets, not PRs, not volume,
+   not the graphs, not a single badge. That is the whole reason this is a
+   separate list rather than a log entry with a future date — the workable
+   trick of "just log Wednesday now" quietly tells the app you have lifted
+   things you have not lifted, and every number downstream believes it.
+
+   THE PLAN IS CONSUMED BY THE DAY IT DESCRIBES. Start a plan and each of
+   its entries hands its numbers over as a TARGET (`e.plan` below) on a
+   fresh, empty entry. You log against the target, set by set; when the day
+   is saved the plan row is deleted and the targets ride along inside the
+   logged entries, so "did I do what I said I would" stays answerable
+   forever, from the log alone. There is never a second source of truth
+   about whether a day happened.
+
+   PLAN vs PRESET. A preset is a bundle of exercises with no date and no
+   numbers: the shape of a session you repeat. A plan is one dated session
+   with the numbers you are going for. They compose — planning a day from
+   a preset is the normal way to start one.                              */
+
+/* the target snapshot a planned entry hands to the entry that will log it,
+   or null when the plan only named the exercise and left the numbers out */
+function planTargetOf(pe) {
+  if (!pe) return null;
+  if (pe.kind === "cardio")
+    return +pe.minutes > 0 && +pe.intensity > 0 ? { minutes: pe.minutes, intensity: pe.intensity } : null;
+  const sets = filledSets(pe).map((s) => ({ reps: s.reps, weight: s.weight }));
+  return sets.length ? { sets, unit: unitOf(pe) } : null;
+}
+
+const plansSorted = (list) => [...(list || [])].sort((a, b) => (a.date < b.date ? -1 : 1));
+const planOn = (list, dayStr) => (list || []).find((p) => p.date === dayStr) || null;
+const planSetCount = (p) =>
+  (p.entries || []).reduce((n, e) => { const t = planTargetOf(e); return n + (t && t.sets ? t.sets.length : 0); }, 0);
+
+/* date → Set of muscle groups a plan covers, the calendar's hollow dots */
+function planMarks(plans) {
+  const out = {};
+  for (const p of plans || [])
+    for (const e of p.entries || []) {
+      const m = e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, state.library, e.muscle);
+      (out[p.date] = out[p.date] || new Set()).add(m);
+    }
+  return out;
+}
+
+/* ── DID YOU DO WHAT YOU SAID ─────────────────────────────────────────
+   Three verdicts, and no cleverness in them. A set BEAT its target if it
+   was more on one axis and short on neither; it HIT the target if it
+   matched; anything less is UNDER. Deliberately NOT judged on estimated
+   1RM: three reps at a heavier weight scores higher than the eight you
+   planned, and calling that "target hit" would be the app deciding it
+   knows what you meant. Under is never scolded anywhere it is shown —
+   the plan was a guess made days ago, and the log is what happened.   */
+
+function setVerdict(actual, target) {
+  if (!actual || !target) return null;
+  const r = +actual.reps, w = +actual.weight, tr = +target.reps, tw = +target.weight;
+  if (!(r > 0 && w > 0)) return null;
+  if (r < tr || w < tw) return "under";
+  return r > tr || w > tw ? "beat" : "hit";
+}
+
+function cardioVerdict(e, t) {
+  const m = +e.minutes, i = +e.intensity;
+  if (!(m > 0 && i > 0)) return null;
+  if (m < +t.minutes || i < +t.intensity) return "under";
+  return m > +t.minutes || i > +t.intensity ? "beat" : "hit";
+}
+
+/* How one logged entry stands against the target it was given. Planned sets
+   are matched to logged sets BY POSITION: set 3 answers planned set 3, and
+   anything logged past the end of the plan is a bonus set that can only
+   help. Returns null for an entry that never carried a plan. */
+function entryPlanResult(e) {
+  const t = e && e.plan;
+  if (!t) return null;
+  if (e.kind === "cardio" || !t.sets) {
+    const v = cardioVerdict(e, t);
+    return { total: 1, done: v ? 1 : 0, hit: v === "hit" || v === "beat" ? 1 : 0, beat: v === "beat" ? 1 : 0, under: v === "under" ? 1 : 0, bonus: 0, verdicts: [v] };
+  }
+  const list = filledSets(e);
+  const verdicts = t.sets.map((ts, i) => setVerdict(list[i], ts));
+  const done = verdicts.filter(Boolean).length;
+  return {
+    total: t.sets.length, done,
+    hit: verdicts.filter((v) => v === "hit" || v === "beat").length,
+    beat: verdicts.filter((v) => v === "beat").length,
+    under: verdicts.filter((v) => v === "under").length,
+    bonus: Math.max(0, list.length - t.sets.length),
+    verdicts,
+  };
+}
+
+/* the same sum over a whole day, for the card that greets you after you
+   save one and for the chip on the day in your history */
+function dayPlanResult(entries) {
+  let any = false;
+  const sum = { total: 0, done: 0, hit: 0, beat: 0, under: 0, bonus: 0, lifts: 0, liftsHit: 0 };
+  for (const e of entries || []) {
+    const r = entryPlanResult(e);
+    if (!r) continue;
+    any = true;
+    sum.total += r.total; sum.done += r.done; sum.hit += r.hit;
+    sum.beat += r.beat; sum.under += r.under; sum.bonus += r.bonus;
+    sum.lifts += 1;
+    if (r.hit >= r.total) sum.liftsHit += 1;
+  }
+  return any ? sum : null;
+}
+
 /* ── CALENDAR ARITHMETIC ──────────────────────────────────────────────
    Everything is done on ISO "YYYY-MM-DD" strings, which sort and compare
    as plain text, and on local Date objects built from local parts, which
@@ -781,7 +899,7 @@ const seedTimers = () =>
   }));
 
 const defaultState = () => ({
-  version: 9,
+  version: 10,
   settings: { name: "", units: "kg", startDate: todayStr(), daysPerWeek: 4, theme: "dark", lang: "en", weekMode: "program" },
   library: DEFAULT_LIBRARY,
   groups: DEFAULT_GROUPS.map((g) => ({ ...g })),   // [{name,key?,color}] — user-editable
@@ -792,6 +910,7 @@ const defaultState = () => ({
   presets: [],    // [{id,name,description,pinned,exercises:[{exercise,muscle,kind}],createdAt}]
   timers: seedTimers(), // [{id,name,duration,endsAt,remaining,doneAt,pinned,createdAt}]
   dayDrafts: [],  // [{id,date,entries,savedAt}] — workout days you backed out of, see closeWorksheet()
+  plans: [],      // [{id,date,name,entries,createdAt}] — days you intend to train, see planTargetOf()
   deloads: [],    // [{id,start,end}] — planned easy weeks, inclusive ISO dates
   drafts: {},     // half-finished forms, restored after a crash/lock — see snapshotDrafts()
 });
@@ -908,6 +1027,14 @@ function migrate(s) {
     if (s.settings.weekMode !== "rolling") s.settings.weekMode = "program";
     s.version = 9;
   }
+  if (v < 10) {
+    /* v10 added planning: days you have decided on but not done yet. There is
+       nothing to convert — an intention was never storable before — so the
+       list starts empty, and every entry already in the log has no target on
+       it and is read exactly as it always was. */
+    if (!Array.isArray(s.plans)) s.plans = [];
+    s.version = 10;
+  }
   return s;
 }
 
@@ -977,14 +1104,19 @@ const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(
 
 const ui = {
   tab: "home",
-  logSeg: "history",
+  logSeg: "history",   // history | calendar
   showProfile: false,
   profileDraft: null,
   profileLangWas: null,   // the saved language, so a previewed one can be backed out of
   showBody: false,      // Body measurements — a window off the header, not a tab
   groupSheet: false,    // the "muscle groups" manager
   groupForm: null,      // {name, color, orig, then} — add/edit one group
-  workoutSheet: null,   // {date, entries:[]} draft
+  /* {date, entries:[]} draft. Two different things on it are called a plan
+     and they never co-exist, because a sheet is either writing a plan or
+     logging a day: `planning: true` + `planId` is the PLAN BEING EDITED,
+     `planIds: []` on an ordinary sheet is the plan or plans the day is
+     ANSWERING (see plan-start / commitWorkout). */
+  workoutSheet: null,
   presetForm: null,     // {name, description} draft while saving the current day as a preset
   presetView: null,     // working copy of a saved preset being managed/edited
   picking: false,
@@ -1001,7 +1133,9 @@ const ui = {
   bodyForm: null,
   bodyFormWasNew: false,
   deloadOpen: false,
-  calMonth: null,       // "YYYY-MM" the volume calendar is showing
+  calMonth: null,       // "YYYY-MM" the calendar is showing
+  calDay: null,         // the day the calendar has selected — what the day card is about
+  planResult: null,     // {date, name, sum} — "here is how the plan went", after saving one
   deloadPick: null,     // {start} while tapping out a new deload's two ends
   deloadForm: null,     // {id, start, end, isNew} — the deload editor
   accordions: {},   // all accordions start collapsed
@@ -1035,6 +1169,7 @@ function resetTransient() {
   ui.deloadOpen = false;
   ui.deloadPick = null;
   ui.calMonth = monthOf(todayStr());
+  ui.calDay = todayStr();
   ui.accordions = {};
   ui.progSeg = "progress";
   ui.progressSelected = null;
@@ -1326,6 +1461,7 @@ function render() {
   if (ui.groupSheet) html += renderGroupSheet(library);
   if (ui.groupForm) html += renderGroupForm();
   if (ui.deloadForm) html += renderDeloadForm();
+  if (ui.planResult) html += renderPlanResult();
 
   html += `</div></div>`;
   app.innerHTML = html;
@@ -1523,6 +1659,60 @@ function renderDeloadBanner(status) {
   </div>`;
 }
 
+/* ── TODAY'S PLAN ON THE HOME SCREEN ──────────────────────────────────
+   This is deliberately NOT another pinned-preset strip, and the
+   difference is the whole reason the feature exists.
+
+   A pinned preset is a TEMPLATE you reach for: no date, no numbers, "I
+   think today is a push day". This is an APPOINTMENT: the day you decided
+   on, with the weights you decided on, and it is on the home screen today
+   only because today is when it is. So it sits above the pinned strip and
+   below Start, it names the numbers rather than the moves, and it is gone
+   again tomorrow — the strip underneath is still there for the days you
+   never planned, which for most people is most of them.
+
+   Tomorrow gets one quiet line and no card. Knowing it is coming is
+   useful; a second call-to-action for a day you cannot do yet is not. */
+function renderTodayPlan(log) {
+  const today = todayStr();
+  const plan = planOn(state.plans, today);
+  const next = plansSorted(state.plans).find((p) => p.date > today);
+  const trained = log.some((e) => e.date === today);
+
+  if (!plan) {
+    if (!next || daysBetween(today, next.date) > 1) return "";
+    return `<button data-action="plan-open" data-d="${esc(next.date)}" style="width:100%;display:flex;align-items:center;gap:8px;margin-top:12px;padding:2px;color:var(--muted);text-align:left">
+      ${icon("calendar-check", 13, 'style="color:var(--faint);flex-shrink:0"')}
+      <span style="flex:1;min-width:0;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+        ${T("plan.tomorrowLine", { what: next.name ? esc(next.name) : TN("move", (next.entries || []).length) })}
+      </span>
+      ${icon("chevron-right", 13, 'style="color:var(--faint);flex-shrink:0"')}
+    </button>`;
+  }
+
+  const sets = planSetCount(plan);
+  return `<div class="pb-card" style="margin-top:12px;overflow:hidden;border-color:rgba(233,185,73,.4);background:rgba(233,185,73,.06)">
+    <div style="padding:12px 14px 11px">
+      <div style="display:flex;align-items:baseline;gap:8px">
+        <div class="pb-label" style="color:var(--gold)">${T("plan.today")}</div>
+        <div style="flex:1"></div>
+        ${trained ? chip(T("plan.alreadyTrained")) : ""}
+      </div>
+      <div class="pb-num" style="font-size:19px;font-weight:700;line-height:1.15;margin-top:2px">${plan.name ? esc(plan.name) : T("plan.badge")}</div>
+      <div style="font-size:12px;color:var(--muted);margin-top:1px">
+        ${TN("move", (plan.entries || []).length)}${sets ? " · " + T("plan.nSets", { n: sets }) : ""}
+      </div>
+      <div style="display:flex;flex-direction:column;gap:5px;margin-top:11px">${planEntryRows(plan.entries)}</div>
+    </div>
+    <div style="display:flex;border-top:1px solid var(--border-soft)">
+      <button data-action="plan-start" data-id="${esc(plan.id)}" style="flex:1;padding:13px;color:var(--gold);font-weight:700;font-size:14px;display:flex;align-items:center;justify-content:center;gap:7px">
+        ${icon("play", 15)} ${T("plan.start")}
+      </button>
+      <button data-action="plan-edit" data-id="${esc(plan.id)}" style="flex-shrink:0;padding:13px 18px;color:var(--muted);border-left:1px solid var(--border-soft)">${icon("pencil", 15)}</button>
+    </div>
+  </div>`;
+}
+
 function renderHome(settings, currentWeek, unit) {
   const deloadBanner = renderDeloadBanner(deloadStatus(state.deloads));
 
@@ -1552,6 +1742,8 @@ function renderHome(settings, currentWeek, unit) {
       ${icon("plus", 20, 'stroke-width="2.6"')} ${T("home.start")}
     </button>
 
+    ${renderTodayPlan(state.log)}
+
     ${deloadBanner ? `<div style="margin-top:12px">${deloadBanner}</div>` : ""}
 
     ${renderPinnedModule()}
@@ -1567,6 +1759,7 @@ function renderHome(settings, currentWeek, unit) {
            exercise, and the same detail volunteered mid-set is noise. -->
       ${accordion("howto", T("acc.howto.title"), icon("info", 16, 'style="color:var(--blue)"'), T("acc.howto.body"))}
       ${accordion("counts", T("acc.counts.title"), icon("list-checks", 16, 'style="color:var(--red)"'), T("acc.counts.body"))}
+      ${accordion("plan", T("acc.plan.title"), icon("calendar-check", 16, 'style="color:var(--gold)"'), T("acc.plan.body"))}
       ${accordion("beating", T("acc.progress.title"), icon("trophy", 16, 'style="color:var(--gold)"'), T("acc.progress.body", { unit }))}
       ${accordion("onerm", T("acc.rm.title"), icon("trending-up", 16, 'style="color:var(--green)"'), T("acc.rm.body", { unit }))}
       ${accordion("volume", T("acc.volume.title"), icon("calendar-days", 16, 'style="color:var(--steel)"'), T("acc.volume.body", { icon: icon("target", 11) }))}
@@ -1586,12 +1779,12 @@ function renderHome(settings, currentWeek, unit) {
 
 function renderLog(log, library, badges, settings, unit, currentWeek) {
   const seg = ui.logSeg;
-  const segs = [["history", T("log.history")], ["volume", T("log.volume")]].map(([id, label]) =>
+  const segs = [["history", T("log.history")], ["calendar", T("log.calendar")]].map(([id, label]) =>
     `<button data-action="log-seg" data-id="${id}" class="pb-btn" style="flex:1;padding:8px 0;font-size:13px;border-radius:8px;background:${seg === id ? "var(--raise)" : "transparent"};color:${seg === id ? "var(--text)" : "var(--muted)"};border:${seg === id ? "1px solid var(--border)" : "1px solid transparent"}">${label}</button>`).join("");
 
   return `<div class="" style="padding:12px 16px 0">
     <div style="display:flex;background:var(--surface2);border-radius:11px;padding:3px;margin-bottom:14px;border:1px solid var(--border-soft)">${segs}</div>
-    ${seg === "history" ? renderHistory(log, library, badges, settings, unit) : renderVolume(log, library, settings, currentWeek)}
+    ${seg === "history" ? renderHistory(log, library, badges, settings, unit) : renderCalendarTab(log, library, settings, currentWeek)}
   </div>`;
 }
 
@@ -1649,9 +1842,14 @@ function renderHistory(log, library, badges, settings, unit) {
     const wk = rollingWeeks() ? null : weekOf(date, settings.startDate);
     const sets = entries.filter((e) => e.kind !== "cardio").reduce((a, e) => a + (+e.sets || 0), 0);
     const mins = entries.filter((e) => e.kind === "cardio").reduce((a, e) => a + (+e.minutes || 0), 0);
+    const dayRes = dayPlanResult(entries);
     const rows = entries.map((e) => {
       const b = badges[e.id] || {};
       const muscle = e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, library, e.muscle);
+      /* an entry that was planned keeps saying so, forever: the target it
+         was given is stored on it, so "did I do what I said I would" is
+         answerable from the log alone months later */
+      const res = entryPlanResult(e);
       return `<div style="display:flex;align-items:center;border-bottom:1px solid var(--border-soft)">
         <button data-action="edit-entry" data-id="${e.id}" style="flex:1;min-width:0;text-align:left;padding:11px 4px 11px 14px;display:flex;gap:10px;align-items:center;color:var(--text)">
           <div style="width:4px;align-self:stretch;border-radius:2px;background:${colorFor(muscle)}"></div>
@@ -1660,6 +1858,10 @@ function renderHistory(log, library, badges, settings, unit) {
             <div style="font-size:12.5px;color:var(--muted);margin-top:1px">
               ${entrySummary(e, unit, true)}
             </div>
+            ${res ? `<div style="display:flex;align-items:center;gap:5px;font-size:11px;margin-top:2px;color:${res.beat ? "var(--gold)" : res.hit >= res.total ? "var(--green)" : "var(--muted)"}">
+              ${icon("target", 10, 'style="flex-shrink:0"')}
+              <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${T("plan.rowResult", { n: res.hit, total: res.total, target: planTargetLine(e.plan, unitOf(e)) })}</span>
+            </div>` : ""}
             ${e.notes ? `<div style="font-size:11.5px;color:var(--faint);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">“${esc(e.notes)}”</div>` : ""}
           </div>
           <div style="text-align:right;flex-shrink:0">
@@ -1674,6 +1876,7 @@ function renderHistory(log, library, badges, settings, unit) {
     return `<div class="pb-card" style="margin-bottom:12px;overflow:hidden">
       <button data-action="edit-day" data-date="${date}" title="${T("log.editDay")}" style="width:100%;display:flex;align-items:center;gap:8px;padding:11px 14px;border-bottom:1px solid var(--border-soft);color:var(--text);text-align:left">
         <div class="pb-num" style="font-weight:700;font-size:16.5px;flex:1">${fmtDate(date)}</div>
+        ${dayRes ? chip(T("plan.hitOf", { n: dayRes.hit, total: dayRes.total }), dayRes.hit >= dayRes.total ? "var(--green)" : "var(--steel)") : ""}
         ${wk ? chip(T("common.week", { n: wk }), "var(--gold)") : ""}
         ${sets > 0 ? chip(sets + " " + T("unit.sets")) : ""}
         ${mins > 0 ? chip(mins + " " + T("unit.min"), "#a07ec2") : ""}
@@ -1706,10 +1909,11 @@ function dayMarks(log, library) {
   return out;
 }
 
-function renderCalendar(log, library, marks, range, legend) {
+function renderCalendar(log, library, marks, planned, range, legend) {
   const month = ui.calMonth || monthOf(todayStr());
   const today = todayStr();
   const picking = ui.deloadPick;
+  const sel = ui.calDay;
 
   const cells = monthGrid(month).map((c) => {
     const dl = deloadOn(state.deloads, c.iso);
@@ -1718,25 +1922,38 @@ function renderCalendar(log, library, marks, range, legend) {
     const inWeek = c.iso >= range.from && c.iso <= range.to;
     const anchor = rollingWeeks() && c.iso === range.to;
     const isToday = c.iso === today;
-    const groups = marks[c.iso] ? [...marks[c.iso]].slice(0, 3) : [];
+    /* Two rows of dots that never fight: a SOLID dot is a group you
+       trained, a HOLLOW one is a group you have planned and not done yet.
+       Same dot, same colour, filled or not — which is exactly the
+       difference between the log and a plan everywhere else in the app.
+       Anything already trained is dropped from the planned row so a day
+       you did as planned reads as done, not half-done. */
+    const done = marks[c.iso] ? [...marks[c.iso]] : [];
+    const ahead = planned[c.iso] ? [...planned[c.iso]].filter((g) => !done.includes(g)) : [];
+    const groups = done.slice(0, 4);
+    const ghosts = ahead.slice(0, Math.max(0, 4 - groups.length));
     const pickStart = picking && picking.start === c.iso;
     const pickAfter = picking && picking.start && c.iso > picking.start;
+    const isSel = !picking && sel === c.iso;
 
     /* the tint stack, quietest first */
     const bg = pickStart ? "rgba(233,185,73,.30)"
+      : isSel ? "var(--raise)"
       : dl ? "rgba(233,185,73,.13)"
       : inWeek ? "var(--surface2)"
       : "transparent";
     const border = isToday ? "1px solid var(--gold)"
+      : isSel ? "1px solid var(--border)"
       : anchor ? "1px solid var(--steel)"
       : dl ? "1px dashed rgba(233,185,73,.5)"
       : "1px solid transparent";
 
     return `<button data-action="cal-day" data-d="${c.iso}"
       style="position:relative;aspect-ratio:1;border-radius:9px;background:${bg};border:${border};display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:0;opacity:${c.inMonth ? 1 : 0.35};${pickAfter ? "outline:1px solid rgba(233,185,73,.25);outline-offset:-1px;" : ""}">
-      <span class="pb-num" style="font-size:13px;font-weight:${isToday ? 700 : 600};color:${isToday ? "var(--gold)" : inWeek || dl ? "var(--text)" : "var(--muted)"};line-height:1">${c.day}</span>
-      <span style="display:flex;gap:2px;height:4px;align-items:center">
+      <span class="pb-num" style="font-size:13px;font-weight:${isToday ? 700 : 600};color:${isToday ? "var(--gold)" : inWeek || dl || isSel ? "var(--text)" : "var(--muted)"};line-height:1">${c.day}</span>
+      <span style="display:flex;gap:2px;height:5px;align-items:center">
         ${groups.map((g) => `<span style="width:4px;height:4px;border-radius:2px;background:${colorFor(g)}"></span>`).join("")}
+        ${ghosts.map((g) => `<span style="width:5px;height:5px;border-radius:3px;border:1.5px solid ${colorFor(g)};box-sizing:border-box"></span>`).join("")}
       </span>
     </button>`;
   }).join("");
@@ -1775,6 +1992,7 @@ function renderCalendar(log, library, marks, range, legend) {
       <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:10px;height:10px;border-radius:3px;background:var(--surface2)"></span>${legend}</span>
       <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:10px;height:10px;border-radius:3px;background:rgba(233,185,73,.13);border:1px dashed rgba(233,185,73,.5)"></span>${T("vol.legendDeload")}</span>
       <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:4px;height:4px;border-radius:2px;background:var(--muted)"></span>${T("vol.legendTrained")}</span>
+      <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:6px;height:6px;border-radius:3px;border:1.5px solid var(--muted);box-sizing:border-box"></span>${T("vol.legendPlanned")}</span>
     </div>
   </div>`;
 }
@@ -1832,6 +2050,205 @@ function renderDeloadForm() {
       ${icon("trash-2", 15)} ${T("deloadForm.deleteBtn")}
     </button>` : ""}
   `, 100);
+}
+
+/* ── WHAT A PLANNED ENTRY SAYS IN ONE LINE ────────────────────────────
+   Runs of identical sets are compressed, because "3 sets · 8 × 100 kg" is
+   how anybody writes down a plan and "8 × 100 · 8 × 100 · 8 × 100" is not.
+   A planned exercise with no numbers on it is a legitimate plan — the
+   running order, decided, the numbers left for the day — and says so. */
+function planTargetLine(t, unit) {
+  if (!t) return T("plan.noNumbers");
+  if (!t.sets) return T("sug.cardioSet", { min: t.minutes, rpe: t.intensity });
+  const u = t.unit || unit || state.settings.units;
+  const runs = [];
+  for (const st of t.sets) {
+    const last = runs[runs.length - 1];
+    if (last && last.reps === st.reps && last.weight === st.weight) last.n += 1;
+    else runs.push({ n: 1, reps: st.reps, weight: st.weight });
+  }
+  /* "3 sets · 8 × 100 kg" only earns the count when there is more than one
+     of them; a single set is just the set */
+  if (runs.length === 1 && runs[0].n > 1)
+    return `${runs[0].n} ${T("unit.sets")} · ${esc(runs[0].reps)} × ${esc(runs[0].weight)} ${u}`;
+  return runs.map((r) => `${r.n > 1 ? r.n + " × " : ""}${esc(r.reps)} × ${esc(r.weight)}`).join(" · ") + " " + u;
+}
+
+/* the same line for a planned ENTRY, which is where a target comes from */
+const planEntryLine = (pe) => planTargetLine(planTargetOf(pe), unitOf(pe));
+
+
+/* the exercise rows inside a plan card — a hollow dot (it hasn't happened),
+   the lift, and the target beside it */
+const planEntryRows = (entries) => (entries || []).map((pe) => `<div style="display:flex;align-items:baseline;gap:8px;font-size:13px">
+    <span style="width:8px;height:8px;border-radius:4px;border:1.5px solid ${colorFor(pe.kind === "cardio" ? "Cardio" : muscleOf(pe.exercise, state.library, pe.muscle))};box-sizing:border-box;flex-shrink:0;align-self:center"></span>
+    <span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)">${esc(exLabel(pe.exercise))}</span>
+    <span class="pb-num" style="font-size:12px;color:var(--muted);white-space:nowrap;flex-shrink:0">${planEntryLine(pe)}</span>
+  </div>`).join("");
+
+/* ── THE DAY CARD ─────────────────────────────────────────────────────
+   Tapping a day used to do one invisible thing: move the volume window.
+   It still does, and now it also opens this — the one place that answers
+   "what is on this day", past or future, in the same shape either way:
+   what you trained, what you planned, and the one or two things you can
+   sensibly do about it from here. It is where a plan is born and where a
+   plan is started, which is why planning never needed a screen of its own. */
+function renderDayCard(log, library, settings) {
+  const day = ui.calDay || todayStr();
+  const today = todayStr();
+  const plan = planOn(state.plans, day);
+  const logged = log.filter((e) => e.date === day).sort((a, b) => a.createdAt - b.createdAt);
+  const parked = (state.dayDrafts || []).find((d) => d.date === day);
+  const dl = deloadOn(state.deloads, day);
+  const past = day < today;
+  const result = dayPlanResult(logged);
+
+  const head = `<div style="display:flex;align-items:center;gap:7px;padding:12px 14px 10px;flex-wrap:wrap">
+    <div class="pb-num" style="font-weight:700;font-size:16.5px;flex:1;min-width:0">${fmtDate(day, { weekday: "long", day: "numeric", month: "short" })}</div>
+    ${day === today ? chip(T("plan.todayShort"), "var(--gold)") : ""}
+    ${rollingWeeks() ? "" : chip(T("common.wkShort", { n: weekOf(day, settings.startDate) }))}
+    ${dl ? chip(T("vol.legendDeload"), "var(--gold)") : ""}
+  </div>`;
+
+  /* what actually happened, if anything did */
+  const trained = logged.length ? `<div style="padding:0 14px 12px">
+      <div class="pb-label" style="margin-bottom:7px">${T("plan.trained")}${result ? ` · <span style="color:var(--gold)">${T("plan.hitOf", { n: result.hit, total: result.total })}</span>` : ""}</div>
+      <div style="display:flex;flex-direction:column;gap:5px">
+        ${logged.map((e) => `<div style="display:flex;align-items:baseline;gap:8px;font-size:13px">
+          <span style="width:8px;height:8px;border-radius:4px;background:${colorFor(e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, library, e.muscle))};flex-shrink:0;align-self:center"></span>
+          <span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)">${esc(exLabel(e.exercise))}</span>
+          <span class="pb-num" style="font-size:12px;color:var(--muted);white-space:nowrap;flex-shrink:0">${entrySummary(e, unitOf(e))}</span>
+        </div>`).join("")}
+      </div>
+      <button data-action="edit-day" data-date="${day}" class="pb-btn pb-ghost" style="width:100%;padding:10px 0;font-size:13px;margin-top:11px">
+        ${icon("pencil", 14)} ${T("plan.openDay")}
+      </button>
+    </div>` : "";
+
+  /* the plan, if there is one — and whether it still has a day left to happen on */
+  const planUnused = plan && past && !logged.length;
+  const planned = plan ? `<div style="padding:0 14px 12px">
+      ${logged.length ? `<div class="pb-hairline" style="margin:0 0 12px"></div>` : ""}
+      <div style="display:flex;align-items:center;gap:7px;margin-bottom:8px">
+        <div class="pb-label" style="flex:1;min-width:0">${plan.name ? esc(plan.name) : T("plan.badge")}</div>
+        ${planUnused ? chip(T("plan.missed")) : logged.length ? chip(T("plan.unused")) : chip(TN("move", (plan.entries || []).length), "var(--gold)")}
+      </div>
+      <div style="display:flex;flex-direction:column;gap:5px">${planEntryRows(plan.entries)}</div>
+      <div style="font-size:11px;color:var(--faint);margin-top:9px;line-height:1.45">${T("plan.notLogged")}</div>
+      <!-- Which button is the big one follows the calendar, not the feature:
+           on today or a day gone by, the thing you came for is to DO it; on
+           a Friday four days out, the thing you came for is to change it,
+           and a full-width Start on a day you cannot train yet is one
+           mis-tap from a session logged on the wrong date. Both are always
+           here either way. -->
+      <div style="display:flex;gap:8px;margin-top:11px">
+        ${day > today
+          ? `<button data-action="plan-edit" data-id="${esc(plan.id)}" class="pb-btn pb-ghost" style="flex:1;padding:11px 0;font-size:13.5px">
+              ${icon("pencil", 15)} ${T("plan.editPlan")}
+            </button>
+            <button data-action="plan-start" data-id="${esc(plan.id)}" title="${T("plan.start")}" class="pb-btn pb-ghost" style="flex-shrink:0;padding:11px 13px;color:var(--gold)">${icon("play", 15)}</button>`
+          : `<button data-action="plan-start" data-id="${esc(plan.id)}" class="pb-btn pb-gold" style="flex:1;padding:11px 0;font-size:13.5px">
+              ${icon("play", 15)} ${T("plan.start")}
+            </button>
+            <button data-action="plan-edit" data-id="${esc(plan.id)}" title="${T("plan.editPlan")}" class="pb-btn pb-ghost" style="flex-shrink:0;padding:11px 13px">${icon("pencil", 15)}</button>`}
+        <button data-action="plan-delete" data-id="${esc(plan.id)}" title="${T("plan.deletePlan")}" class="pb-btn pb-ghost" style="flex-shrink:0;padding:11px 13px;color:var(--red)">${icon("trash-2", 15)}</button>
+      </div>
+
+    </div>` : "";
+
+  /* the parked half-finished day, if this is the day it belongs to */
+  const draft = parked ? `<div style="padding:0 14px 12px">
+      ${logged.length || plan ? `<div class="pb-hairline" style="margin:0 0 12px"></div>` : ""}
+      <div style="display:flex;align-items:center;gap:7px;margin-bottom:8px">
+        <div class="pb-label" style="flex:1;min-width:0">${T("draft.badge")}</div>
+        ${chip(TN("exercise", (parked.entries || []).length), "var(--gold)")}
+      </div>
+      <button data-action="resume-draft" data-id="${esc(parked.id)}" class="pb-btn pb-ghost" style="width:100%;padding:10px 0;font-size:13px;border-color:rgba(233,185,73,.45);color:var(--gold)">
+        ${icon("pencil", 14)} ${T("draft.continue")}
+      </button>
+    </div>` : "";
+
+  /* and when the day holds nothing at all, the one or two things worth
+     doing to it — which are not the same thing before and after it */
+  let empty = "";
+  if (!logged.length && !plan && !parked) {
+    const planBtn = `<button data-action="plan-day" data-d="${day}" class="pb-btn ${past ? "pb-ghost" : "pb-gold"}" style="flex:1;padding:12px 0;font-size:13.5px">
+      ${icon("calendar-plus", 15)} ${T("plan.planDay")}
+    </button>`;
+    const logBtn = `<button data-action="log-day" data-d="${day}" class="pb-btn ${past ? "pb-gold" : "pb-ghost"}" style="flex:1;padding:12px 0;font-size:13.5px">
+      ${icon("plus", 15)} ${T("plan.logDay")}
+    </button>`;
+    empty = `<div style="padding:0 14px 13px">
+      <div style="font-size:12.5px;color:var(--faint);line-height:1.5;margin-bottom:11px">${T(past ? "plan.emptyPast" : "plan.emptyFuture")}</div>
+      <div style="display:flex;gap:8px">${past ? logBtn : planBtn}${day === today ? logBtn : ""}</div>
+    </div>`;
+  }
+
+  return `<div class="pb-card" style="margin-bottom:14px;overflow:hidden">
+    ${head}${trained}${planned}${draft}${empty}
+  </div>`;
+}
+
+/* ── THE WEEK AHEAD, IN A LIST ────────────────────────────────────────
+   The calendar shows a month of hollow dots; this says what they are.
+   It is the surface for the thing the whole feature exists for — sitting
+   down on a Sunday and laying out the week — so it reads forwards from
+   today and keeps missed days on the end, where they can be tidied away
+   rather than nagging from the middle of the list. */
+const PLAN_HORIZON = 21;   // days ahead the upcoming list looks
+
+function renderPlanList(log) {
+  const today = todayStr();
+  const horizon = addDays(today, PLAN_HORIZON);
+  const all = plansSorted(state.plans);
+  const upcoming = all.filter((p) => p.date >= today && p.date <= horizon);
+  const missed = all.filter((p) => p.date < today && !log.some((e) => e.date === p.date));
+
+  const row = (p, stale) => {
+    const sets = planSetCount(p);
+    const away = daysBetween(today, p.date);
+    const when = p.date === today ? T("plan.today")
+      : away === 1 ? T("plan.tomorrowShort")
+      : fmtDate(p.date, { weekday: "short", day: "numeric", month: "short" });
+    return `<button data-action="plan-open" data-d="${esc(p.date)}" style="width:100%;display:flex;align-items:center;gap:10px;padding:10px 12px;text-align:left;color:var(--text);opacity:${stale ? 0.5 : 1};border-top:1px solid var(--border-soft)">
+      ${icon("calendar-check", 14, `style="color:${stale ? "var(--faint)" : "var(--gold)"};flex-shrink:0"`)}
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.name ? esc(p.name) : when}</div>
+        <div style="font-size:11px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.name ? when + " · " : ""}${TN("move", (p.entries || []).length)}${sets ? " · " + T("plan.nSets", { n: sets }) : ""}${stale ? " · " + T("plan.missed") : ""}</div>
+      </div>
+      ${icon("chevron-right", 14, 'style="color:var(--faint);flex-shrink:0"')}
+    </button>`;
+  };
+
+  return `<div class="pb-card" style="overflow:hidden;margin-bottom:14px">
+    <button data-action="plan-day" data-d="${ui.calDay && ui.calDay >= today ? ui.calDay : today}" style="width:100%;display:flex;align-items:center;gap:9px;padding:11px 12px;color:var(--gold);text-align:left">
+      ${icon("calendar-plus", 15, 'style="flex-shrink:0"')}
+      <span style="flex:1;font-size:13.5px;font-weight:600">${T("plan.planADay")}</span>
+      <span style="font-size:11px;color:var(--faint)">${upcoming.length ? T("plan.nAhead", { n: upcoming.length }) : T("cal.noneYet")}</span>
+    </button>
+    ${upcoming.map((p) => row(p, false)).join("")}
+    ${missed.map((p) => row(p, true)).join("")}
+  </div>`;
+}
+
+/* The Calendar tab: the month, the day you tapped, what is planned, the
+   deloads, and — underneath all of it — the volume readout the tab was
+   originally built around. Planning sits on top because it is the thing
+   you come here to DO; the volume numbers are what you come here to READ. */
+function renderCalendarTab(log, library, settings, currentWeek) {
+  const rolling = rollingWeeks();
+  const week = ui.volumeWeek;
+  const anchor = ui.volAnchor || todayStr();
+  const range = rolling ? windowEnding(anchor) : weekRange(week, settings.startDate);
+
+  return `<div class="">
+    ${renderCalendar(log, library, dayMarks(log, library), planMarks(state.plans), range,
+      rolling ? T("vol.legendWindow") : T("vol.legendWeek", { n: week }))}
+    ${renderDayCard(log, library, settings)}
+    ${renderPlanList(log)}
+    ${renderDeloadPlanner()}
+    ${renderVolume(log, library, settings, currentWeek)}
+  </div>`;
 }
 
 function renderVolume(log, library, settings, currentWeek) {
@@ -1932,10 +2349,7 @@ function renderVolume(log, library, settings, currentWeek) {
       : (week === currentWeek ? " · " + T("vol.thisWeek") : ""));
 
   return `<div class="">
-    ${renderCalendar(log, library, dayMarks(log, library), range,
-      rolling ? T("vol.legendWindow") : T("vol.legendWeek", { n: week }))}
-    ${renderDeloadPlanner()}
-
+    ${sectionTitle(T("vol.title"))}
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
       <button data-action="vol-prev" class="pb-btn pb-ghost" style="width:32px;height:32px;flex-shrink:0">${icon("chevron-left", 16)}</button>
       <div style="flex:1;min-width:0;text-align:center">
@@ -3030,38 +3444,72 @@ function exWindowEditBody(f, library) {
 
 /* ─────────────────────── WORKOUT SHEET (new day) ──────────────────── */
 
+/* One window, two jobs. `draft.planning` turns the workout sheet into the
+   PLAN builder: the same picker, the same presets, the same set list and
+   the same "beat last time" card, writing a dated intention instead of a
+   logged day. Reusing it is not a shortcut — deciding what to do and
+   writing down what you did are the same shape, and the only screen that
+   has ever known that shape is this one. What changes is what the numbers
+   MEAN when you leave, and that is a branch in commitWorkout, not here.
+
+   The one real difference in the form itself: a plan may keep exercises
+   with no numbers on them ("Wednesday: these six lifts, weights on the
+   day"), where a workout drops them. */
 function renderWorkoutSheet(draft, library, log, settings, unit) {
+  const planning = !!draft.planning;
   const wk = rollingWeeks() ? null : weekOf(draft.date, settings.startDate);
   /* when editing an existing day, its own rows already live in the log — drop
      them from the comparison base so the "vs your best" preview isn't counting
      the very rows being edited. */
   const baseLog = draft.editing ? log.filter((e) => !(draft.originalIds || []).includes(e.id)) : log;
   const combined = [...baseLog, ...draft.entries.map((e) => ({ ...e, date: draft.date }))];
-  const badges = computeBadges(combined);
+  const badges = planning ? {} : computeBadges(combined);
 
   /* entries with no numbers yet (typically dropped in from a preset) don't get
-     saved and don't count toward the workout — they're a "fill me in" prompt. */
+     saved and don't count toward the workout — they're a "fill me in" prompt.
+     A PLAN keeps them: naming the lifts and leaving the weights for the day is
+     a plan, not an unfinished one. */
   const filledCount = draft.entries.filter(entryHasData).length;
   const emptyCount = draft.entries.length - filledCount;
-  const saveLabel = filledCount ? T(draft.editing ? "wo.updateN" : "wo.saveN", { n: filledCount })
+  const saveLabel = planning
+    ? (draft.entries.length ? T("plan.saveN", { n: draft.entries.length }) : T("plan.nothingYet"))
+    : filledCount ? T(draft.editing ? "wo.updateN" : "wo.saveN", { n: filledCount })
     : draft.entries.length ? T("wo.fillIn")
     : T("wo.nothingYet");
+
 
   const entries = draft.entries.map((e) => {
     const b = badges[e.id] || {};
     const empty = !entryHasData(e);
-    return `<div class="pb-card" style="display:flex;align-items:center;margin-bottom:8px;overflow:hidden${empty ? ";border:1px dashed rgba(233,185,73,.55)" : ""}">
+    /* An entry started from a plan carries its target, and the card counts
+       the target down as the sets go in. It is the only thing on this
+       screen that is not a record of something — hence the hollow ring
+       rather than a filled bar down the side. */
+    const res = entryPlanResult(e);
+    /* the count is for set lists; a cardio target is one line and the
+       "To do" above already is that line */
+    const planLine = res && e.plan && e.plan.sets
+      ? `<div style="display:flex;align-items:center;gap:6px;font-size:11px;color:${res.done >= res.total ? "var(--green)" : "var(--steel)"};margin-top:2px">
+          ${icon("target", 11, 'style="flex-shrink:0"')}
+          <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${T("plan.doneOf", { n: res.done, total: res.total })}${res.beat ? " · " + T("plan.nBeat", { n: res.beat }) : ""}</span>
+        </div>`
+      : "";
+    return `<div class="pb-card" style="display:flex;align-items:center;margin-bottom:8px;overflow:hidden${empty ? (res ? ";border:1px dashed var(--steel)" : ";border:1px dashed rgba(233,185,73,.55)") : ""}">
       <button data-action="edit-draft-entry" data-id="${e.id}" style="flex:1;min-width:0;display:flex;align-items:center;gap:10px;padding:12px 4px 12px 14px;text-align:left;color:var(--text)">
         <div style="width:4px;align-self:stretch;border-radius:2px;background:${colorFor(e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, library, e.muscle))}"></div>
         <div style="flex:1;min-width:0">
           <div style="font-weight:600;font-size:14px">${esc(exLabel(e.exercise))}</div>
-          <div style="font-size:12px;color:${empty ? "var(--gold)" : "var(--muted)"}">
-            ${empty
-              ? (e.kind === "cardio" ? T("wo.noDataCardio")
+          <div style="font-size:12px;color:${empty ? (res ? "var(--muted)" : "var(--gold)") : "var(--muted)"}">
+            ${planning
+              ? planEntryLine(e)
+              : empty
+              ? (res ? T("plan.toDo", { target: planTargetLine(e.plan, unitOf(e)) })
+                : e.kind === "cardio" ? T("wo.noDataCardio")
                 : isDetailed(e) ? T("wo.noDataSets")
                 : T("wo.noData"))
               : entrySummary(e, unit)}
           </div>
+          ${planning ? "" : planLine}
         </div>
         ${b.metric != null ? `<div class="pb-num" style="font-weight:700;font-size:16px;color:${b.badge === "pr" ? "var(--gold)" : "var(--text)"}">${b.metric}</div>` : ""}
         ${icon("pencil", 14, 'style="color:var(--faint);flex-shrink:0"')}
@@ -3070,20 +3518,25 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
     </div>`;
   }).join("");
 
+
   return fullScreen(50, `
     <div style="display:flex;align-items:center;gap:10px;padding:14px 16px 10px;border-bottom:1px solid var(--border-soft)">
-      <button data-action="close-worksheet" title="${draft.editing ? T("wo.close") : T("wo.closeKeep")}" style="color:var(--muted);padding:4px">${icon("x", 21)}</button>
-      <div class="pb-num" style="font-size:19px;font-weight:700;flex:1">${draft.editing ? T("wo.edit") : T("wo.new")}</div>
-      ${wk ? chip(T("common.week", { n: wk }), "var(--gold)") : ""}
+      <button data-action="close-worksheet" title="${planning ? T("plan.closeKeep") : draft.editing ? T("wo.close") : T("wo.closeKeep")}" style="color:var(--muted);padding:4px">${icon("x", 21)}</button>
+      <div class="pb-num" style="font-size:19px;font-weight:700;flex:1">${planning ? (draft.planId ? T("plan.edit") : T("plan.new")) : draft.editing ? T("wo.edit") : T("wo.new")}</div>
+      ${wk ? chip(T("common.week", { n: wk }), planning ? "var(--steel)" : "var(--gold)") : ""}
       ${draft.editing ? `<button data-action="delete-day" title="${T("wo.deleteDay")}" style="color:var(--red);padding:4px">${icon("trash-2", 19)}</button>` : ""}
+      ${planning && draft.planId ? `<button data-action="plan-delete" data-id="${esc(draft.planId)}" title="${T("plan.deletePlan")}" style="color:var(--red);padding:4px">${icon("trash-2", 19)}</button>` : ""}
     </div>
 
     <div class="pb-scroll" data-scrollkey="worksheet" style="flex:1;overflow-y:auto;padding:14px 16px 120px">
-      ${field(T("wo.date"), `<input type="date" class="pb-input" data-bind="draft.date" value="${esc(draft.date)}">`)}
+      ${planning ? `<div style="display:flex;gap:10px">
+        <div style="flex:1.2">${field(T("wo.date"), `<input type="date" class="pb-input" data-bind="draft.date" value="${esc(draft.date)}">`)}</div>
+        <div style="flex:1">${field(T("plan.name"), `<input class="pb-input" data-bind="draft.name" value="${esc(draft.name || "")}" placeholder="${T("plan.namePlaceholder")}">`)}</div>
+      </div>` : field(T("wo.date"), `<input type="date" class="pb-input" data-bind="draft.date" value="${esc(draft.date)}">`)}
 
-      ${sectionTitle(T("wo.exercisesThis"))}
+      ${sectionTitle(planning ? T("plan.exercisesPlanned") : T("wo.exercisesThis"))}
       ${draft.entries.length === 0 ? `<div class="pb-card" style="padding:20px;text-align:center;color:var(--faint);font-size:13px;line-height:1.5;margin-bottom:10px">
-        ${T("wo.emptyHint")}
+        ${T(planning ? "plan.emptyHint" : "wo.emptyHint")}
       </div>` : ""}
       ${entries}
 
@@ -3091,21 +3544,23 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
         ${icon("plus", 17)} ${T("wo.addExercise")}
       </button>
 
-      ${renderTimerList()}
+      ${planning ? "" : renderTimerList()}
     </div>
 
     <div style="position:absolute;bottom:0;left:0;right:0;padding:12px 16px 18px;background:linear-gradient(transparent, var(--bg) 30%)">
-      ${emptyCount ? `<div style="font-size:11.5px;color:var(--faint);text-align:center;margin-bottom:8px;line-height:1.45">${emptyCount === 1 ? T("wo.stillNeedOne") : T("wo.stillNeed", { n: TN("exercise", emptyCount) })}</div>` : ""}
-      ${!draft.editing && draft.entries.length ? `<div style="font-size:11.5px;color:var(--faint);text-align:center;margin-bottom:8px;line-height:1.45">${T("wo.draftNote")}</div>` : ""}
+      ${!planning && emptyCount ? `<div style="font-size:11.5px;color:var(--faint);text-align:center;margin-bottom:8px;line-height:1.45">${emptyCount === 1 ? T("wo.stillNeedOne") : T("wo.stillNeed", { n: TN("exercise", emptyCount) })}</div>` : ""}
+      ${planning && draft.entries.length ? `<div style="font-size:11.5px;color:var(--faint);text-align:center;margin-bottom:8px;line-height:1.45">${T("plan.footNote")}</div>` : ""}
+      ${!planning && !draft.editing && draft.entries.length ? `<div style="font-size:11.5px;color:var(--faint);text-align:center;margin-bottom:8px;line-height:1.45">${T("wo.draftNote")}</div>` : ""}
       ${draft.entries.length ? `<button data-action="save-as-preset" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:14.5px;margin-bottom:8px">
         ${icon("bookmark-plus", 16)} ${T("preset.saveTitle")}
       </button>` : ""}
-      <button data-action="commit-workout" class="pb-btn pb-gold" style="width:100%;padding:15px 0;font-size:16px;opacity:${filledCount ? 1 : 0.5}">
+      <button data-action="commit-workout" class="pb-btn pb-gold" style="width:100%;padding:15px 0;font-size:16px;opacity:${(planning ? draft.entries.length : filledCount) ? 1 : 0.5}">
         ${icon("check", 18)} ${saveLabel}
       </button>
     </div>
   `, "workoutSheet");
 }
+
 
 /* exercise picker with quick-add (name + muscle only, like the sheet) */
 function renderPickerList(library) {
@@ -3228,7 +3683,11 @@ function entryComputed() {
     const prev = earlier.reduce((m, e) => { const v = metricOf(e); return v == null ? m : Math.max(m, v); }, -Infinity);
     preview = prev === -Infinity ? "first" : metric > prev ? "pr" : metric === prev ? "match" : "below";
   }
-  const valid = entryHasData(f);
+  /* A workout entry has to carry numbers to be worth saving. A PLANNED one
+     does not: "Wednesday, and lat pulldowns are in it" is a decision, and
+     the weight can wait for the day. */
+  const planning = isDraft && !!(ui.workoutSheet && ui.workoutSheet.planning);
+  const valid = planning || entryHasData(f);
   return { cardio, metric, preview, valid };
 }
 
@@ -3236,15 +3695,53 @@ function entryComputed() {
    Deliberately the same shape as the exercise list on the workout day: an
    "Add set" button on top, then one tappable card per set that opens the
    little editor. Add as many as you want, edit or drop any of them. */
-function renderSetList(f, unit) {
+/* ── GHOST SETS: THE PLAN, STANDING IN THE SET LIST ───────────────────
+   When an entry carries a target, the sets you have not done yet are
+   already in the list — outlined, greyed, in position. Each one has two
+   taps on it and they mean different things:
+
+     · the row itself opens the set editor WITH THE TARGET LOADED, which
+       is where you change it because the fourth rep felt like the eighth;
+     · the ✓ logs the set exactly as planned.
+
+   Both are a tap. NOTHING IS EVER FILLED IN FOR YOU — the same rule the
+   suggestion card lives under, and it matters more here, not less: a plan
+   is three days old and was written by somebody who had not warmed up
+   yet. What the ghost rows buy is the thing that made the whole feature
+   worth building — a session that went to plan is one tap per set instead
+   of three fields per set — without ever writing a number into the log
+   that a finger did not put there.
+
+   Done sets keep their target beside them and say, quietly, whether they
+   cleared it. */
+function ghostSetRow(t, n, unit) {
+  return `<div class="pb-card" style="display:flex;align-items:center;margin-bottom:8px;overflow:hidden;border:1px dashed var(--border);background:transparent">
+    <button data-action="plan-load-set" data-i="${n - 1}" style="flex:1;min-width:0;display:flex;align-items:center;gap:11px;padding:11px 4px 11px 12px;text-align:left;color:var(--muted)">
+      <div class="pb-num" style="width:24px;height:24px;border-radius:7px;border:1px dashed var(--border);display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:700;color:var(--faint);flex-shrink:0">${n}</div>
+      <div style="flex:1;min-width:0">
+        <div class="pb-num" style="font-weight:700;font-size:14.5px;color:var(--muted)">${esc(t.reps)} × ${esc(t.weight)} ${unit}</div>
+        <div style="font-size:11px;color:var(--faint)">${T("plan.ghostLabel")}</div>
+      </div>
+    </button>
+    <button data-action="plan-tick" data-i="${n - 1}" title="${T("plan.ghostDo")}" style="flex-shrink:0;padding:12px 14px;color:var(--gold);align-self:stretch;border-left:1px solid var(--border-soft)">${icon("check", 17)}</button>
+  </div>`;
+}
+
+const VERDICT_COLOR = { beat: "var(--gold)", hit: "var(--green)", under: "var(--muted)" };
+
+function renderSetList(f, unit, planning) {
   const list = f.setList || [];
   const filled = filledSets(f);
   const top = bestSet(filled);
+  const targets = (f.plan && f.plan.sets) || [];
+  const res = entryPlanResult(f);
 
   const rows = list.map((s, i) => {
     const m = est1RM(+s.weight, +s.reps);
     const isBest = top && s.id === top.id && filled.length > 1;
     const blank = !setHasData(s);
+    const t = targets[i];
+    const v = t ? setVerdict(s, t) : null;
     return `<div class="pb-card" style="display:flex;align-items:center;margin-bottom:8px;overflow:hidden${blank ? ";border:1px dashed rgba(233,185,73,.55)" : ""}">
       <button data-action="edit-set" data-id="${s.id}" style="flex:1;min-width:0;display:flex;align-items:center;gap:11px;padding:11px 4px 11px 12px;text-align:left;color:var(--text)">
         <div class="pb-num" style="width:24px;height:24px;border-radius:7px;background:var(--surface2);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:700;color:var(--muted);flex-shrink:0">${i + 1}</div>
@@ -3252,24 +3749,36 @@ function renderSetList(f, unit) {
           <div style="font-weight:600;font-size:14.5px;color:${blank ? "var(--gold)" : "var(--text)"}">
             ${blank ? T("sets.fillIn") : `${esc(s.reps)} × ${esc(s.weight)} ${unit}`}
           </div>
-          ${!blank ? `<div style="font-size:11.5px;color:var(--faint)">${T("sets.est1rm", { n: m })}${s.rpe ? ` · RPE ${esc(s.rpe)}` : ""}</div>` : ""}
+          ${!blank ? `<div style="font-size:11.5px;color:var(--faint)">${T("sets.est1rm", { n: m })}${s.rpe ? ` · RPE ${esc(s.rpe)}` : ""}${t ? ` · ${T("plan.vsTarget", { target: `${esc(t.reps)} × ${esc(t.weight)}` })}` : ""}</div>` : ""}
         </div>
+        ${v ? `<span style="font-size:10px;font-weight:700;letter-spacing:.05em;color:${VERDICT_COLOR[v]};flex-shrink:0;white-space:nowrap">${T("plan.v." + v)}</span>` : ""}
         ${isBest ? chip(T("sets.best"), "var(--gold)") : ""}
-        ${icon("pencil", 14, 'style="color:var(--faint);flex-shrink:0"')}
+        ${icon("pencil", 14, 'style="color:var(--faint);flex-shrink:0;margin-left:2px"')}
       </button>
       <button data-action="remove-set" data-id="${s.id}" title="${T("sets.remove")}" style="flex-shrink:0;padding:12px 13px;color:var(--red);align-self:stretch;border-left:1px solid var(--border-soft)">${icon("x", 16)}</button>
     </div>`;
   }).join("");
 
+  /* everything the plan still wants, in position, waiting to be ticked off */
+  const ghosts = targets.slice(list.length)
+    .map((t, k) => ghostSetRow(t, list.length + k + 1, (f.plan && f.plan.unit) || unit)).join("");
+
+  const head = res
+    ? sectionTitle(T("sets.titleN", { n: filled.length }),
+        `<span style="font-size:11px;color:${res.done >= res.total ? "var(--green)" : "var(--steel)"}">${T("plan.doneOf", { n: res.done, total: res.total })}</span>`)
+    : sectionTitle(filled.length ? T("sets.titleN", { n: filled.length }) : T("sets.title"),
+        list.length ? `<span style="font-size:11px;color:var(--faint)">${T("sets.tapToEdit")}</span>` : "");
+
   return `
-    ${sectionTitle(filled.length ? T("sets.titleN", { n: filled.length }) : T("sets.title"), list.length ? `<span style="font-size:11px;color:var(--faint)">${T("sets.tapToEdit")}</span>` : "")}
+    ${head}
     <button data-action="add-set" class="pb-btn pb-ghost" style="width:100%;padding:13px 0;border-style:dashed;margin-bottom:10px">
       ${icon("plus", 17)} ${T("sets.add")}
     </button>
-    ${list.length ? rows : `<div class="pb-card" style="padding:20px;text-align:center;color:var(--faint);font-size:13px;line-height:1.55;margin-bottom:10px">
-      ${T("sets.none")}
+    ${list.length || ghosts ? rows + ghosts : `<div class="pb-card" style="padding:20px;text-align:center;color:var(--faint);font-size:13px;line-height:1.55;margin-bottom:10px">
+      ${T(planning ? "plan.setsNone" : "sets.none")}
     </div>`}`;
 }
+
 
 /* ── THE SUGGESTION, WHERE YOU ARE STANDING ───────────────────────────
    It goes at the TOP OF THE EXERCISE WINDOW, above Add set, not inside
@@ -3350,11 +3859,63 @@ function renderSuggestion(form, unit) {
     </div>`);
 }
 
+/* ── THE TARGET, WHERE THE SUGGESTION WOULD HAVE BEEN ─────────────────
+   The "beat last time" card and this one answer the same question — what
+   am I going for — and only one of them can be right at a time. When the
+   entry carries a plan the question is already answered, days ago, by the
+   person who sat down and answered it; re-offering two ways past last
+   session on top of that is the app arguing with its own user. So the
+   plan card TAKES THE SLOT, and the suggestion comes back the moment
+   there is no plan (which includes any exercise you add to the day that
+   the plan never mentioned — those are ordinary entries and get the
+   ordinary card). */
+function renderPlanTarget(f, unit) {
+  const t = f.plan;
+  if (!t) return "";
+  const res = entryPlanResult(f);
+  const cardio = !t.sets;
+  const complete = res && res.done >= res.total;
+  const beat = res && res.beat > 0;
+
+  /* One line, and only when it is worth a line. How the ghost rows work is
+     worth saying before the first set and never again — the same rule that
+     keeps the rest of the app from narrating itself mid-set — and the
+     running count is already on the set list right below. What is left is
+     the moment the plan is finished, which is the one thing here worth
+     interrupting for. */
+  const status = complete
+    ? `<div style="font-size:12px;color:${beat ? "var(--gold)" : "var(--green)"};line-height:1.5;margin-top:8px">
+        ${beat ? T("plan.allDoneBeat", { n: res.beat }) : res.under ? T("plan.allDoneSome") : T("plan.allDone")}
+      </div>`
+    : !res || res.done === 0
+    ? `<div style="font-size:12px;color:var(--faint);line-height:1.5;margin-top:8px">${T(cardio ? "plan.cardioHint" : "plan.setsHint")}</div>`
+    : "";
+
+  const load = cardio && (!res || !res.done)
+    ? `<button data-action="plan-fill-cardio" class="pb-btn pb-ghost" style="width:100%;padding:10px 0;font-size:13px;margin-top:10px">
+        ${icon("download", 14)} ${T("plan.loadTarget")}
+      </button>`
+    : "";
+
+  return `<div class="pb-card2" style="padding:12px 13px;margin-bottom:14px;border-color:var(--steel)">
+    <div style="display:flex;align-items:baseline;gap:8px">
+      <div class="pb-label" style="flex:1;min-width:0;color:var(--steel)">${T("plan.targetLabel")}</div>
+      <div class="pb-num" style="font-size:14px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${planTargetLine(t, unit)}</div>
+    </div>
+    ${status}
+    ${load}
+  </div>`;
+}
+
 function renderEntryFields(form, unit) {
   const { f, isDraft } = form;
   const { cardio, metric, preview, valid } = entryComputed();
   const detailed = isDetailed(f);
   const eUnit = unitOf(f);
+  /* the form doesn't need a flag of its own: an entry being drafted always
+     belongs to the sheet that is open behind it, and that sheet knows
+     whether it is writing a plan or a day */
+  const planning = isDraft && !!(ui.workoutSheet && ui.workoutSheet.planning);
 
   const inputs = cardio
     ? `<div style="display:flex;gap:10px">
@@ -3362,7 +3923,7 @@ function renderEntryFields(form, unit) {
         <div style="flex:1">${field(T("entry.intensity"), `<input class="pb-input" ${NUM} data-bind="entry.intensity" value="${esc(f.intensity)}" placeholder="—">`)}</div>
       </div>`
     : detailed
-    ? renderSetList(f, eUnit)
+    ? renderSetList(f, eUnit, planning)
     : `<div style="display:flex;gap:10px">
         <div style="flex:1">${field(T("entry.totalSets"), `<input class="pb-input" ${NUM} data-bind="entry.sets" value="${esc(f.sets)}" placeholder="—">`)}</div>
         <div style="flex:1">${field(T("entry.topReps"), `<input class="pb-input" ${NUM} data-bind="entry.reps" value="${esc(f.reps)}" placeholder="—">`)}</div>
@@ -3388,7 +3949,7 @@ function renderEntryFields(form, unit) {
       <button data-action="close-entry" style="color:var(--muted);padding:4px">${icon("arrow-left", 21)}</button>
       <div style="flex:1">
         <div class="pb-num" style="font-size:18px;font-weight:700;line-height:1.15">${esc(exLabel(f.exercise))}</div>
-        <div style="font-size:11.5px;color:var(--faint)">${cardio ? T("entry.cardioSub") : detailed ? T("entry.setsSub") : T("entry.topSetSub")}</div>
+        <div style="font-size:11.5px;color:var(--faint)">${planning ? T("plan.entrySub") : cardio ? T("entry.cardioSub") : detailed ? T("entry.setsSub") : T("entry.topSetSub")}</div>
       </div>
       <button data-action="delete-entry-form" style="color:var(--red);padding:6px">${icon("trash-2", 18)}</button>
     </div>
@@ -3396,7 +3957,7 @@ function renderEntryFields(form, unit) {
     <div class="pb-scroll" data-scrollkey="entryform" style="flex:1;overflow-y:auto;padding:10px 16px 120px">
       ${!isDraft ? field("Date", `<input type="date" class="pb-input" data-bind="entry.date" value="${esc(f.date)}">`) : ""}
       ${convert}
-      ${renderSuggestion(form, unit)}
+      ${f.plan ? renderPlanTarget(f, eUnit) : renderSuggestion(form, unit)}
       ${inputs}
       ${field(T("entry.notes"), `<textarea class="pb-input" rows="2" data-bind="entry.notes" placeholder="—" style="resize:none">${esc(f.notes)}</textarea>`,
         detailed ? T("entry.notesHint") : "")}
@@ -3418,12 +3979,12 @@ function renderEntryFields(form, unit) {
         ${T("entry.highestNote")}
       </div>` : ""}
 
-      ${renderTimerList()}
+      ${planning ? "" : renderTimerList()}
     </div>
 
     <div style="position:absolute;bottom:0;left:0;right:0;padding:12px 16px 18px;background:linear-gradient(transparent, var(--bg) 30%)">
       <button id="entrySaveBtn" data-action="save-entry-form" ${valid ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:15px 0;font-size:16px;opacity:${valid ? 1 : 0.45}">
-        ${icon("check", 18)} ${isDraft ? T("entry.addToWorkout") : T("common.saveChanges")}
+        ${icon("check", 18)} ${planning ? T("plan.addToPlan") : isDraft ? T("entry.addToWorkout") : T("common.saveChanges")}
       </button>
     </div>
   `, "entryForm");
@@ -3437,7 +3998,13 @@ function renderSetForm(form, unit) {
   /* the same target as the card behind this sheet, one line, one tap —
      only on a NEW set, because correcting an old one is not a decision
      about what to lift next */
-  const sug = isNew && ui.entryForm ? setSuggestion(ui.entryForm.f, ui.entryForm.isDraft) : null;
+  /* …and nothing at all while the plan still has a set at this position:
+     that set already has a target and it is drawn on the ghost row you
+     tapped to get here. Past the end of the plan the card comes back,
+     because a bonus set is a decision again. */
+  const planned = ui.entryForm && ui.entryForm.f.plan && ui.entryForm.f.plan.sets;
+  const stillPlanned = planned && index < planned.length;
+  const sug = isNew && ui.entryForm && !stillPlanned ? setSuggestion(ui.entryForm.f, ui.entryForm.isDraft) : null;
   /* both of them, same as the card behind this sheet — minus whichever one
      the open set already IS, which is what you get by tapping it there */
   const opts = sug && sug.kind === "step" && !sug.done
@@ -4561,11 +5128,16 @@ const newBodyRow = () => ({ id: uid(), date: todayStr(), weight: "", waist: "", 
    form is open right now. This is a deliberate park, that is a safety net.) */
 
 function stashDayDraft(draft) {
-  if (!draft || draft.editing || !draft.entries.length) return;
+  if (!draft || draft.editing || draft.planning || !draft.entries.length) return;
   const row = {
     id: draft.draftId || uid(),
     date: draft.date,
     entries: clone(draft.entries),
+    /* which plan this day is answering, so picking the day back up still
+       knows what to consume when it is finally saved. The targets
+       themselves ride on the entries and were never in danger. */
+    planIds: draft.planIds || [],
+    planName: draft.planName || "",
     savedAt: Date.now(),
   };
   const rest = (state.dayDrafts || []).filter((d) => d.id !== row.id);
@@ -4576,6 +5148,11 @@ function stashDayDraft(draft) {
 function closeWorksheet() {
   const draft = ui.workoutSheet;
   ui.workoutSheet = null; ui.picking = false; ui.entryForm = null; ui.setForm = null;
+  /* Backing out of a PLAN keeps it. There is nothing to protect anyone
+     from — a plan is not the log, and a half-written plan for Wednesday is
+     still a plan for Wednesday. Emptying it out deletes it, same as a
+     parked day. */
+  if (draft && draft.planning) { commitPlan(draft); return; }
   if (draft && !draft.editing && draft.entries.length) stashDayDraft(draft);
   else if (draft && draft.draftId) dropDayDraft(draft.draftId);   // emptied it out
   else render();
@@ -4597,7 +5174,90 @@ function volStep(dir) {
   render();
 }
 
+/* ── A PLAN IS SAVED, A DAY IS LOGGED ─────────────────────────────────
+   Same window, same button, two different destinations, and the whole
+   feature turns on the difference: this one writes to state.plans, which
+   nothing counts, and the one below writes to state.log, which everything
+   counts.
+
+   A plan keeps its blank entries. "Wednesday: these six lifts, weights on
+   the day" is a finished plan — dropping the ones without numbers, the
+   way commitWorkout drops them, would delete most of it. And emptying a
+   plan out is how you delete one, exactly as it is for a parked day. */
+function commitPlan(draft) {
+  const id = draft.planId || uid();
+  const entries = clone(draft.entries) || [];
+  ui.workoutSheet = null;
+  /* land on the day you just planned, on the tab that keeps it */
+  ui.tab = "log"; ui.logSeg = "calendar";
+  ui.calDay = draft.date;
+  ui.calMonth = monthOf(draft.date);
+  ui.volAnchor = draft.date;
+  ui.volumeWeek = Math.max(1, weekOf(draft.date, state.settings.startDate));
+  const rest = (state.plans || []).filter((p) => p.id !== id);
+  if (!entries.length) { patch({ plans: rest }); return; }
+  patch({ plans: plansSorted([...rest, {
+    id, date: draft.date, name: (draft.name || "").trim(),
+    entries, createdAt: draft.createdAt || Date.now(),
+  }]) });
+}
+
+/* Turn one planned exercise into the blank entry that will log it. The
+   numbers do not come across — they become a TARGET on the side, which is
+   the only thing standing between "I planned 8 × 100" and a log that
+   says you lifted it. */
+function planEntryToDraftEntry(pe) {
+  const e = newEntry(pe.exercise, pe.muscle, pe.kind);
+  e.unit = pe.unit || state.settings.units;
+  if (pe.notes) e.notes = pe.notes;
+  const t = planTargetOf(pe);
+  if (t) e.plan = t;
+  return e;
+}
+
+/* ── THE PAYOFF ───────────────────────────────────────────────────────
+   Saving a day you planned is the one moment the app has something worth
+   saying, so it says it once, here, and then never again unprompted. It
+   counts planned sets, not lifts, because that is the unit the plan was
+   written in — and it counts them against the WHOLE plan, including the
+   exercises that never got filled in and are about to be dropped from the
+   log, so skipping the last lift cannot quietly improve the score. */
+function renderPlanResult() {
+  const r = ui.planResult;
+  if (!r) return "";
+  const s = r.sum;
+  const all = s.hit >= s.total;
+  const pct = s.total ? Math.round((s.hit / s.total) * 100) : 0;
+
+  const lifts = (r.lifts || []).map((l) => `<div style="display:flex;align-items:center;gap:9px;padding:9px 0;border-bottom:1px solid var(--border-soft)">
+      <span style="width:8px;height:8px;border-radius:4px;background:${colorFor(l.muscle)};flex-shrink:0"></span>
+      <span style="flex:1;min-width:0;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(exLabel(l.exercise))}</span>
+      <span class="pb-num" style="font-size:13px;font-weight:700;color:${l.res.beat ? "var(--gold)" : l.res.hit >= l.res.total ? "var(--green)" : "var(--muted)"};flex-shrink:0">
+        ${l.res.hit}/${l.res.total}${l.res.beat ? " ↑" : ""}
+      </span>
+    </div>`).join("");
+
+  return sheet(T("plan.resultTitle"), "planResult", `
+    <div style="text-align:center;padding:4px 0 14px">
+      <div class="pb-num" style="font-size:44px;font-weight:700;line-height:1;color:${all ? "var(--gold)" : "var(--text)"}">${s.hit}<span style="font-size:22px;color:var(--muted)">/${s.total}</span></div>
+      <div style="font-size:13px;color:var(--muted);margin-top:5px">${T("plan.resultSets")}</div>
+      <div style="font-size:13.5px;color:${all ? "var(--gold)" : "var(--muted)"};margin-top:9px;line-height:1.5;font-weight:600">
+        ${all ? (s.beat ? T("plan.resultAllBeat", { n: s.beat }) : T("plan.resultAll"))
+          : pct >= 50 ? T("plan.resultMost", { n: s.total - s.hit })
+          : T("plan.resultSome")}
+      </div>
+      ${s.bonus ? `<div style="font-size:12px;color:var(--muted);margin-top:5px">${T("plan.resultBonus", { n: s.bonus })}</div>` : ""}
+    </div>
+    ${lifts ? `<div class="pb-card2" style="padding:2px 13px 0;margin-bottom:14px">${lifts}</div>` : ""}
+    <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin-bottom:14px">${T("plan.resultFoot")}</div>
+    <button data-action="plan-result-close" class="pb-btn pb-gold" style="width:100%;padding:14px 0;font-size:15px">
+      ${icon("check", 17)} ${T("common.done")}
+    </button>
+  `, 110);
+}
+
 function commitWorkout(draft) {
+  if (draft && draft.planning) return commitPlan(draft);
   /* only real, filled-in entries get logged — blank preset placeholders are
      dropped so they never pollute the history with empty rows. */
   const filled = draft.entries.filter(entryHasData).map(syncEntry);
@@ -4618,13 +5278,30 @@ function commitWorkout(draft) {
   }
   const stamped = filled.map((e, i) => ({ ...e, date: draft.date, createdAt: Date.now() + i }));
   const draftId = draft.draftId;
+  const planIds = draft.planIds || [];
+  /* The score is read off the WHOLE draft, blanks included, before they are
+     dropped: a planned lift you never touched is a target you did not hit,
+     not a target that never existed. */
+  const sum = planIds.length ? dayPlanResult(draft.entries) : null;
   ui.workoutSheet = null;
-  /* a draft that just became a real day stops being a draft */
+  if (sum) ui.planResult = {
+    date: draft.date, name: draft.planName || "", sum,
+    lifts: draft.entries.filter((e) => e.plan).map((e) => ({
+      exercise: e.exercise,
+      muscle: e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, state.library, e.muscle),
+      res: entryPlanResult(e),
+    })),
+  };
+  /* a draft that just became a real day stops being a draft, and the plan
+     that described the day has had its day — the targets it handed out are
+     riding along inside the entries now, so nothing is lost by dropping it */
   patch({
     log: [...state.log, ...stamped],
     dayDrafts: draftId ? (state.dayDrafts || []).filter((d) => d.id !== draftId) : state.dayDrafts,
+    plans: planIds.length ? (state.plans || []).filter((p) => !planIds.includes(p.id)) : state.plans,
   });
 }
+
 
 const actions = {
   "nav": (el) => {
@@ -4684,9 +5361,11 @@ const actions = {
   "log-seg": (el) => {
     ui.logSeg = el.dataset.id;
     /* opening the tab always lands on now, whichever way "now" is counted */
-    if (ui.logSeg === "volume") {
+    if (ui.logSeg === "calendar") {
       ui.volumeWeek = weekOf(todayStr(), state.settings.startDate);
       ui.volAnchor = todayStr();
+      ui.calDay = todayStr();
+      ui.calMonth = monthOf(todayStr());
     }
     render();
   },
@@ -4696,6 +5375,121 @@ const actions = {
      tapping the calendar is for. */
   "vol-prev": () => { volStep(-1); },
   "vol-next": () => { volStep(1); },
+
+  /* ── planning ─────────────────────────────────────────────────────
+     Every one of these opens or closes the same workout window; what
+     differs is the flag it carries and therefore where the numbers end
+     up. There is no plan editor, on purpose — see renderWorkoutSheet. */
+
+  /* start a plan for a day, or reopen the one already on it */
+  "plan-day": (el) => {
+    const day = el.dataset.d || todayStr();
+    const existing = planOn(state.plans, day);
+    ui.tab = "log"; ui.logSeg = "calendar";
+    ui.calDay = day; ui.calMonth = monthOf(day);
+    ui.workoutSheet = existing
+      ? { date: existing.date, name: existing.name || "", entries: clone(existing.entries),
+          planning: true, planId: existing.id, createdAt: existing.createdAt }
+      : { date: day, name: "", entries: [], planning: true };
+    ui.picking = false; ui.entryForm = null; ui.setForm = null;
+    render();
+  },
+  "plan-edit": (el) => {
+    const p = (state.plans || []).find((x) => x.id === el.dataset.id);
+    if (!p) return;
+    ui.tab = "log"; ui.logSeg = "calendar";
+    ui.calDay = p.date; ui.calMonth = monthOf(p.date);
+    ui.workoutSheet = { date: p.date, name: p.name || "", entries: clone(p.entries),
+      planning: true, planId: p.id, createdAt: p.createdAt };
+    ui.picking = false; ui.entryForm = null; ui.setForm = null;
+    render();
+  },
+  "plan-delete": (el) => {
+    if (!confirm(T("plan.confirmDelete"))) return;
+    const id = el.dataset.id;
+    if (ui.workoutSheet && ui.workoutSheet.planId === id) {
+      ui.workoutSheet = null; ui.picking = false; ui.entryForm = null; ui.setForm = null;
+    }
+    patch({ plans: (state.plans || []).filter((p) => p.id !== id) });
+  },
+  /* jump to the day a plan is on, without opening anything */
+  "plan-open": (el) => {
+    const d = el.dataset.d;
+    ui.tab = "log"; ui.logSeg = "calendar";
+    ui.calDay = d; ui.calMonth = monthOf(d);
+    ui.volAnchor = d; ui.volumeWeek = Math.max(1, weekOf(d, state.settings.startDate));
+    render();
+  },
+  /* log a day that is not today, from the calendar — the long way round
+     used to be New Workout and then correcting the date */
+  "log-day": (el) => {
+    const d = el.dataset.d;
+    const parked = (state.dayDrafts || []).find((x) => x.date === d);
+    ui.workoutSheet = parked
+      ? { date: parked.date, entries: clone(parked.entries), draftId: parked.id, planIds: parked.planIds || [], planName: parked.planName || "" }
+      : { date: d, entries: [] };
+    ui.picking = false; ui.entryForm = null; ui.setForm = null;
+    render();
+  },
+
+  /* ── DOING the plan ───────────────────────────────────────────────
+     The plan's numbers do NOT come across as logged sets. Each entry
+     arrives blank with the target on the side, which is what makes the
+     difference between "I planned this" and "I lifted this" survive all
+     the way into the history. */
+  "plan-start": (el) => {
+    const p = (state.plans || []).find((x) => x.id === el.dataset.id);
+    if (!p) return;
+    const today = todayStr();
+    /* there is only ever one workout for today — the same rule
+       actions["log-exercise"] follows, for the same reason */
+    if (!ui.workoutSheet || ui.workoutSheet.planning) {
+      const parked = (state.dayDrafts || []).find((d) => d.date === today);
+      ui.workoutSheet = parked
+        ? { date: parked.date, entries: clone(parked.entries), draftId: parked.id, planIds: parked.planIds || [], planName: parked.planName || "" }
+        : { date: today, entries: [] };
+    }
+    const w = ui.workoutSheet;
+    /* A day can answer more than one plan — "Push A" and "Arms" were
+       planned separately and you are doing both — so the sheet carries a
+       LIST of the plans it is consuming, and every one of them is cleared
+       when the day is saved. Leaving the second one behind would have it
+       showing as missed forever. Starting the same plan twice must still
+       not deal its exercises out twice. */
+    w.planIds = w.planIds || [];
+    if (!w.planIds.includes(p.id)) {
+      w.entries = [...w.entries, ...(p.entries || []).map(planEntryToDraftEntry)];
+      w.planIds.push(p.id);
+      if (!w.planName) w.planName = p.name || "";
+    }
+    ui.tab = "log"; ui.logSeg = "history";
+    ui.picking = false; ui.entryForm = null; ui.setForm = null;
+    render();
+  },
+  /* the ✓ on a ghost row: log this set exactly as it was planned */
+  "plan-tick": (el) => {
+    const f = ui.entryForm && ui.entryForm.f;
+    const t = f && f.plan && f.plan.sets && f.plan.sets[+el.dataset.i];
+    if (!t) return;
+    ui.entryForm.f = syncEntry({ ...f, setList: [...(f.setList || []), newSet(t.reps, t.weight, "")] });
+    render();
+  },
+  /* the ghost row itself: open the editor with the target loaded, because
+     the honest answer is usually "that, but one rep short" */
+  "plan-load-set": (el) => {
+    const f = ui.entryForm && ui.entryForm.f;
+    const t = f && f.plan && f.plan.sets && f.plan.sets[+el.dataset.i];
+    if (!t) return;
+    ui.setForm = { s: newSet(t.reps, t.weight, ""), isNew: true, index: (f.setList || []).length };
+    render();
+  },
+  "plan-fill-cardio": () => {
+    const f = ui.entryForm && ui.entryForm.f;
+    if (!f || !f.plan || f.plan.sets) return;
+    ui.entryForm.f = { ...f, minutes: f.plan.minutes, intensity: f.plan.intensity };
+    render();
+  },
+  "plan-result-close": () => { ui.planResult = null; render(); },
 
   /* ── calendar & deloads ───────────────────────────────────────────── */
   "cal-prev": () => { ui.calMonth = addMonths(ui.calMonth || monthOf(todayStr()), -1); render(); },
@@ -4717,6 +5511,10 @@ const actions = {
     }
     const existing = deloadOn(state.deloads, day);
     if (existing) { ui.deloadForm = { ...existing, isNew: false }; render(); return; }
+    /* the ordinary tap now means two things at once, which is the whole
+       point of the day card: it still picks the period the numbers below
+       are read over, and it opens what is actually on that day */
+    ui.calDay = day;
     /* in rolling mode the day you tapped becomes the LAST of the seven */
     ui.volAnchor = day;
     ui.volumeWeek = Math.max(1, weekOf(day, state.settings.startDate));
@@ -5012,7 +5810,7 @@ const actions = {
     const d = (state.dayDrafts || []).find((x) => x.id === el.dataset.id);
     if (!d) return;
     ui.tab = "log"; ui.logSeg = "history"; resetTransient();
-    ui.workoutSheet = { date: d.date, entries: clone(d.entries), draftId: d.id };
+    ui.workoutSheet = { date: d.date, entries: clone(d.entries), draftId: d.id, planIds: d.planIds || [], planName: d.planName || "" };
     ui.picking = false; ui.entryForm = null; ui.setForm = null;
     render();
   },
@@ -5338,12 +6136,13 @@ const actions = {
   },
   "save-entry-form": () => {
     const { isDraft } = ui.entryForm;
+    const planning = isDraft && !!(ui.workoutSheet && ui.workoutSheet.planning);
     /* drop half-typed placeholder sets and refresh the headline numbers before
        anything leaves the form */
     const f = syncEntry(isDetailed(ui.entryForm.f)
       ? { ...ui.entryForm.f, setList: filledSets(ui.entryForm.f) }
       : ui.entryForm.f);
-    if (!entryHasData(f)) return;
+    if (!planning && !entryHasData(f)) return;
     if (isDraft) {
       const exists = ui.workoutSheet.entries.some((x) => x.id === f.id);
       ui.workoutSheet.entries = exists
@@ -5381,6 +6180,7 @@ const actions = {
     else if (t === "groupSheet") ui.groupSheet = false;
     else if (t === "groupForm") ui.groupForm = null;
     else if (t === "deloadForm") ui.deloadForm = null;
+    else if (t === "planResult") ui.planResult = null;
     render();
   },
 };
@@ -5435,7 +6235,16 @@ function handleBind(el) {
   } else if (bind.startsWith("presetView.")) {
     ui.presetView[bind.slice(11)] = v;
   } else if (bind === "draft.date") {
+    /* one plan per day, kept true here rather than argued about on save:
+       moving a plan onto a day that already has one would otherwise
+       silently overwrite somebody's Wednesday. */
+    if (ui.workoutSheet.planning && v) {
+      const clash = (state.plans || []).find((p) => p.date === v && p.id !== ui.workoutSheet.planId);
+      if (clash) { alert(T("plan.clash", { date: fmtShort(v) })); render(); return; }
+    }
     ui.workoutSheet.date = v; render();
+  } else if (bind === "draft.name") {
+    ui.workoutSheet.name = v;
   } else if (bind === "progressSel") {
     ui.progressSelected = v;
     ui.chartView.main = null; ui.chartSel.main = null;   // a different lift is a different chart

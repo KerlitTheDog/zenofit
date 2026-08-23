@@ -546,6 +546,53 @@ function setSuggestion(f, isDraft) {
            base, ...bySmallestStep(options), unit: fu, now, done };
 }
 
+/* ── LAST TIME, IN FULL ───────────────────────────────────────────────
+   The card above names ONE set — the best of last session — because that is
+   the bar it is offering two ways over. One set is not the session. Four sets
+   that fell apart and four that held share a best set and were not the same
+   day's work, and it is the second, third and fourth you are actually stood
+   there trying to match. So they are all here, in the order they were done.
+
+   In the unit each was LOGGED in, never converted, which is the rule the rest
+   of the history reads back under — what you typed is what you read.
+
+   Read-only, deliberately. Everything else tappable in this window puts a
+   number in the log, and last week's set is not a number you did today; the
+   ways past it are the card above, and this is the record they came from. */
+function lastOuting(f, isDraft) {
+  if (!f) return null;
+  const earlier = earlierOutings(f, isDraft);
+  if (!earlier.length) return null;
+  /* the last DAY you trained it — two entries of the same lift on one day are
+     one session's work, so both are read, in the order they were done */
+  const date = earlier[earlier.length - 1].date;
+  const rows = [];
+  let note = "";
+  for (const e of earlier) {
+    if (e.date !== date) continue;
+    if (!note && e.notes) note = e.notes;
+    if (e.kind === "cardio") {
+      if (+e.minutes > 0 && +e.intensity > 0)
+        rows.push({ minutes: e.minutes, intensity: e.intensity, m: cardioScore(+e.minutes, +e.intensity) });
+      continue;
+    }
+    const u = unitOf(e);
+    if (isDetailed(e)) {
+      for (const st of filledSets(e))
+        rows.push({ reps: st.reps, weight: st.weight, rpe: st.rpe, unit: u, m: est1RM(+st.weight, +st.reps) });
+    } else if (+e.reps > 0 && +e.weight > 0) {
+      /* a top-set row from before per-set logging: one set is all that was
+         ever written down, and saying so beats showing it as if it were the lot */
+      rows.push({ reps: e.reps, weight: e.weight, rpe: e.rpe, unit: u,
+        m: est1RM(+e.weight, +e.reps), topOf: +e.sets > 0 ? +e.sets : null });
+    }
+  }
+  if (!rows.length) return null;
+  let best = null;
+  for (const r of rows) if (r.m != null && (best == null || r.m > best.m)) best = r;
+  return { date, rows, note, best };
+}
+
 /* "vs. Your Best" — compares against strictly earlier entries of the same
    exercise, exactly like the sheet's row-above MAXIFS window. */
 function computeBadges(log) {
@@ -2127,11 +2174,17 @@ function renderDayCard(log, library, settings) {
 
   /* the plan, if there is one — and whether it still has a day left to happen on */
   const planUnused = plan && past && !logged.length;
+  /* what is left of a plan this very day already started is not "not used" —
+     it is the rest of the session, still owed (see prunePlans) */
+  const planLeft = plan && plan.startedOn === day;
   const planned = plan ? `<div style="padding:0 14px 12px">
       ${logged.length ? `<div class="pb-hairline" style="margin:0 0 12px"></div>` : ""}
       <div style="display:flex;align-items:center;gap:7px;margin-bottom:8px">
         <div class="pb-label" style="flex:1;min-width:0">${plan.name ? esc(plan.name) : T("plan.badge")}</div>
-        ${planUnused ? chip(T("plan.missed")) : logged.length ? chip(T("plan.unused")) : chip(TN("move", (plan.entries || []).length), "var(--gold)")}
+        ${planLeft ? chip(T("plan.leftToDo", { n: (plan.entries || []).length }), "var(--gold)")
+          : planUnused ? chip(T("plan.missed"))
+          : logged.length ? chip(T("plan.unused"))
+          : chip(TN("move", (plan.entries || []).length), "var(--gold)")}
       </div>
       <div style="display:flex;flex-direction:column;gap:5px">${planEntryRows(plan.entries)}</div>
       <div style="font-size:11px;color:var(--faint);margin-top:9px;line-height:1.45">${T("plan.notLogged")}</div>
@@ -3859,6 +3912,42 @@ function renderSuggestion(form, unit) {
     </div>`);
 }
 
+/* The session behind that card, set by set. Sits under whichever of the two
+   cards took the slot above — a plan does not make last time less worth
+   knowing — and says nothing at all before the first time. */
+function renderLastTime(form) {
+  const { f, isDraft } = form;
+  const last = lastOuting(f, isDraft);
+  if (!last) return "";
+
+  const rows = last.rows.map((r, i) => {
+    const line = r.minutes != null
+      ? T("sug.cardioSet", { min: esc(r.minutes), rpe: esc(r.intensity) })
+      : `${esc(r.reps)} × ${esc(r.weight)} ${r.unit}`;
+    const side = [
+      r.topOf ? T("last.topOf", { n: r.topOf }) : "",
+      r.rpe ? `RPE ${esc(r.rpe)}` : "",
+      r.m != null ? T(r.minutes != null ? "last.pts" : "sets.est1rm", { n: r.m }) : "",
+    ].filter(Boolean).join(" · ");
+    return `<div style="display:flex;align-items:baseline;gap:9px;min-width:0">
+      <span class="pb-num" style="width:13px;flex-shrink:0;text-align:right;font-size:11.5px;color:var(--faint)">${i + 1}</span>
+      <span class="pb-num" style="font-size:13.5px;font-weight:600;color:var(--text);white-space:nowrap">${line}</span>
+      ${last.rows.length > 1 && r === last.best ? chip(T("sets.best"), "var(--gold)") : ""}
+      <span style="flex:1"></span>
+      ${side ? `<span class="pb-num" style="font-size:11px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${side}</span>` : ""}
+    </div>`;
+  }).join("");
+
+  return `<div class="pb-card2" style="padding:12px 13px;margin-bottom:14px">
+    <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:9px">
+      <div class="pb-label" style="flex:1;min-width:0">${T("last.title")}</div>
+      <div style="font-size:11px;color:var(--faint);white-space:nowrap">${fmtDate(last.date, { weekday: "short", day: "numeric", month: "short" })}</div>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:6px">${rows}</div>
+    ${last.note ? `<div style="font-size:11.5px;color:var(--muted);margin-top:10px;line-height:1.45;font-style:italic">${esc(last.note)}</div>` : ""}
+  </div>`;
+}
+
 /* ── THE TARGET, WHERE THE SUGGESTION WOULD HAVE BEEN ─────────────────
    The "beat last time" card and this one answer the same question — what
    am I going for — and only one of them can be right at a time. When the
@@ -3958,6 +4047,7 @@ function renderEntryFields(form, unit) {
       ${!isDraft ? field("Date", `<input type="date" class="pb-input" data-bind="entry.date" value="${esc(f.date)}">`) : ""}
       ${convert}
       ${f.plan ? renderPlanTarget(f, eUnit) : renderSuggestion(form, unit)}
+      ${renderLastTime(form)}
       ${inputs}
       ${field(T("entry.notes"), `<textarea class="pb-input" rows="2" data-bind="entry.notes" placeholder="—" style="resize:none">${esc(f.notes)}</textarea>`,
         detailed ? T("entry.notesHint") : "")}
@@ -5194,11 +5284,15 @@ function commitPlan(draft) {
   ui.calMonth = monthOf(draft.date);
   ui.volAnchor = draft.date;
   ui.volumeWeek = Math.max(1, weekOf(draft.date, state.settings.startDate));
+  const prev = (state.plans || []).find((p) => p.id === id);
   const rest = (state.plans || []).filter((p) => p.id !== id);
   if (!entries.length) { patch({ plans: rest }); return; }
   patch({ plans: plansSorted([...rest, {
     id, date: draft.date, name: (draft.name || "").trim(),
     entries, createdAt: draft.createdAt || Date.now(),
+    /* editing what is left of a part-done plan must not forget the day the
+       rest of it is owed to — see prunePlans */
+    ...(prev && prev.startedOn ? { startedOn: prev.startedOn } : {}),
   }]) });
 }
 
@@ -5206,14 +5300,28 @@ function commitPlan(draft) {
    numbers do not come across — they become a TARGET on the side, which is
    the only thing standing between "I planned 8 × 100" and a log that
    says you lifted it. */
-function planEntryToDraftEntry(pe) {
+function planEntryToDraftEntry(pe, planId, ix) {
   const e = newEntry(pe.exercise, pe.muscle, pe.kind);
   e.unit = pe.unit || state.settings.units;
   if (pe.notes) e.notes = pe.notes;
   const t = planTargetOf(pe);
   if (t) e.plan = t;
+  /* Which planned lift this entry IS, kept only while it is a draft. Saving a
+     day half-way through has to tell a planned lift you have not reached from
+     one you never planned, and `plan` alone cannot say: a plan that named the
+     exercise and left the weights for the day hands over no target at all.
+     Taken back off on the way into the log (stripPlanLink), so nothing outside
+     the workout sheet ever sees it. */
+  if (planId != null) { e.planFrom = planId; e.planIx = ix; }
   return e;
 }
+
+/* the same link, removed before a draft entry becomes a log row */
+const stripPlanLink = (e) => {
+  if (e.planFrom === undefined && e.planIx === undefined) return e;
+  const { planFrom, planIx, ...rest } = e;
+  return rest;
+};
 
 /* ── THE PAYOFF ───────────────────────────────────────────────────────
    Saving a day you planned is the one moment the app has something worth
@@ -5256,12 +5364,67 @@ function renderPlanResult() {
   `, 110);
 }
 
+/* ── SAVING A DAY IS NOT SAYING YOU ARE DONE WITH IT ──────────────────
+   The plan a day was answering used to be deleted whole the moment the day
+   was saved, on the assumption that saving is the end of the session. It is
+   not. People save after the first lift and carry on — and doing that used
+   to cost them the rest of the plan twice over: the untouched entries were
+   dropped as blanks (rightly, they hold no numbers) and the plan that would
+   have put them back was gone with them.
+
+   So a plan is consumed LIFT BY LIFT. What you filled in is done with; what
+   is still sitting blank in the sheet has not happened yet and stays on the
+   plan, ready to be picked up — reopening the day hydrates it straight back
+   in (see edit-day). A lift you DELETED from the sheet is gone from both,
+   because taking it out is the decision not to do it. Only when nothing is
+   left over does the plan disappear. */
+function prunePlans(draft) {
+  const planIds = draft.planIds || [];
+  if (!planIds.length) return { plans: state.plans, open: 0 };
+  let open = 0;
+  const next = [];
+  for (const p of state.plans || []) {
+    if (!planIds.includes(p.id)) { next.push(p); continue; }
+    const stillOpen = new Set(draft.entries
+      .filter((e) => e.planFrom === p.id && !entryHasData(e))
+      .map((e) => e.planIx));
+    const left = (p.entries || []).filter((_, i) => stillOpen.has(i));
+    if (!left.length) continue;                     // this plan has had its day
+    open += left.length;
+    /* the day the work actually happened on, which is what lets that day pick
+       the remainder back up — and what keeps an untouched plan out of an
+       unrelated edit of some other day it happens to sit on */
+    next.push({ ...p, entries: left, startedOn: draft.date });
+  }
+  return { plans: next, open };
+}
+
+/* the card shown once when a plan is finally spent — read off the WHOLE
+   draft, blanks included, so skipping the last lift cannot quietly improve
+   the score */
+const planResultOf = (draft, sum) => ({
+  date: draft.date, name: draft.planName || "", sum,
+  lifts: draft.entries.filter((e) => e.plan).map((e) => ({
+    exercise: e.exercise,
+    muscle: e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, state.library, e.muscle),
+    res: entryPlanResult(e),
+  })),
+});
+
 function commitWorkout(draft) {
   if (draft && draft.planning) return commitPlan(draft);
   /* only real, filled-in entries get logged — blank preset placeholders are
-     dropped so they never pollute the history with empty rows. */
-  const filled = draft.entries.filter(entryHasData).map(syncEntry);
+     dropped so they never pollute the history with empty rows. A blank one
+     that came from a plan is not lost with them: prunePlans leaves it on the
+     plan, where it was already waiting. */
+  const filled = draft.entries.filter(entryHasData).map((e) => syncEntry(stripPlanLink(e)));
   if (!filled.length) return;   // nothing to save yet — leave the sheet open
+  const planIds = draft.planIds || [];
+  const { plans, open } = prunePlans(draft);
+  /* Scoring a session you are still in the middle of would be the app calling
+     a day finished that its user hasn't, so the result waits for the plan to
+     actually run out. */
+  const sum = planIds.length && !open ? dayPlanResult(draft.entries) : null;
   if (draft.editing) {
     /* editing a logged day: replace that day's old rows with the current set,
        keeping each surviving row's original createdAt so ordering is stable. */
@@ -5273,32 +5436,21 @@ function commitWorkout(draft) {
       createdAt: e.createdAt != null ? e.createdAt : now + i,
     }));
     ui.workoutSheet = null;
-    patch({ log: [...kept, ...stamped] });
+    if (sum) ui.planResult = planResultOf(draft, sum);
+    patch({ log: [...kept, ...stamped], plans });
     return;
   }
   const stamped = filled.map((e, i) => ({ ...e, date: draft.date, createdAt: Date.now() + i }));
   const draftId = draft.draftId;
-  const planIds = draft.planIds || [];
-  /* The score is read off the WHOLE draft, blanks included, before they are
-     dropped: a planned lift you never touched is a target you did not hit,
-     not a target that never existed. */
-  const sum = planIds.length ? dayPlanResult(draft.entries) : null;
   ui.workoutSheet = null;
-  if (sum) ui.planResult = {
-    date: draft.date, name: draft.planName || "", sum,
-    lifts: draft.entries.filter((e) => e.plan).map((e) => ({
-      exercise: e.exercise,
-      muscle: e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, state.library, e.muscle),
-      res: entryPlanResult(e),
-    })),
-  };
-  /* a draft that just became a real day stops being a draft, and the plan
-     that described the day has had its day — the targets it handed out are
-     riding along inside the entries now, so nothing is lost by dropping it */
+  if (sum) ui.planResult = planResultOf(draft, sum);
+  /* a draft that just became a real day stops being a draft. Whatever is left
+     of the plan it was answering rides on in state.plans; the targets it has
+     already handed out are inside the entries now. */
   patch({
     log: [...state.log, ...stamped],
     dayDrafts: draftId ? (state.dayDrafts || []).filter((d) => d.id !== draftId) : state.dayDrafts,
-    plans: planIds.length ? (state.plans || []).filter((p) => !planIds.includes(p.id)) : state.plans,
+    plans,
   });
 }
 
@@ -5458,7 +5610,7 @@ const actions = {
        not deal its exercises out twice. */
     w.planIds = w.planIds || [];
     if (!w.planIds.includes(p.id)) {
-      w.entries = [...w.entries, ...(p.entries || []).map(planEntryToDraftEntry)];
+      w.entries = [...w.entries, ...(p.entries || []).map((pe, i) => planEntryToDraftEntry(pe, p.id, i))];
       w.planIds.push(p.id);
       if (!w.planName) w.planName = p.name || "";
     }
@@ -5825,7 +5977,24 @@ const actions = {
       .sort((a, b) => a.createdAt - b.createdAt)
       .map((e) => ({ ...e }));
     if (!entries.length) return;
-    ui.workoutSheet = { date, entries, editing: true, originalIds: entries.map((e) => e.id) };
+    /* A day saved half-way through still has the rest of its plan waiting on
+       it. The lifts you never reached are hydrated back in — blank, with
+       their targets, exactly as plan-start deals them — so "save now, carry
+       on after" is one flow instead of a plan you have to start again.
+       Matched on startedOn, not on the plan's own date: pressing Start on
+       tomorrow's plan logs it today, and today is where the rest of it is
+       owed. */
+    const carry = (state.plans || []).filter((pl) => pl.startedOn === date);
+    const ghosts = [];
+    for (const pl of carry)
+      for (let i = 0; i < (pl.entries || []).length; i++)
+        ghosts.push(planEntryToDraftEntry(pl.entries[i], pl.id, i));
+    ui.workoutSheet = {
+      date, entries: [...entries, ...ghosts],
+      editing: true, originalIds: entries.map((e) => e.id),
+      planIds: carry.map((pl) => pl.id),
+      planName: (carry.find((pl) => pl.name) || {}).name || "",
+    };
     ui.picking = false; ui.entryForm = null;
     render();
   },

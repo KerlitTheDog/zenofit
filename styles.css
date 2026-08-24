@@ -8,6 +8,10 @@ html, body { height: 100%; }
 /* no double-tap-to-zoom (still allows tapping and scrolling); pinch-zoom is
    blocked by the viewport tag + the gesture handlers in app.js */
 html { touch-action: manipulation; -webkit-text-size-adjust: 100%; }
+/* the app is exactly one screen tall and scrolls inside itself, so anything
+   the page itself does with an overscroll — Android's pull-to-refresh, iOS's
+   rubber band under the bottom nav — is the frame appearing to come loose */
+html, body { overscroll-behavior: none; }
 body { background: var(--outer); }
 
 /* ── THEMES ────────────────────────────────────────────────────────────
@@ -38,6 +42,101 @@ body { background: var(--outer); }
   --gold:#a9761a; --gold-ink:#ffffff;
   --red:#c23b32; --blue:#3f74c4; --green:#4f8a46; --steel:#5f6b78;
 }
+/* ── VIEWPORT ENGINE ───────────────────────────────────────────────────
+   Every measurement that has to answer to the device — how wide the frame
+   is, how tall, and how much of it the phone's own furniture (status bar,
+   notch, home indicator) is standing on — is resolved here into a handful
+   of custom properties, and everything downstream is written in terms of
+   them. `applyViewport()` in app.js writes the two that need measuring
+   (--pb-scale and --pb-frame-w); the rest is arithmetic the browser does
+   on its own, which is why a rotation or a collapsing browser toolbar
+   needs no re-render to be picked up.
+
+   The rule the engine is built around: **a phone is drawn exactly as the
+   design was drawn.** Up to VP_FLUID_MAX (480pt, in app.js — the sizing
+   constants live there, with the code that uses them, and are deliberately
+   not restated here) the frame simply takes the width it is handed and
+   --pb-scale stays 1, so every handset from a 320pt SE to a 440pt Pro Max
+   keeps today's type sizes and spacing — the only thing that changes on a
+   wide one is that the dead grey bars either side of it are gone. Scaling
+   is held back for screens no phone has (tablets, desktop), where a 480pt
+   strip marooned in the middle of a 1440pt display is not what "fits the
+   device" means.
+
+   Safe-area insets are kept as two pairs on purpose. The *-raw values are
+   what the OS reported, in real screen pixels, and belong outside the
+   frame; --pb-sat / --pb-sab are the same numbers in the frame's own
+   units (divided by the scale, since the frame is laid out at logical
+   size and scaled afterwards) and are what padding inside it must use.
+   The insets are spent as padding *within* the frame rather than as a
+   margin around it, so --bg still paints edge to edge under the status
+   bar the way it does now, and only the content moves out of the way. */
+:root{
+  /* written by applyViewport(); these are the values that hold until it runs */
+  --pb-scale:1;
+  --pb-frame-w:100%;
+
+  /* what the OS says it is standing on, in screen pixels. Declared flat here
+     and filled in below only where env() is understood: a browser too old for
+     it would otherwise hand every calc() built on these an invalid value, and
+     a padding that fails at computed-value time computes to nothing at all. */
+  --pb-sat-raw:0px;
+  --pb-sab-raw:0px;
+  --pb-sal-raw:0px;
+  --pb-sar-raw:0px;
+
+  /* the same, in the units the frame is laid out in */
+  --pb-sat:calc(var(--pb-sat-raw) / var(--pb-scale));
+  --pb-sab:calc(var(--pb-sab-raw) / var(--pb-scale));
+
+  /* derived chrome — the numbers the old code repeated by hand. Each one is
+     the measurement it always was plus whatever the device is taking. */
+  --pb-nav-h:calc(67px + var(--pb-sab));         /* bottom nav, all in */
+  --pb-header-pt:calc(14px + var(--pb-sat));     /* top padding of any top bar */
+  --pb-content-pb:calc(var(--pb-nav-h) + 53px);  /* scroll clearance under the nav */
+  --pb-fab-b:calc(var(--pb-nav-h) + 25px);
+  --pb-toast-b:calc(var(--pb-nav-h) + 19px);
+
+  --pb-vh:100vh;
+}
+/* dvh tracks the mobile browser chrome opening and closing; the 100vh above
+   is the answer for anything too old to know the unit (iOS < 15.4), where
+   applyViewport() overwrites it with a measured height instead. */
+@supports (height: 100dvh){ :root{ --pb-vh:100dvh; } }
+@supports (top: env(safe-area-inset-top)){
+  :root{
+    --pb-sat-raw:env(safe-area-inset-top, 0px);
+    --pb-sab-raw:env(safe-area-inset-bottom, 0px);
+    --pb-sal-raw:env(safe-area-inset-left, 0px);
+    --pb-sar-raw:env(safe-area-inset-right, 0px);
+  }
+}
+
+/* the real screen: full bleed, holds the frame in the middle of it, and is
+   the one place the raw insets are spent (they are only ever non-zero
+   left/right on a device turned sideways, which is also the one case the
+   frame cannot simply be centred through) */
+.pb-viewport{
+  height:var(--pb-vh);
+  background:var(--outer);
+  display:flex; justify-content:center; overflow:hidden;
+  padding-left:var(--pb-sal-raw); padding-right:var(--pb-sar-raw);
+}
+/* the frame: laid out at logical size, then scaled as one piece. Height is
+   the viewport divided by the scale precisely so that height × scale lands
+   back on the viewport — the app is always exactly one screen tall. */
+.pb-frame{
+  flex:0 0 auto;
+  width:var(--pb-frame-w);
+  height:calc(var(--pb-vh) / var(--pb-scale));
+  position:relative; display:flex; flex-direction:column;
+  border-left:1px solid var(--border-soft); border-right:1px solid var(--border-soft);
+  transform-origin:top center;
+}
+/* only ever set on a screen bigger than any phone — a transform on the root
+   would otherwise cost every phone a compositing layer to scale by 1 */
+.pb-scaled .pb-frame{ transform:scale(var(--pb-scale)); }
+
 .pb-root{ background:var(--bg); color:var(--text);
   font-family:'Barlow',system-ui,-apple-system,sans-serif; }
 .pb-num{ font-family:'Barlow Condensed','Barlow',sans-serif; letter-spacing:.01em; }
@@ -166,8 +265,10 @@ input[type="date"].pb-input::-webkit-date-and-time-value{
 /* Portrait-only. This is a phone app; a page can't take an OS-level orientation
    lock on iOS, so when a phone is turned landscape (short viewport) we hide the
    app and ask for portrait. Rotating back restores it instantly, state intact.
-   The max-height gate keeps tablets/desktop in landscape unaffected. */
-@media (orientation: landscape) and (max-height: 500px){
+   The max-height gate keeps tablets/desktop in landscape unaffected, and the
+   coarse-pointer gate keeps a short desktop window out of it too — a browser
+   dragged down to 480px tall is not a phone lying on its side. */
+@media (orientation: landscape) and (max-height: 500px) and (pointer: coarse){
   #app{ display:none; }
   body::after{
     content:"📱  Turn your phone upright to keep going";

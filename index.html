@@ -2,7 +2,13 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
+  <!-- viewport-fit=cover lets the app paint under the notch and the home
+       indicator; app.js then measures env(safe-area-inset-*) and hands the
+       numbers to the layout, so content stays out from under them (see the
+       VIEWPORT ENGINE blocks in app.js and styles.css). interactive-widget
+       keeps the on-screen keyboard from covering the bottom of the app:
+       the viewport shrinks to what is left, so the save bar rides above it. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
   <title>Powerbuild Tracker</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

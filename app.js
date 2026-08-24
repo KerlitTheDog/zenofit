@@ -1389,11 +1389,133 @@ function playLayerExit(root, node) {
   setTimeout(() => node.remove(), 260);
 }
 
+/* ═════════════════════════ VIEWPORT ENGINE ══════════════════════════
+   One place decides how big the app is on the device it woke up on, and
+   the rest of the file asks it in CSS rather than guessing in pixels. The
+   variables it writes, and what styles.css builds out of them, are
+   documented in the VIEWPORT ENGINE block there; this half is only the
+   two answers that cannot be reached from CSS — how much to scale by, and
+   how wide the frame is — plus the listeners that keep them current.
+
+   The shape of the answer:
+
+     frameW = min(availW, VP_FLUID_MAX)
+     scale  = clamp(1, min(availW / frameW, availH / VP_REF_H), VP_SCALE_MAX)
+
+   On any phone frameW *is* availW, so the ratio is 1 and the clamp pins
+   the scale at 1 — the design renders at the size it was drawn, on a 320pt
+   SE and on a 440pt Pro Max alike, and the wide handsets simply stop
+   leaving grey bars either side. Past VP_FLUID_MAX the frame refuses to
+   keep widening (a 900pt-wide phone layout is a bad layout) and grows by
+   scaling instead, held back by the height as well as the width so a short
+   desktop window gets a frame that still fits in it rather than one
+   cropped at the bottom.
+
+   Nothing here re-renders. It writes custom properties on <html>; the
+   frame, the safe-area padding and every clearance stacked on the bottom
+   nav are calc()s off those, so a rotation, a keyboard, or Safari's
+   toolbar sliding away is absorbed by the browser at layout time. */
+
+const VP_FLUID_MAX = 480;   // widest the frame is allowed to be laid out at
+const VP_REF_H     = 820;   // the logical height a scaled-up frame aims for
+const VP_SCALE_MAX = 1.35;  // ceiling, so a 4K monitor doesn't get a billboard
+
+/* what the frame is currently scaled by. 1 on every phone — but pointer
+   coordinates arrive in screen pixels while the frame is laid out in its
+   own, so anything doing arithmetic between the two divides by this. */
+let vpScale = 1;
+let vpFrameW = 0;   // the width last written, so a no-op update stays a no-op
+
+/* env() is only legible from CSS, so put the question to a throwaway element
+   and read the numbers back off its computed padding. It is out of flow,
+   hidden and untappable, and the largest an inset has ever made it is a few
+   dozen pixels in the corner it is pinned to, so it costs the page nothing. */
+let vpProbe = null;
+function safeInsets() {
+  if (!vpProbe) {
+    vpProbe = document.createElement("div");
+    vpProbe.setAttribute("aria-hidden", "true");
+    vpProbe.style.cssText =
+      "position:absolute;top:0;left:0;width:0;height:0;visibility:hidden;pointer-events:none;" +
+      "padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) " +
+      "env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)";
+    document.body.appendChild(vpProbe);
+  }
+  const s = getComputedStyle(vpProbe);
+  return {
+    t: parseFloat(s.paddingTop) || 0, r: parseFloat(s.paddingRight) || 0,
+    b: parseFloat(s.paddingBottom) || 0, l: parseFloat(s.paddingLeft) || 0,
+  };
+}
+
+const dvhSupported = !!(window.CSS && CSS.supports && CSS.supports("height", "100dvh"));
+
+/* The height the scale is allowed to reason about. An on-screen keyboard
+   takes half the viewport with it, and a frame that quietly shrank every
+   time someone typed a number would be worse than one that never fitted:
+   while a field has focus the last keyboard-free height stands. Width is
+   never affected by a keyboard, so it needs no such care. */
+let vpBaseH = 0;
+const vpTyping = () => {
+  const el = document.activeElement;
+  return !!el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable);
+};
+
+function applyViewport() {
+  const root = document.documentElement;
+  const ins = safeInsets();
+  const availW = Math.max(240, (root.clientWidth || window.innerWidth || 360) - ins.l - ins.r);
+  const availH = Math.max(320, root.clientHeight || window.innerHeight || 640);
+  if (!vpBaseH || !vpTyping()) vpBaseH = availH;
+
+  const frameW = Math.min(availW, VP_FLUID_MAX);
+  const scale = Math.min(VP_SCALE_MAX, Math.max(1, Math.min(availW / frameW, vpBaseH / VP_REF_H)));
+
+  const next = Math.round(scale * 1e4) / 1e4;
+  /* nothing changed is the common case — a scroll that moved the browser
+     toolbar, a keyboard opening — and writing the same values back would
+     invalidate style for no reason, and risk a ResizeObserver loop. Only a
+     browser without dvh has to carry on regardless: there --pb-vh is a
+     measured number rather than a unit, and it is what just moved. */
+  if (next === vpScale && frameW === vpFrameW && dvhSupported) return;
+
+  vpScale = next; vpFrameW = frameW;
+  root.style.setProperty("--pb-scale", String(vpScale));
+  root.style.setProperty("--pb-frame-w", frameW + "px");
+  document.body.classList.toggle("pb-scaled", vpScale !== 1);
+
+  /* the dvh fallback for browsers that never learned the unit: innerHeight is
+     what is actually visible there, and it moves with the browser chrome */
+  if (!dvhSupported) root.style.setProperty("--pb-vh", (window.innerHeight || availH) + "px");
+}
+
+/* Run straight off the event rather than through requestAnimationFrame: rAF
+   is paused while a tab is in the background, and a phone that was rotated
+   with the app in the background would come back the wrong size. The work is
+   one style read and three property writes, and resize fires at most once a
+   frame, so there is nothing here worth deferring. pageshow covers the
+   back/forward cache, which restores a page at whatever size it left. */
+window.addEventListener("resize", applyViewport);
+window.addEventListener("orientationchange", applyViewport);
+window.addEventListener("pageshow", applyViewport);
+if (window.visualViewport) window.visualViewport.addEventListener("resize", applyViewport);
+/* the braces to that belt: a ResizeObserver on the document element is told
+   the layout viewport changed by the layout engine itself, so it catches the
+   cases a resize event is known to miss or fire late for — an Android soft
+   keyboard, a desktop window still being dragged, a split-screen divider */
+if (window.ResizeObserver) new ResizeObserver(applyViewport).observe(document.documentElement);
+
 /* ═════════════════════════════ RENDER ══════════════════════════════ */
 
 const app = document.getElementById("app");
 
 function render() {
+  /* re-measure the device first. The engine's own listeners normally have
+     this done already and the call costs nothing when nothing has changed —
+     but a frame is about to be built against these numbers, so this is the
+     one moment they are worth being certain of. */
+  applyViewport();
+
   /* drop any still-animating layer from a previous, rapid render */
   app.querySelectorAll(".pb-trans").forEach((el) => el.remove());
 
@@ -1423,15 +1545,17 @@ function render() {
   const tab = ui.tab;
   const titles = { log: T("title.log"), progress: T("title.progress"), library: T("title.library"), timer: T("title.timers"), calc: T("title.calc") };
 
-  /* the frame is locked to exactly one viewport height (100dvh tracks mobile
-     browser chrome) so the content area scrolls internally and the bottom nav
-     is always visible without scrolling the page */
-  let html = `<div style="height:100vh;height:100dvh;background:var(--outer);display:flex;justify-content:center;overflow:hidden">
-  <div class="pb-root" style="width:100%;max-width:412px;height:100%;position:relative;display:flex;flex-direction:column;border-left:1px solid var(--border-soft);border-right:1px solid var(--border-soft)">`;
+  /* the frame is exactly one viewport tall so the content area scrolls
+     internally and the bottom nav is always visible without scrolling the
+     page. Both of its dimensions, and the scale it is drawn at, come from
+     the viewport engine above — see the VIEWPORT ENGINE block in styles.css
+     for what .pb-viewport / .pb-frame resolve to on a given device. */
+  let html = `<div class="pb-viewport">
+  <div class="pb-root pb-frame">`;
 
   /* header (non-home tabs) */
   if (tab !== "home") {
-    html += `<div style="display:flex;align-items:center;gap:10px;padding:14px 16px 10px;position:sticky;top:0;z-index:20;background:var(--bg);border-bottom:1px solid var(--border-soft)">
+    html += `<div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px;position:sticky;top:0;z-index:20;background:var(--bg);border-bottom:1px solid var(--border-soft)">
       <img src="logoC.png" alt="${T("a11y.logo")}" width="30" height="30" style="width:30px;height:30px;object-fit:contain;border-radius:8px;display:block;flex-shrink:0">
       <div class="pb-num" style="font-size:19px;font-weight:700;flex:1">${titles[tab]}</div>
       ${rollingWeeks() ? "" : chip(T("common.wkShort", { n: currentWeek }), "var(--gold)")}
@@ -1441,7 +1565,7 @@ function render() {
   }
 
   /* content */
-  html += `<div class="pb-scroll" data-scrollkey="main-${tab}" style="flex:1;min-height:0;overflow-y:auto;padding-bottom:120px">`;
+  html += `<div class="pb-scroll" data-scrollkey="main-${tab}" style="flex:1;min-height:0;overflow-y:auto;padding-bottom:var(--pb-content-pb)">`;
   if (tab === "home") html += renderHome(settings, currentWeek, unit);
   if (tab === "log") html += renderLog(log, library, badges, settings, unit, currentWeek);
   if (tab === "progress") html += renderProgress(log, library, goals, badges, settings, unit);
@@ -1453,7 +1577,7 @@ function render() {
   /* "time's up" banner — floats above the nav on whatever tab you're on, so a
      rest timer finishing while you're logging a set still gets your attention */
   if (ui.timerToast) {
-    html += `<div class="pb-sheet" style="position:absolute;left:12px;right:12px;bottom:86px;z-index:40">
+    html += `<div class="pb-sheet" style="position:absolute;left:12px;right:12px;bottom:var(--pb-toast-b);z-index:40">
       <div class="pb-card pb-timer-done" style="display:flex;align-items:center;gap:11px;padding:13px 14px;border-color:rgba(233,185,73,.55);background:var(--surface)">
         ${icon("bell-ring", 20, 'style="color:var(--gold);flex-shrink:0"')}
         <div style="flex:1;min-width:0">
@@ -1468,7 +1592,7 @@ function render() {
 
   /* FAB — always-visible overlay on Log */
   if (tab === "log" && !ui.workoutSheet) {
-    html += `<button data-action="fab" class="pb-btn pb-gold" style="position:absolute;right:18px;bottom:92px;width:56px;height:56px;border-radius:18px;box-shadow:0 8px 22px rgba(233,185,73,.35);z-index:30">${icon("plus", 26, 'stroke-width="2.6"')}</button>`;
+    html += `<button data-action="fab" class="pb-btn pb-gold" style="position:absolute;right:18px;bottom:var(--pb-fab-b);width:56px;height:56px;border-radius:18px;box-shadow:0 8px 22px rgba(233,185,73,.35);z-index:30">${icon("plus", 26, 'stroke-width="2.6"')}</button>`;
   }
 
   /* bottom nav */
@@ -1479,7 +1603,7 @@ function render() {
   ];
   /* a running timer puts a live dot on its nav icon from anywhere in the app */
   const timersRunning = (state.timers || []).some((t) => t.endsAt || t.doneAt);
-  html += `<div style="position:absolute;bottom:0;left:0;right:0;background:var(--nav-bg);backdrop-filter:blur(10px);border-top:1px solid var(--border-soft);display:flex;padding:8px 2px 14px;z-index:25">`;
+  html += `<div style="position:absolute;bottom:0;left:0;right:0;background:var(--nav-bg);backdrop-filter:blur(10px);border-top:1px solid var(--border-soft);display:flex;padding:8px 2px calc(14px + var(--pb-sab));z-index:25">`;
   for (const [id, ic, label] of NAV) {
     const active = tab === id;
     const dot = id === "timer" && timersRunning
@@ -1763,7 +1887,7 @@ function renderTodayPlan(log) {
 function renderHome(settings, currentWeek, unit) {
   const deloadBanner = renderDeloadBanner(deloadStatus(state.deloads));
 
-  return `<div class="" style="padding:18px 16px 0">
+  return `<div class="" style="padding:calc(18px + var(--pb-sat)) 16px 0">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
       <div style="display:flex;align-items:center;gap:11px;min-width:0">
         <img src="logoC.png" alt="${T("a11y.logo")}" width="46" height="46" style="width:46px;height:46px;object-fit:contain;border-radius:11px;display:block;flex-shrink:0">
@@ -2600,7 +2724,7 @@ function renderChartFull() {
   const line = lineOf(scope);
   if (!line) return "";
   return fullScreen(95, `
-    <div style="display:flex;align-items:center;gap:10px;padding:14px 16px 10px;border-bottom:1px solid var(--border-soft)">
+    <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px;border-bottom:1px solid var(--border-soft)">
       <button data-action="chart-exit-full" data-scope="${scope}" style="color:var(--muted);padding:4px">${icon("x", 21)}</button>
       <div style="flex:1;min-width:0">
         <div class="pb-num" style="font-size:17px;font-weight:700;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(exLabel(line.name))}</div>
@@ -2609,7 +2733,7 @@ function renderChartFull() {
     </div>
     <div style="padding:10px 8px 0">${chartToolbar(true, scope)}</div>
     <div data-linechart="${scope}" data-chartfull="1" style="position:relative;flex:1;min-height:120px;margin:0 8px;touch-action:none"></div>
-    <div class="pb-scroll" data-linedetail="${scope}" style="max-height:44%;overflow-y:auto;padding:0 12px 18px">${renderPointDetail(scope)}</div>
+    <div class="pb-scroll" data-linedetail="${scope}" style="max-height:44%;overflow-y:auto;padding:0 12px calc(18px + var(--pb-sab))">${renderPointDetail(scope)}</div>
   `, "chartFull");
 }
 
@@ -2890,7 +3014,9 @@ function startRowDrag(ev, handle) {
 function moveRowDrag(ev) {
   if (!dragCtx) return;
   const { rows, from, h } = dragCtx;
-  const dy = ev.clientY - dragCtx.y0;
+  /* the pointer speaks screen pixels and the row is moved in the frame's own,
+     which are the same thing on a phone and are not on a scaled-up tablet */
+  const dy = (ev.clientY - dragCtx.y0) / vpScale;
   const to = Math.max(0, Math.min(rows.length - 1, from + Math.round(dy / h)));
   dragCtx.to = to;
   dragCtx.row.style.transform = `translateY(${dy}px)`;
@@ -3306,12 +3432,12 @@ function renderExerciseWindow(library) {
     : (ex.missing ? "" : `<button data-action="exwin-edit" class="pb-btn pb-ghost" style="padding:8px 14px;font-size:13.5px">${icon("pencil", 14)} ${T("common.edit")}</button>`);
 
   return fullScreen(90, `
-    <div style="display:flex;align-items:center;gap:10px;padding:14px 16px 10px;border-bottom:1px solid var(--border-soft)">
+    <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px;border-bottom:1px solid var(--border-soft)">
       <button data-action="${editing ? "exwin-cancel" : "exwin-close"}" style="color:var(--muted);padding:4px">${icon(editing ? "arrow-left" : "x", 21)}</button>
       <div class="pb-num" style="font-size:18px;font-weight:700;flex:1">${isNew ? T("ex.newTitle") : editing ? T("ex.editTitle") : T("ex.viewTitle")}</div>
       ${headerRight}
     </div>
-    <div class="pb-scroll" data-scrollkey="exwin" style="flex:1;overflow-y:auto;padding:16px 16px 40px">
+    <div class="pb-scroll" data-scrollkey="exwin" style="flex:1;overflow-y:auto;padding:16px 16px calc(40px + var(--pb-sab))">
       ${editing ? exWindowEditBody(ex, library) : exWindowViewBody(ex, hist)}
     </div>
   `, "exWin");
@@ -3573,7 +3699,7 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
 
 
   return fullScreen(50, `
-    <div style="display:flex;align-items:center;gap:10px;padding:14px 16px 10px;border-bottom:1px solid var(--border-soft)">
+    <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px;border-bottom:1px solid var(--border-soft)">
       <button data-action="close-worksheet" title="${planning ? T("plan.closeKeep") : draft.editing ? T("wo.close") : T("wo.closeKeep")}" style="color:var(--muted);padding:4px">${icon("x", 21)}</button>
       <div class="pb-num" style="font-size:19px;font-weight:700;flex:1">${planning ? (draft.planId ? T("plan.edit") : T("plan.new")) : draft.editing ? T("wo.edit") : T("wo.new")}</div>
       ${wk ? chip(T("common.week", { n: wk }), planning ? "var(--steel)" : "var(--gold)") : ""}
@@ -3581,7 +3707,7 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
       ${planning && draft.planId ? `<button data-action="plan-delete" data-id="${esc(draft.planId)}" title="${T("plan.deletePlan")}" style="color:var(--red);padding:4px">${icon("trash-2", 19)}</button>` : ""}
     </div>
 
-    <div class="pb-scroll" data-scrollkey="worksheet" style="flex:1;overflow-y:auto;padding:14px 16px 120px">
+    <div class="pb-scroll" data-scrollkey="worksheet" style="flex:1;overflow-y:auto;padding:14px 16px calc(120px + var(--pb-sab))">
       ${planning ? `<div style="display:flex;gap:10px">
         <div style="flex:1.2">${field(T("wo.date"), `<input type="date" class="pb-input" data-bind="draft.date" value="${esc(draft.date)}">`)}</div>
         <div style="flex:1">${field(T("plan.name"), `<input class="pb-input" data-bind="draft.name" value="${esc(draft.name || "")}" placeholder="${T("plan.namePlaceholder")}">`)}</div>
@@ -3600,7 +3726,7 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
       ${planning ? "" : renderTimerList()}
     </div>
 
-    <div style="position:absolute;bottom:0;left:0;right:0;padding:12px 16px 18px;background:linear-gradient(transparent, var(--bg) 30%)">
+    <div style="position:absolute;bottom:0;left:0;right:0;padding:12px 16px calc(18px + var(--pb-sab));background:linear-gradient(transparent, var(--bg) 30%)">
       ${!planning && emptyCount ? `<div style="font-size:11.5px;color:var(--faint);text-align:center;margin-bottom:8px;line-height:1.45">${emptyCount === 1 ? T("wo.stillNeedOne") : T("wo.stillNeed", { n: TN("exercise", emptyCount) })}</div>` : ""}
       ${planning && draft.entries.length ? `<div style="font-size:11.5px;color:var(--faint);text-align:center;margin-bottom:8px;line-height:1.45">${T("plan.footNote")}</div>` : ""}
       ${!planning && !draft.editing && draft.entries.length ? `<div style="font-size:11.5px;color:var(--faint);text-align:center;margin-bottom:8px;line-height:1.45">${T("wo.draftNote")}</div>` : ""}
@@ -3693,7 +3819,7 @@ function renderPresetPickerList() {
 function renderExercisePicker(library) {
   const seg = ui.pickerSeg;
   return fullScreen(60, `
-    <div style="display:flex;align-items:center;gap:10px;padding:14px 16px 10px">
+    <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px">
       <button data-action="close-picker" style="color:var(--muted);padding:4px">${icon("arrow-left", 21)}</button>
       <div style="position:relative;flex:1">
         ${seg === "exercises"
@@ -3705,7 +3831,7 @@ function renderExercisePicker(library) {
     <div style="padding:0 16px 4px">
       ${segControl("picker-seg", seg, [["exercises", T("lib.exercises")], ["presets", T("lib.presets")]])}
     </div>
-    <div class="pb-scroll" data-scrollkey="picker" style="flex:1;overflow-y:auto;padding:4px 16px 30px">
+    <div class="pb-scroll" data-scrollkey="picker" style="flex:1;overflow-y:auto;padding:4px 16px calc(30px + var(--pb-sab))">
       ${seg === "presets"
         ? `<div id="presetPickList">${renderPresetPickerList()}</div>`
         : `<div id="pickList">${renderPickerList(library)}</div>`}
@@ -4034,7 +4160,7 @@ function renderEntryFields(form, unit) {
     : "";
 
   return fullScreen(70, `
-    <div style="display:flex;align-items:center;gap:10px;padding:14px 16px 6px">
+    <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 6px">
       <button data-action="close-entry" style="color:var(--muted);padding:4px">${icon("arrow-left", 21)}</button>
       <div style="flex:1">
         <div class="pb-num" style="font-size:18px;font-weight:700;line-height:1.15">${esc(exLabel(f.exercise))}</div>
@@ -4043,7 +4169,7 @@ function renderEntryFields(form, unit) {
       <button data-action="delete-entry-form" style="color:var(--red);padding:6px">${icon("trash-2", 18)}</button>
     </div>
 
-    <div class="pb-scroll" data-scrollkey="entryform" style="flex:1;overflow-y:auto;padding:10px 16px 120px">
+    <div class="pb-scroll" data-scrollkey="entryform" style="flex:1;overflow-y:auto;padding:10px 16px calc(120px + var(--pb-sab))">
       ${!isDraft ? field("Date", `<input type="date" class="pb-input" data-bind="entry.date" value="${esc(f.date)}">`) : ""}
       ${convert}
       ${f.plan ? renderPlanTarget(f, eUnit) : renderSuggestion(form, unit)}
@@ -4072,7 +4198,7 @@ function renderEntryFields(form, unit) {
       ${planning ? "" : renderTimerList()}
     </div>
 
-    <div style="position:absolute;bottom:0;left:0;right:0;padding:12px 16px 18px;background:linear-gradient(transparent, var(--bg) 30%)">
+    <div style="position:absolute;bottom:0;left:0;right:0;padding:12px 16px calc(18px + var(--pb-sab));background:linear-gradient(transparent, var(--bg) 30%)">
       <button id="entrySaveBtn" data-action="save-entry-form" ${valid ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:15px 0;font-size:16px;opacity:${valid ? 1 : 0.45}">
         ${icon("check", 18)} ${planning ? T("plan.addToPlan") : isDraft ? T("entry.addToWorkout") : T("common.saveChanges")}
       </button>
@@ -4161,13 +4287,13 @@ function updateEntryPreview() {
 
 function renderBodyWindow(body, unit) {
   return fullScreen(80, `
-    <div style="display:flex;align-items:center;gap:10px;padding:14px 16px 10px;border-bottom:1px solid var(--border-soft)">
+    <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px;border-bottom:1px solid var(--border-soft)">
       <button data-action="close-body" style="color:var(--muted);padding:4px">${icon("x", 21)}</button>
       ${icon("ruler", 19, 'style="color:var(--gold);flex-shrink:0"')}
       <div class="pb-num" style="font-size:19px;font-weight:700;flex:1">${T("title.body")}</div>
       <button data-action="new-body" class="pb-btn pb-gold" style="padding:8px 14px;font-size:13.5px">${icon("plus", 15)} ${T("common.new")}</button>
     </div>
-    <div class="pb-scroll" data-scrollkey="bodywin" style="flex:1;overflow-y:auto;padding-bottom:30px">
+    <div class="pb-scroll" data-scrollkey="bodywin" style="flex:1;overflow-y:auto;padding-bottom:calc(30px + var(--pb-sab))">
       ${renderBody(body, unit)}
     </div>
   `, "bodyWin");
@@ -4652,12 +4778,12 @@ function updateTimerPreview() {
 
 function renderProfile(f) {
   return fullScreen(80, `
-    <div style="display:flex;align-items:center;gap:10px;padding:14px 16px 10px;border-bottom:1px solid var(--border-soft)">
+    <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px;border-bottom:1px solid var(--border-soft)">
       <button data-action="close-profile" style="color:var(--muted);padding:4px">${icon("x", 21)}</button>
       <div class="pb-num" style="font-size:19px;font-weight:700;flex:1">${T("profile.title")}</div>
       <button data-action="save-profile" class="pb-btn pb-gold" style="padding:8px 16px;font-size:13.5px">${T("common.save")}</button>
     </div>
-    <div class="pb-scroll" data-scrollkey="profile" style="flex:1;overflow-y:auto;padding:16px 16px 40px">
+    <div class="pb-scroll" data-scrollkey="profile" style="flex:1;overflow-y:auto;padding:16px 16px calc(40px + var(--pb-sab))">
       ${field(T("profile.name"), `<input class="pb-input" data-bind="profile.name" value="${esc(f.name)}" placeholder="—">`)}
       ${field(T("profile.language"), `<select class="pb-input" data-bind="profileLang" style="font-weight:600">
         ${LANGS.map((l) => `<option value="${l.code}"${resolveLang(f.lang) === l.code ? " selected" : ""}>${esc(l.label)}</option>`).join("")}
@@ -4705,7 +4831,7 @@ function fullScreen(z, children, key) {
 function sheet(title, target, children, z = 60) {
   const enter = !_lastOverlayKeys.has(target) ? " pb-sheet" : "";
   return `<div data-overlay="${target}" data-layer="sheet" data-action="overlay-close" data-target="${target}" style="position:absolute;inset:0;z-index:${z};display:flex;flex-direction:column;justify-content:flex-end;background:rgba(0,0,0,.55)">
-    <div class="pb-sheet-card pb-scroll${enter}" data-stopprop style="background:var(--surface);border-top:1px solid var(--border);border-radius:18px 18px 0 0;padding:16px 18px 26px;max-height:88%;overflow-y:auto">
+    <div class="pb-sheet-card pb-scroll${enter}" data-stopprop style="background:var(--surface);border-top:1px solid var(--border);border-radius:18px 18px 0 0;padding:16px 18px calc(26px + var(--pb-sab));max-height:calc(88% - var(--pb-sat));overflow-y:auto">
       <div style="display:flex;align-items:center;margin-bottom:14px">
         <div class="pb-num" style="font-size:18.5px;font-weight:700;flex:1">${title}</div>
         <button data-action="overlay-close" data-target="${target}" style="color:var(--muted);padding:4px">${icon("x", 20)}</button>
@@ -5079,7 +5205,8 @@ function paintLineChart(wrap) {
     if (chartPointers.size >= 2) {
       const [a, b] = [...chartPointers.values()];
       const r = wrap.getBoundingClientRect();
-      const mx = (a.x + b.x) / 2 - r.left, my = (a.y + b.y) / 2 - r.top;
+      /* into the chart's own coordinate space, which is laid out unscaled */
+      const mx = ((a.x + b.x) / 2 - r.left) / vpScale, my = ((a.y + b.y) / 2 - r.top) / vpScale;
       chartGesture = {
         mode: "pinch", moved: true,
         dist: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)),
@@ -5112,8 +5239,8 @@ function paintLineChart(wrap) {
     }
     if (Math.abs(p.x - p.x0) > CHART_TAP_SLOP || Math.abs(p.y - p.y0) > CHART_TAP_SLOP) chartGesture.moved = true;
     if (!chartGesture.moved) return;
-    const dy = freeY ? ((p.y - prevY) / plotH) * (yMax - yMin) : 0;
-    chartPan(-((p.x - prevX) / plotW) * span, dy, scope);
+    const dy = freeY ? (((p.y - prevY) / vpScale) / plotH) * (yMax - yMin) : 0;
+    chartPan(-(((p.x - prevX) / vpScale) / plotW) * span, dy, scope);
   };
 
   wrap.onpointerup = (e) => {
@@ -5123,7 +5250,7 @@ function paintLineChart(wrap) {
        selection when the tap lands nowhere near the line */
     if (p && g && g.mode === "pan" && !g.moved) {
       const r = wrap.getBoundingClientRect();
-      const mx = e.clientX - r.left, my = e.clientY - r.top;
+      const mx = (e.clientX - r.left) / vpScale, my = (e.clientY - r.top) / vpScale;
       let best = -1, bd = Infinity;
       for (let i = i0; i <= i1; i++) {
         const d = Math.hypot(pts[i].x - mx, (pts[i].y - my) * 0.45);   // x matters more than y
@@ -5140,7 +5267,7 @@ function paintLineChart(wrap) {
   wrap.onwheel = (e) => {
     e.preventDefault();
     const r = wrap.getBoundingClientRect();
-    chartZoom(e.deltaY < 0 ? 1.3 : 1 / 1.3, Math.max(lo, Math.min(hi, idxAt(e.clientX - r.left))), scope);
+    chartZoom(e.deltaY < 0 ? 1.3 : 1 / 1.3, Math.max(lo, Math.min(hi, idxAt((e.clientX - r.left) / vpScale))), scope);
   };
   /* a double-click is the desktop shortcut back to the whole series */
   wrap.ondblclick = () => { ui.chartView[scope] = null; drawLineChart(); refreshChartToolbars(); };
@@ -5188,7 +5315,7 @@ function drawBarChart() {
   const cursor = wrap.querySelector("#barCursor");
   wrap.onmousemove = (e) => {
     const r = wrap.getBoundingClientRect();
-    const mx = e.clientX - r.left;
+    const mx = (e.clientX - r.left) / vpScale;
     const i = Math.max(0, Math.min(n - 1, Math.floor((mx - left) / band)));
     cursor.setAttribute("x", (left + band * i).toFixed(2)); cursor.style.display = "";
     tip.innerHTML = tooltipHTML(data[i].w, "sets", data[i].sets, cBlue);
@@ -5201,6 +5328,7 @@ function drawBarChart() {
 }
 
 window.addEventListener("resize", drawCharts);
+window.addEventListener("orientationchange", () => requestAnimationFrame(drawCharts));
 
 /* ═══════════════════════════ EVENTS ════════════════════════════════ */
 
@@ -6550,6 +6678,7 @@ window.addEventListener("click", function once() {
 })();
 
 applyTheme(state.settings.theme);
+applyViewport();        // size the frame to this device before it is first drawn
 sweepTimers();          // anything that ran out while the app was closed
 render();
 startTimerEngine();

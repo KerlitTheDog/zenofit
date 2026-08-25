@@ -5,10 +5,19 @@
   <!-- viewport-fit=cover lets the app paint under the notch and the home
        indicator; app.js then measures env(safe-area-inset-*) and hands the
        numbers to the layout, so content stays out from under them (see the
-       VIEWPORT ENGINE blocks in app.js and styles.css). interactive-widget
-       keeps the on-screen keyboard from covering the bottom of the app:
-       the viewport shrinks to what is left, so the save bar rides above it. -->
-  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
+       VIEWPORT ENGINE blocks in app.js and styles.css).
+
+       Do not add `interactive-widget=resizes-content` here. It sounds like
+       the fix for the save bar sitting under the on-screen keyboard, and on
+       Android it is what stops you typing at all: it makes the keyboard
+       resize the *layout* viewport, the frame is 100dvh, and every bottom
+       sheet is anchored to the frame's bottom — so opening the keyboard
+       teleports the field you just tapped ~455px up the screen and Chrome
+       gives up on the IME. The default (resizes-visual) lets the keyboard
+       overlay the app instead, and nothing moves. If the save bar has to
+       clear the keyboard, do it by measuring visualViewport and lifting
+       that one bar, not by resizing the whole app out from under a finger. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
   <title>Powerbuild Tracker</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

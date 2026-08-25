@@ -377,12 +377,18 @@ const entryHasData = (e) =>
     : isDetailed(e) ? filledSets(e).length > 0
     : +e.sets > 0 && +e.reps > 0 && +e.weight > 0;
 
-/* Is this entry already a row in the open sheet? An entry the picker just
-   produced is not: it only joins the sheet when it is saved. The difference
-   is what lets an existing row be emptied and saved again while a new one
-   still has to carry numbers. */
-const entryInSheet = (e, isDraft) =>
-  !!(isDraft && ui.workoutSheet && ui.workoutSheet.entries.some((x) => x.id === e.id));
+/* Is this entry already on record somewhere — a row in the open sheet, or a
+   row in the log? An entry the picker just produced is neither: it only
+   becomes a record when it is saved. The difference is what lets an existing
+   row be emptied and saved again while a new one still has to carry numbers.
+
+   Both halves matter, because there are two ways into the same window. The
+   day sheet opens its own cards (isDraft), and the Log tab opens a logged
+   row straight from the history (not). Unticking is the same act either
+   way, and for a long time only the first of them could be saved. */
+const entryOnRecord = (e, isDraft) => isDraft
+  ? !!(ui.workoutSheet && ui.workoutSheet.entries.some((x) => x.id === e.id))
+  : (state.log || []).some((x) => x.id === e.id);
 
 /* One-line summary of an entry, shared by the history list and the draft cards.
    "top" for a single logged top set, "best" when it's the pick of a full set
@@ -474,6 +480,10 @@ function earlierOutings(f, isDraft) {
   const date = f.date || (isDraft && draft ? draft.date : null) || todayStr();
   return chronoSort(state.log).filter((e) =>
     e.exercise === f.exercise && e.id !== f.id &&
+    /* a row someone unticked back to not-done is not a session they had.
+       Leaving it in would let it BE the "last day you trained this" and
+       come back with nothing in it, hiding the real last time behind it. */
+    entryHasData(e) &&
     !(editingIds && editingIds.has(e.id)) &&
     (e.date < date || (e.date === date && e.createdAt < (f.createdAt || 0))));
 }
@@ -2171,7 +2181,7 @@ function renderHistory(log, library, badges, settings, unit) {
           <div style="flex:1;min-width:0">
             <div style="font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(exLabel(e.exercise))}</div>
             <div style="font-size:12.5px;color:var(--muted);margin-top:1px">
-              ${entrySummary(e, unit, true)}
+              ${entryHasData(e) ? entrySummary(e, unit, true) : T("entry.notDone")}
             </div>
             ${res ? `<div style="display:flex;align-items:center;gap:5px;font-size:11px;margin-top:2px;color:${res.beat ? "var(--gold)" : res.hit >= res.total ? "var(--green)" : "var(--muted)"}">
               ${icon("target", 10, 'style="flex-shrink:0"')}
@@ -4084,16 +4094,16 @@ function entryComputed() {
      does not: "Wednesday, and lat pulldowns are in it" is a decision, and
      the weight can wait for the day.
 
-     Neither does one that is already IN the sheet. Unticking the set you
+     Neither does one that is already on record. Unticking the set you
      had confirmed is you taking the claim back — the lift goes to planned
      and not done — and a save button that greys out at exactly that moment
      is the app refusing to let someone correct their own log. Only a
      brand-new entry has to carry numbers, because a blank one would be a
      row nobody asked for. */
   const planning = isDraft && !!(ui.workoutSheet && ui.workoutSheet.planning);
-  const inSheet = entryInSheet(f, isDraft);
-  const valid = planning || inSheet || entryHasData(f);
-  return { cardio, metric, preview, valid, inSheet };
+  const onRecord = entryOnRecord(f, isDraft);
+  const valid = planning || onRecord || entryHasData(f);
+  return { cardio, metric, preview, valid, onRecord };
 }
 
 /* ── the set list inside a Detailed entry ──────────────────────────────
@@ -4350,7 +4360,7 @@ function renderPlanTarget(f, unit) {
 
 function renderEntryFields(form, unit) {
   const { f, isDraft } = form;
-  const { cardio, metric, preview, valid, inSheet } = entryComputed();
+  const { cardio, metric, preview, valid, onRecord } = entryComputed();
   const detailed = isDetailed(f);
   const eUnit = unitOf(f);
   /* the form doesn't need a flag of its own: an entry being drafted always
@@ -4427,7 +4437,7 @@ function renderEntryFields(form, unit) {
     <div style="position:absolute;bottom:0;left:0;right:0;padding:12px 16px calc(18px + var(--pb-sab));background:linear-gradient(transparent, var(--bg) 30%)">
       <button id="entrySaveBtn" data-action="save-entry-form" ${valid ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:15px 0;font-size:16px;opacity:${valid ? 1 : 0.45}">
         ${icon("check", 18)} ${planning ? T("plan.addToPlan")
-          : inSheet && !entryHasData(f) ? T("entry.saveNotDone")
+          : onRecord && !entryHasData(f) ? T("entry.saveNotDone")
           : isDraft ? T("entry.addToWorkout") : T("common.saveChanges")}
       </button>
     </div>
@@ -6693,9 +6703,11 @@ const actions = {
     const f = syncEntry(isDetailed(ui.entryForm.f)
       ? { ...ui.entryForm.f, setList: filledSets(ui.entryForm.f) }
       : ui.entryForm.f);
-    const exists = entryInSheet(f, isDraft);
-    /* an emptied row that is already in the sheet goes back in empty — that
-       is the whole point of unticking it. Only a new one is turned away. */
+    const exists = entryOnRecord(f, isDraft);
+    /* an emptied row that is already on record goes back empty — that is the
+       whole point of unticking it, and it keeps its plan, so the lift reads
+       as planned and not done and can be ticked again later. Only a brand-new
+       entry is turned away. */
     if (!planning && !exists && !entryHasData(f)) return;
     if (isDraft) {
       ui.workoutSheet.entries = exists

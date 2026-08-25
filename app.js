@@ -377,6 +377,13 @@ const entryHasData = (e) =>
     : isDetailed(e) ? filledSets(e).length > 0
     : +e.sets > 0 && +e.reps > 0 && +e.weight > 0;
 
+/* Is this entry already a row in the open sheet? An entry the picker just
+   produced is not: it only joins the sheet when it is saved. The difference
+   is what lets an existing row be emptied and saved again while a new one
+   still has to carry numbers. */
+const entryInSheet = (e, isDraft) =>
+  !!(isDraft && ui.workoutSheet && ui.workoutSheet.entries.some((x) => x.id === e.id));
+
 /* One-line summary of an entry, shared by the history list and the draft cards.
    "top" for a single logged top set, "best" when it's the pick of a full set
    list — same number either way, but the word tells you where it came from. */
@@ -591,6 +598,41 @@ function lastOuting(f, isDraft) {
   let best = null;
   for (const r of rows) if (r.m != null && (best == null || r.m > best.m)) best = r;
   return { date, rows, note, best };
+}
+
+/* ── WHAT A NEW SET OPENS ON ──────────────────────────────────────────
+   The set editor has to be pre-filled with something, and for a long time
+   that something was the set above it. That is right exactly once — the
+   first set, where there is nothing above and it opened blank — and wrong
+   from the second onward, because it hands you set one's numbers again on
+   a session that was never meant to be flat. Somebody working up 60/80/90
+   got 60/60/60 offered and had to retype two thirds of their own workout.
+
+   What the app already knows is better: last time's set in the SAME
+   POSITION. Set three opens on last week's set three. It is the number you
+   are standing there trying to match, it is already on screen in the "Last
+   time" list above, and it makes a session that repeats last week's one tap
+   per set. Past where last time ran out (a fourth set on a day that had
+   three) it falls back to the set above, which is the old behaviour and the
+   only honest guess left.
+
+   Converted into the unit this entry is being logged in — the history is
+   read back in the unit it was written in, but this is a number about to be
+   typed into today's log, and it has to be in today's units to mean
+   anything. Nothing is written until the set is saved: this is a starting
+   point in an editor, not an entry in the log. */
+function openingSetFor(f, isDraft, index) {
+  const eUnit = unitOf(f);
+  const last = lastOuting(f, isDraft);
+  const rows = last ? last.rows.filter((r) => +r.reps > 0 && +r.weight > 0) : [];
+  const r = rows[index];
+  if (r) {
+    const w = convertWeight(+r.weight, r.unit || eUnit, eUnit);
+    return newSet(String(r.reps), trimNum(w), r.rpe || "");
+  }
+  /* nothing at this position last time — the set above is the next best guess */
+  const prev = (f.setList || [])[index - 1];
+  return prev ? newSet(prev.reps, prev.weight, prev.rpe) : newSet();
 }
 
 /* "vs. Your Best" — compares against strictly earlier entries of the same
@@ -1085,14 +1127,20 @@ function migrate(s) {
   return s;
 }
 
+/* Fold a saved object into the shape this version expects: defaults for
+   every key the save predates, then the migrations. Shared by the first
+   load and by an imported backup on purpose — a file written by an older
+   version has to come up exactly as the same data would if it had been
+   sitting in localStorage all along, or a restore would be a downgrade. */
+function hydrate(saved) {
+  const base = defaultState();
+  return migrate({ ...base, ...saved, settings: { ...base.settings, ...(saved && saved.settings) } });
+}
+
 function loadState() {
   try {
     const raw = localStorage.getItem(STORE_KEY);
-    if (raw) {
-      const saved = JSON.parse(raw);
-      const merged = { ...defaultState(), ...saved, settings: { ...defaultState().settings, ...saved.settings } };
-      return migrate(merged);
-    }
+    if (raw) return hydrate(JSON.parse(raw));
   } catch { /* first run — key doesn't exist yet */ }
   return defaultState();
 }
@@ -1133,6 +1181,98 @@ function persist() {
   saveTimer = setTimeout(writeNow, 400);
 }
 function patch(p) { state = { ...state, ...p }; persist(); render(); }
+
+/* ── BACKUP: EVERYTHING, OUT AND BACK IN ──────────────────────────────
+   The whole point of this app is that it keeps what you did, and the whole
+   risk of it is that a browser holds that in one origin's localStorage —
+   cleared by a "clear browsing data", lost with the phone, and invisible
+   to the new phone. Export writes the lot to a file the user keeps; import
+   reads one back over the top. Between them they are how you move to a new
+   device and how you take a checkpoint before anything risky.
+
+   `state` IS the data — one object, one key in localStorage — so a backup
+   is that object and nothing has to be enumerated here. That matters more
+   than it looks: a hand-listed backup silently stops covering whatever is
+   added next, and the first anyone hears of it is a restore missing their
+   custom exercises. Adding a field to defaultState() is all it takes to be
+   included, forever.
+
+   One exception, `drafts`: the crash-recovery snapshot of whichever form
+   happened to be open at the moment of export. It is a picture of the UI,
+   not of your training, and restoring it would drop the person on the
+   other end into a half-typed set editor belonging to a session they were
+   not in. Parked days are not this — those are state.dayDrafts, they are
+   deliberate, and they travel. */
+const BACKUP_APP = "zenofit";
+const BACKUP_FORMAT = 1;
+
+function backupText() {
+  const { drafts, ...data } = state;   // eslint-disable-line no-unused-vars
+  return JSON.stringify({
+    app: BACKUP_APP, format: BACKUP_FORMAT, version: state.version,
+    exportedAt: new Date().toISOString(), state: data,
+  }, null, 2);
+}
+
+/* how much is in here, for the line above the Import button and for the
+   confirm that asks before a restore paves over what is there now */
+function backupSummary(data) {
+  return T("profile.backupCounts", {
+    days: TN("day", new Set((data.log || []).map((e) => e.date)).size),
+    sets: TN("logEntry", (data.log || []).length),
+    lifts: TN("exercise", (data.library || []).length),
+    body: TN("checkin", (data.body || []).length),
+  });
+}
+
+function exportBackup() {
+  writeNow();   // flush the debounce so the file and this device agree
+  const name = `zenofit-backup-${todayStr()}.json`;
+  const url = URL.createObjectURL(new Blob([backupText()], { type: "application/json" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = name; a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+/* Accepts the wrapper this app writes and, deliberately, a bare state
+   object too: someone who opens the file, or pulls it out of a devtools
+   copy of localStorage, should not be turned away over an envelope. What
+   is NOT accepted is anything without a log array and a settings object,
+   because overwriting a training history with a JSON file that happened to
+   parse is the one failure here that cannot be undone. */
+function importBackup(text) {
+  let parsed = null;
+  try { parsed = JSON.parse(text); } catch { /* not JSON at all */ }
+  const data = parsed && typeof parsed.state === "object" && parsed.state ? parsed.state : parsed;
+  const looksRight = data && typeof data === "object" && !Array.isArray(data) &&
+    Array.isArray(data.log) && data.settings && typeof data.settings === "object";
+  if (!looksRight) { alert(T("profile.importBad")); return; }
+
+  const when = parsed && parsed.exportedAt ? fmtShort(String(parsed.exportedAt).slice(0, 10)) : "—";
+  if (!confirm(T("profile.confirmImport", { when, what: backupSummary(data) }))) return;
+
+  const next = hydrate(data);
+  next.drafts = {};              // someone else's open form is not yours
+  state = next;
+
+  /* every open form points at records that no longer exist */
+  ui.workoutSheet = null; ui.entryForm = null; ui.setForm = null;
+  ui.bodyForm = null; ui.exWin = null; ui.exWinDraft = null;
+  ui.presetForm = null; ui.presetView = null; ui.groupForm = null;
+  ui.groupSheet = false; ui.timerForm = null; ui.deloadForm = null;
+  ui.planResult = null; ui.showBody = false; ui.picking = false;
+  ui.showProfile = false; ui.profileDraft = null; ui.profileLangWas = null;
+  resetTransient();
+  ui.tab = "home";
+
+  applyTheme(state.settings.theme);   // the file carries its own theme
+  writeNow();
+  render();
+  alert(T("profile.importOk", { what: backupSummary(state) }));
+}
 
 /* The screen turning off, the app being swiped away, or the browser
    reclaiming memory all fire one of these first. Flush synchronously. */
@@ -1191,6 +1331,8 @@ const ui = {
   presetOrder: false,   // Library → Presets is in drag-to-reorder mode
   pinnedOrder: false,   // …the pinned preset strip on Home is
   timerOrder: false,    // …the pinned timer dials are, wherever they appear
+  entryOrder: false,    // …the exercise list inside the open workout day is
+  libOrder: false,      // …the exercise library is, inside each of its groups
   progSeg: "progress",  // progress | placeholder — Progress sub-tab
   progressSelected: null,
   /* the progress graph is an instrument, not a picture: chartView is the
@@ -1229,6 +1371,8 @@ function resetTransient() {
   ui.presetOrder = false;
   ui.pinnedOrder = false;
   ui.timerOrder = false;
+  ui.entryOrder = false;
+  ui.libOrder = false;
   ui.volumeWeek = weekOf(todayStr(), state.settings.startDate);
   ui.volAnchor = todayStr();
 }
@@ -2916,16 +3060,31 @@ const newFlag = (ex) => needsDetails(ex)
   : "";
 
 function renderLibraryList(library) {
-  const q = ui.libraryQ, filter = ui.libraryFilter;
+  const filter = ui.libraryFilter;
+  /* Rearranging reads the whole group, never a search result: dragging row 2
+     of a filtered three is a move into a list you cannot see, and there is no
+     honest answer to where it lands. The toggle hides itself while you type. */
+  const ordering = ui.libOrder;
+  const q = ordering ? "" : ui.libraryQ;
   const groups = allGroups(library);   // the bucket is shown here, just never offered
   const shown = library.filter((ex) =>
     (filter === "All" || ex.muscle === filter) &&
     (!q || ex.name.toLowerCase().includes(q.toLowerCase())));
 
-  return groups.filter((g) => shown.some((x) => x.muscle === g)).map((g) => `<div style="margin-bottom:16px">
+  return groups.filter((g) => shown.some((x) => x.muscle === g)).map((g) => {
+    const rows = shown.filter((x) => x.muscle === g);
+    if (ordering) return `<div style="margin-bottom:16px">
+      ${sectionTitle(`<span style="color:${colorFor(g)}">${esc(groupLabel(g))}</span>`)}
+      <div class="pb-card" style="overflow:hidden">
+        ${rows.map((ex, i) => reorderRow("libExercise", i, rows.length,
+          esc(exLabelOf(ex)), esc(exFieldOf(ex, "equipment")), "",
+          `data-group="${esc(g)}"`)).join("")}
+      </div>
+    </div>`;
+    return `<div style="margin-bottom:16px">
     ${sectionTitle(`<span style="color:${colorFor(g)}">${esc(groupLabel(g))}</span>`)}
     <div class="pb-card" style="overflow:hidden">
-      ${shown.filter((x) => x.muscle === g).map((ex, i, arr) => `<button data-action="open-exercise-window" data-name="${esc(ex.name)}" style="width:100%;display:flex;align-items:center;gap:10px;padding:11px 14px;text-align:left;color:var(--text);border-bottom:${i < arr.length - 1 ? "1px solid var(--border-soft)" : "none"}">
+      ${rows.map((ex, i, arr) => `<button data-action="open-exercise-window" data-name="${esc(ex.name)}" style="width:100%;display:flex;align-items:center;gap:10px;padding:11px 14px;text-align:left;color:var(--text);border-bottom:${i < arr.length - 1 ? "1px solid var(--border-soft)" : "none"}">
         ${ex.image ? `<img src="${esc(ex.image)}" alt="" style="width:38px;height:38px;border-radius:8px;object-fit:cover;flex-shrink:0;border:1px solid var(--border)">` : ""}
         <div style="flex:1;min-width:0">
           <div style="font-weight:600;font-size:14px">${esc(exLabelOf(ex))}${newFlag(ex)}</div>
@@ -2935,7 +3094,8 @@ function renderLibraryList(library) {
         ${icon("info", 15, 'style="color:var(--faint);flex-shrink:0"')}
       </button>`).join("")}
     </div>
-  </div>`).join("");
+  </div>`;
+  }).join("");
 }
 
 /* ─────────────────── MUSCLE GROUPS (add / recolour) ─────────────────
@@ -3034,14 +3194,14 @@ function moveRowDrag(ev) {
 
 function endRowDrag() {
   if (!dragCtx) return;
-  const { from, to, rows, kind } = dragCtx;
+  const { from, to, rows, kind, row } = dragCtx;
   rows.forEach((n) => {
     n.style.transform = ""; n.style.transition = ""; n.style.boxShadow = "";
     n.style.zIndex = ""; n.style.background = ""; n.style.position = "";
   });
   document.body.style.userSelect = "";
   dragCtx = null;
-  if (from !== to && DRAG_COMMIT[kind]) DRAG_COMMIT[kind](from, to);
+  if (from !== to && DRAG_COMMIT[kind]) DRAG_COMMIT[kind](from, to, row);
 }
 
 /* Keep each group's colour and its built-in key; only the order changes. */
@@ -3101,7 +3261,39 @@ const DRAG_COMMIT = {
   preset: reorderPresets,
   pinnedPreset: reorderPinnedPresets,
   pinnedTimer: reorderPinnedTimers,
+  entry: reorderDraftEntries,
+  libExercise: reorderLibraryExercises,
 };
+
+/* The exercises inside the open day. Nothing is committed anywhere else:
+   the sheet is the draft, and the order it is in is the order commitWorkout
+   stamps into the log. */
+function reorderDraftEntries(from, to) {
+  const draft = ui.workoutSheet;
+  if (!draft || from >= draft.entries.length || to >= draft.entries.length) return;
+  const next = [...draft.entries];
+  const [moved] = next.splice(from, 1);
+  next.splice(to, 0, moved);
+  draft.entries = next;
+  persist(); render();
+}
+
+/* One muscle group's exercises, rearranged inside a flat library. Same move
+   as the pinned strips: only the slots that group already occupies are
+   rewritten, so a group's order is its own and the groups keep theirs. */
+function reorderLibraryExercises(from, to, row) {
+  const group = row && row.dataset ? row.dataset.group : null;
+  if (!group) return;
+  const lib = state.library || [];
+  const slots = lib.map((ex, i) => (ex.muscle === group ? i : -1)).filter((i) => i >= 0);
+  if (from >= slots.length || to >= slots.length) return;
+  const order = slots.map((i) => lib[i]);
+  const [moved] = order.splice(from, 1);
+  order.splice(to, 0, moved);
+  const next = [...lib];
+  slots.forEach((slot, k) => { next[slot] = order[k]; });
+  patch({ library: next });
+}
 
 document.addEventListener("pointerdown", (e) => {
   const h = e.target.closest("[data-drag-handle]");
@@ -3172,11 +3364,20 @@ function renderExercisesLibrary(library) {
   const groups = libraryGroups(library);
   const incomplete = library.filter(needsDetails);
 
+  /* Same rule the preset list and the timer dials live under: rearranging
+     is a mode. A grip handle parked on every exercise row would sit one
+     mis-tap from opening the wrong lift, and searching while dragging asks
+     the list to answer where row 2 of a filtered three belongs. So the
+     search box, the group chips and the add button fold away for the
+     duration, and the whole group is what you rearrange. */
+  const ordering = ui.libOrder;
+  const canOrder = groups.some((g) => library.filter((x) => x.muscle === g).length > 1);
+
   return `
-    <div style="position:relative;margin-bottom:10px">
+    ${ordering ? "" : `<div style="position:relative;margin-bottom:10px">
       ${icon("search", 16, 'style="position:absolute;left:12px;top:12px;color:var(--faint)"')}
       <input class="pb-input" style="padding-left:36px" placeholder="${T("lib.search")}" data-bind="libq" value="${esc(ui.libraryQ)}">
-    </div>
+    </div>`}
     <div style="display:flex;flex-wrap:wrap;gap:6px;padding-bottom:10px">
       ${["All", ...groups].map((g) => `<button data-action="lib-filter" data-id="${esc(g)}" class="pb-chip" style="flex-shrink:0;padding:6px 12px;font-size:12.5px;color:${ui.libraryFilter === g ? "var(--gold-ink)" : "var(--muted)"};background:${ui.libraryFilter === g ? "var(--gold)" : "var(--surface2)"};border-color:${ui.libraryFilter === g ? "var(--gold)" : "var(--border)"}">${g === "All" ? T("common.all") : esc(groupLabel(g))}</button>`).join("")}
       <button data-action="open-groups" title="${T("lib.groupsBtn")}" class="pb-chip" style="flex-shrink:0;padding:6px 11px;font-size:12.5px;color:var(--gold);background:rgba(233,185,73,.08);border-color:rgba(233,185,73,.4)">${icon("plus", 13, 'stroke-width="2.6"')}</button>
@@ -3197,13 +3398,14 @@ function renderExercisesLibrary(library) {
       ${T("lib.missingHint")}
     </div>` : ""}
 
-    <button data-action="add-exercise" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:14px;margin-bottom:12px;border-style:dashed;border-color:var(--border)">
+    ${ordering ? "" : `<button data-action="add-exercise" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:14px;margin-bottom:12px;border-style:dashed;border-color:var(--border)">
       ${icon("plus", 17)} ${T("lib.addCustom")}
-    </button>
+    </button>`}
 
+    ${canOrder ? reorderBar("lib-reorder", ordering, T("preset.reorder")) : ""}
     <div id="libList">${renderLibraryList(library)}</div>
     <div style="font-size:12px;color:var(--faint);line-height:1.55;margin:0 4px 10px">
-      ${T("lib.footer")}
+      ${ordering ? T("lib.reorderHint", { icon: icon("grip-vertical", 11) }) : T("lib.footer")}
     </div>`;
 }
 
@@ -3249,8 +3451,8 @@ const presetExerciseList = (exs) =>
    The list on the Library tab arranges every preset. The strip on Home
    arranges the pinned ones, in place, without disturbing the rest. */
 
-function reorderRow(kind, i, n, title, sub, tail = "") {
-  return `<div data-dragrow="${kind}" style="display:flex;align-items:center;background:var(--surface);border-bottom:${i < n - 1 ? "1px solid var(--border-soft)" : "none"}">
+function reorderRow(kind, i, n, title, sub, tail = "", attrs = "") {
+  return `<div data-dragrow="${kind}" ${attrs} style="display:flex;align-items:center;background:var(--surface);border-bottom:${i < n - 1 ? "1px solid var(--border-soft)" : "none"}">
     <span data-drag-handle class="pb-drag" title="${T("preset.dragTitle")}" style="flex-shrink:0;padding:13px 4px 13px 11px;color:var(--faint);display:flex">${icon("grip-vertical", 16)}</span>
     <div style="flex:1;min-width:0;padding:11px 6px">
       <div style="font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${title}</div>
@@ -3653,11 +3855,26 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
   const saveLabel = planning
     ? (draft.entries.length ? T("plan.saveN", { n: draft.entries.length }) : T("plan.nothingYet"))
     : filledCount ? T(draft.editing ? "wo.updateN" : "wo.saveN", { n: filledCount })
+    : draft.editing ? T("wo.removeDay")
     : draft.entries.length ? T("wo.fillIn")
     : T("wo.nothingYet");
 
 
-  const entries = draft.entries.map((e) => {
+  /* Rearranging is a mode, for the same reason it is one for presets and
+     timer dials: the cards are what you tap to open a lift mid-set, and a
+     grip handle living on one is a mis-tap away from the wrong exercise. */
+  const reordering = ui.entryOrder && draft.entries.length > 1;
+  const entries = reordering
+    ? `<div class="pb-card" style="overflow:hidden;margin-bottom:8px">
+        ${draft.entries.map((e, i) => reorderRow("entry", i, draft.entries.length,
+          esc(exLabel(e.exercise)),
+          entryHasData(e) ? entrySummary(e, unit) : esc(groupLabel(e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, library, e.muscle))),
+          `<span style="width:8px;height:8px;border-radius:4px;flex-shrink:0;margin-right:14px;background:${colorFor(e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, library, e.muscle))}"></span>`)).join("")}
+      </div>
+      <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 4px 10px">
+        ${T("wo.reorderHint", { icon: icon("grip-vertical", 11) })}
+      </div>`
+    : draft.entries.map((e) => {
     const b = badges[e.id] || {};
     const empty = !entryHasData(e);
     /* An entry started from a plan carries its target, and the card counts
@@ -3713,15 +3930,16 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
         <div style="flex:1">${field(T("plan.name"), `<input class="pb-input" data-bind="draft.name" value="${esc(draft.name || "")}" placeholder="${T("plan.namePlaceholder")}">`)}</div>
       </div>` : field(T("wo.date"), `<input type="date" class="pb-input" data-bind="draft.date" value="${esc(draft.date)}">`)}
 
-      ${sectionTitle(planning ? T("plan.exercisesPlanned") : T("wo.exercisesThis"))}
+      ${sectionTitle(planning ? T("plan.exercisesPlanned") : T("wo.exercisesThis"),
+        orderToggle("entry-reorder", ui.entryOrder, draft.entries.length > 1))}
       ${draft.entries.length === 0 ? `<div class="pb-card" style="padding:20px;text-align:center;color:var(--faint);font-size:13px;line-height:1.5;margin-bottom:10px">
         ${T(planning ? "plan.emptyHint" : "wo.emptyHint")}
       </div>` : ""}
       ${entries}
 
-      <button data-action="open-picker" class="pb-btn pb-ghost" style="width:100%;padding:13px 0;border-style:dashed;margin-top:4px">
+      ${reordering ? "" : `<button data-action="open-picker" class="pb-btn pb-ghost" style="width:100%;padding:13px 0;border-style:dashed;margin-top:4px">
         ${icon("plus", 17)} ${T("wo.addExercise")}
-      </button>
+      </button>`}
 
       ${planning ? "" : renderTimerList()}
     </div>
@@ -3733,7 +3951,7 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
       ${draft.entries.length ? `<button data-action="save-as-preset" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:14.5px;margin-bottom:8px">
         ${icon("bookmark-plus", 16)} ${T("preset.saveTitle")}
       </button>` : ""}
-      <button data-action="commit-workout" class="pb-btn pb-gold" style="width:100%;padding:15px 0;font-size:16px;opacity:${(planning ? draft.entries.length : filledCount) ? 1 : 0.5}">
+      <button data-action="commit-workout" class="pb-btn pb-gold" style="width:100%;padding:15px 0;font-size:16px;opacity:${(planning ? draft.entries.length : filledCount || draft.editing) ? 1 : 0.5}">
         ${icon("check", 18)} ${saveLabel}
       </button>
     </div>
@@ -3864,10 +4082,18 @@ function entryComputed() {
   }
   /* A workout entry has to carry numbers to be worth saving. A PLANNED one
      does not: "Wednesday, and lat pulldowns are in it" is a decision, and
-     the weight can wait for the day. */
+     the weight can wait for the day.
+
+     Neither does one that is already IN the sheet. Unticking the set you
+     had confirmed is you taking the claim back — the lift goes to planned
+     and not done — and a save button that greys out at exactly that moment
+     is the app refusing to let someone correct their own log. Only a
+     brand-new entry has to carry numbers, because a blank one would be a
+     row nobody asked for. */
   const planning = isDraft && !!(ui.workoutSheet && ui.workoutSheet.planning);
-  const valid = planning || entryHasData(f);
-  return { cardio, metric, preview, valid };
+  const inSheet = entryInSheet(f, isDraft);
+  const valid = planning || inSheet || entryHasData(f);
+  return { cardio, metric, preview, valid, inSheet };
 }
 
 /* ── the set list inside a Detailed entry ──────────────────────────────
@@ -4124,7 +4350,7 @@ function renderPlanTarget(f, unit) {
 
 function renderEntryFields(form, unit) {
   const { f, isDraft } = form;
-  const { cardio, metric, preview, valid } = entryComputed();
+  const { cardio, metric, preview, valid, inSheet } = entryComputed();
   const detailed = isDetailed(f);
   const eUnit = unitOf(f);
   /* the form doesn't need a flag of its own: an entry being drafted always
@@ -4200,7 +4426,9 @@ function renderEntryFields(form, unit) {
 
     <div style="position:absolute;bottom:0;left:0;right:0;padding:12px 16px calc(18px + var(--pb-sab));background:linear-gradient(transparent, var(--bg) 30%)">
       <button id="entrySaveBtn" data-action="save-entry-form" ${valid ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:15px 0;font-size:16px;opacity:${valid ? 1 : 0.45}">
-        ${icon("check", 18)} ${planning ? T("plan.addToPlan") : isDraft ? T("entry.addToWorkout") : T("common.saveChanges")}
+        ${icon("check", 18)} ${planning ? T("plan.addToPlan")
+          : inSheet && !entryHasData(f) ? T("entry.saveNotDone")
+          : isDraft ? T("entry.addToWorkout") : T("common.saveChanges")}
       </button>
     </div>
   `, "entryForm");
@@ -4808,6 +5036,19 @@ function renderProfile(f) {
 
       <div class="pb-hairline" style="margin:18px 0"></div>
       ${sectionTitle(T("profile.data"))}
+      <div style="display:flex;gap:8px;margin-bottom:9px">
+        <button data-action="export-data" class="pb-btn pb-ghost" style="flex:1;padding:12px 0;font-size:13.5px">
+          ${icon("download", 15)} ${T("profile.export")}
+        </button>
+        <label class="pb-btn pb-ghost" style="flex:1;padding:12px 0;font-size:13.5px;cursor:pointer">
+          ${icon("upload", 15)} ${T("profile.import")}
+          <input type="file" accept="application/json,.json,text/plain" data-filebind="backup" style="display:none">
+        </label>
+      </div>
+      <div style="font-size:11.5px;color:var(--faint);margin-bottom:16px;line-height:1.5">
+        ${T("profile.backupHint")}
+      </div>
+
       <button data-action="reset-all" class="pb-btn" style="width:100%;padding:13px 0;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">
         ${icon("trash-2", 16)} ${T("profile.reset")}
       </button>
@@ -5546,7 +5787,14 @@ function commitWorkout(draft) {
      that came from a plan is not lost with them: prunePlans leaves it on the
      plan, where it was already waiting. */
   const filled = draft.entries.filter(entryHasData).map((e) => syncEntry(stripPlanLink(e)));
-  if (!filled.length) return;   // nothing to save yet — leave the sheet open
+  /* Nothing filled in is nothing to save — unless this is a day already on
+     record that has just been emptied, which is its owner saying it did not
+     happen after all. That has to be answerable: otherwise the only way back
+     out of a set you unticked is deleting the whole day. */
+  if (!filled.length) {
+    if (!draft.editing) return;               // a new day with nothing in it
+    if (!confirm(T("wo.confirmEmpty"))) return;
+  }
   const planIds = draft.planIds || [];
   const { plans, open } = prunePlans(draft);
   /* Scoring a session you are still in the middle of would be the app calling
@@ -5559,10 +5807,11 @@ function commitWorkout(draft) {
     const originalIds = new Set(draft.originalIds || []);
     const now = Date.now();
     const kept = state.log.filter((e) => !originalIds.has(e.id));
-    const stamped = filled.map((e, i) => ({
-      ...e, date: draft.date,
-      createdAt: e.createdAt != null ? e.createdAt : now + i,
-    }));
+    /* Restamped in sheet order rather than kept as they were. createdAt is
+       never shown; it exists only to order a day's rows, and the order the
+       sheet is in is the order its owner just put it in — an exercise added
+       back into an old day would otherwise be stuck at the bottom forever. */
+    const stamped = filled.map((e, i) => ({ ...e, date: draft.date, createdAt: now + i }));
     ui.workoutSheet = null;
     if (sum) ui.planResult = planResultOf(draft, sum);
     patch({ log: [...kept, ...stamped], plans });
@@ -5615,6 +5864,7 @@ const actions = {
   "profile-units": (el) => { ui.profileDraft.units = el.dataset.u; render(); },
   "profile-theme": (el) => { ui.profileDraft.theme = el.dataset.t; applyTheme(el.dataset.t); render(); },
   "profile-weekmode": (el) => { ui.profileDraft.weekMode = el.dataset.m; render(); },
+  "export-data": () => exportBackup(),
   "reset-all": () => {
     if (confirm(T("profile.confirmReset"))) {
       ui.showProfile = false; ui.profileDraft = null;
@@ -6141,6 +6391,11 @@ const actions = {
   "preset-reorder": () => { ui.presetOrder = !ui.presetOrder; render(); },
   "pinned-reorder": () => { ui.pinnedOrder = !ui.pinnedOrder; render(); },
   "timer-reorder": () => { ui.timerOrder = !ui.timerOrder; render(); },
+  "entry-reorder": () => { ui.entryOrder = !ui.entryOrder; render(); },
+  /* leaving reorder mode is also the moment the search box comes back, so
+     drop whatever was typed before it was hidden rather than reapplying a
+     filter the user last saw three taps ago */
+  "lib-reorder": () => { ui.libOrder = !ui.libOrder; if (ui.libOrder) ui.libraryQ = ""; render(); },
   "save-as-preset": () => {
     if (!ui.workoutSheet || !ui.workoutSheet.entries.length) return;
     ui.presetForm = { name: "", description: "" };
@@ -6266,9 +6521,8 @@ const actions = {
   "add-set": () => {
     const f = ui.entryForm && ui.entryForm.f;
     if (!f || !isDetailed(f)) return;
-    /* prefill from the previous set — most people repeat the weight and adjust */
-    const prev = f.setList[f.setList.length - 1];
-    ui.setForm = { s: newSet(prev ? prev.reps : "", prev ? prev.weight : "", prev ? prev.rpe : ""), isNew: true, index: f.setList.length };
+    const i = f.setList.length;
+    ui.setForm = { s: openingSetFor(f, ui.entryForm.isDraft, i), isNew: true, index: i };
     render();
   },
   "edit-set": (el) => {
@@ -6439,9 +6693,11 @@ const actions = {
     const f = syncEntry(isDetailed(ui.entryForm.f)
       ? { ...ui.entryForm.f, setList: filledSets(ui.entryForm.f) }
       : ui.entryForm.f);
-    if (!planning && !entryHasData(f)) return;
+    const exists = entryInSheet(f, isDraft);
+    /* an emptied row that is already in the sheet goes back in empty — that
+       is the whole point of unticking it. Only a new one is turned away. */
+    if (!planning && !exists && !entryHasData(f)) return;
     if (isDraft) {
-      const exists = ui.workoutSheet.entries.some((x) => x.id === f.id);
       ui.workoutSheet.entries = exists
         ? ui.workoutSheet.entries.map((x) => (x.id === f.id ? f : x))
         : [...ui.workoutSheet.entries, f];
@@ -6630,6 +6886,11 @@ function handleFile(el) {
   if (!file) return;
   if (el.dataset.filebind === "exwin.image" && ui.exWinDraft) {
     readImageScaled(file, (dataUrl) => { ui.exWinDraft.image = dataUrl; render(); });
+  } else if (el.dataset.filebind === "backup") {
+    const r = new FileReader();
+    r.onload = () => importBackup(String(r.result || ""));
+    r.onerror = () => alert(T("profile.importBad"));
+    r.readAsText(file);
   }
   el.value = ""; // let the same file be re-picked later
 }

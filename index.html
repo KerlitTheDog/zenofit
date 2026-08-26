@@ -11,7 +11,7 @@
        the fix for the save bar sitting under the on-screen keyboard, and on
        Android it is what stops you typing at all: it makes the keyboard
        resize the *layout* viewport, the frame is 100dvh, and every bottom
-       sheet is anchored to the frame's bottom — so opening the keyboard
+       sheet is anchored to the frame's bottom, so opening the keyboard
        teleports the field you just tapped ~455px up the screen and Chrome
        gives up on the IME. The default (resizes-visual) lets the keyboard
        overlay the app instead, and nothing moves. If the save bar has to
@@ -51,8 +51,12 @@
   <div id="app"></div>
   <!-- Lucide icons (same icon set the JSX prototype used) -->
   <script src="https://unpkg.com/lucide@0.462.0/dist/umd/lucide.min.js"></script>
-  <!-- i18n.js first: app.js calls T() while it renders the first frame -->
+  <!-- i18n.js first: app.js calls T() while it renders the first frame.
+       standards.js is pure data (the strength-standards tables) and is read
+       by the Progress tab's second segment, so it has to be in before app.js
+       builds a frame too. -->
   <script src="i18n.js"></script>
+  <script src="standards.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

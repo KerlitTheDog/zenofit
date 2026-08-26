@@ -1,21 +1,21 @@
 /* ═══════════════════════════════════════════════════════════════════════════
-   POWERBUILD TRACKER — mobile prototype (vanilla HTML/CSS/JS port)
+   POWERBUILD TRACKER: mobile prototype (vanilla HTML/CSS/JS port)
    Faithful port of "AbsoluteMain.xlsx" (Powerbuilding Progressive Overload
    Tracker). All spreadsheet formulas are reimplemented in the helpers below.
 
    ┌─────────────────────── PLACEHOLDER INDEX ───────────────────────────┐
    │ Search for these tokens to swap in real assets later:               │
    │                                                                     │
-   │ 1. PLACEHOLDER_BODY_GRAPH_SLOT  — future measurement graphs, Body   │
+   │ 1. PLACEHOLDER_BODY_GRAPH_SLOT: future measurement graphs, Body     │
    │    tab bottom                                                       │
-   │ 2. PLACEHOLDER_RANKS_SLOT       — future ranks & strength standards,│
-   │    the second segment of the Progress tab                           │
    │                                                                     │
    │ Done: the Home logo and the tab-header brand mark now use           │
    │ logoC.png; the reserved Home banner slot was removed (the deload    │
    │ alert is the only banner that renders there); the Profile's         │
    │ Program Planner slot is gone (the deload calendar in Weekly Volume  │
-   │ covers the part that matters).                                      │
+   │ covers the part that matters); PLACEHOLDER_RANKS_SLOT is gone:      │
+   │ the Progress tab's second segment is the strength standards         │
+   │ lookup now (see the STRENGTH STANDARDS block and standards.js).     │
    └─────────────────────────────────────────────────────────────────────┘
 
    Spreadsheet → code map:
@@ -96,8 +96,8 @@ const DEFAULT_LIBRARY = [
    logged exercise, volume bars, preset dots, progress dots.          */
 
 /* `key` marks a group the app shipped: it's what lets the NAME be shown in
-   the user's language while the stored name — which every exercise, preset
-   and weekly target points at — stays fixed. Rename one and the key drops,
+   the user's language while the stored name (which every exercise, preset
+   and weekly target points at) stays fixed. Rename one and the key drops,
    because it's their word now, not ours. */
 const DEFAULT_GROUPS = [
   { name: "Chest", key: "Chest", color: "#d05a50" }, { name: "Back", key: "Back", color: "#5d8bcc" },
@@ -140,7 +140,7 @@ const colorFor = (muscle, i = 0) =>
   groupColor(muscle) || EXTRA_COLORS[i % EXTRA_COLORS.length];
 
 /* ═══════════════════ NAMES: STORED vs SHOWN ═══════════════════════════
-   Everything the app stores is keyed by its English name — an entry points
+   Everything the app stores is keyed by its English name: an entry points
    at "Bench Press (Barbell)", a goal is filed under it, an exercise sits in
    the group "Chest". Those strings are identity and are never rewritten,
    or switching language would orphan every workout on record.
@@ -159,7 +159,7 @@ const exRow = (ex) => {
   return i != null && table ? table[i] : null;
 };
 
-/* a muscle group's label — built-ins carry a `key`, renamed ones don't */
+/* a muscle group's label, built-ins carry a `key`, renamed ones don't */
 function groupLabel(name) {
   if (name === UNCATEGORIZED) return T("group.Uncategorized");
   const g = ((state && state.groups) || DEFAULT_GROUPS).find((x) => x.name === name);
@@ -211,7 +211,7 @@ const weekOf = (dateStr, startStr) =>
    run to a calendar, and it is still what the app does by default.
 
    It is wrong for the other way people train, where the split simply
-   comes round in order and which day it lands on is an accident — chest,
+   comes round in order and which day it lands on is an accident: chest,
    then back whenever back happens next. A Sunday and a Monday session are
    the same session to that lifter, but a program week puts a wall between
    them and calls one of the two weeks light.
@@ -230,7 +230,7 @@ const rollingWeeks = () => (state.settings.weekMode || "program") === "rolling";
    The spreadsheet estimated a max with Epley, weight × (1 + reps/30), and
    Epley has a flaw you can see with your own eyes: one rep at 30 kg comes
    back as a 31 kg max. It is a straight line fitted to multi-rep sets, so
-   it never passes through the one point every lifter can verify — the set
+   it never passes through the one point every lifter can verify: the set
    they just did FOR a single IS their max that day, not 3.3% under it.
 
    The replacement is Wathan's equation, which LeSuer et al. (1997) found
@@ -252,7 +252,7 @@ const rollingWeeks = () => (state.settings.weekMode || "program") === "rolling";
 
    rmCurve(reps) doubles as the calculator's percentage table: it is what
    one working set is worth as a share of the max. calcReps(pct) is that
-   curve inverted — how many reps a percentage is good for. It floors,
+   curve inverted, how many reps a percentage is good for. It floors,
    because a table that rounds a percentage UP to a rep you can't finish is
    the one way a chart like this can hurt you.                            */
 const RM_A = 48.8, RM_B = 53.4, RM_K = 0.075;
@@ -267,7 +267,7 @@ const est1RM = (weight, reps) =>
 const calcPct = (reps) => rmCurve(reps);
 
 /* The curve flattens onto an asymptote at 48.8/RM_ONE ≈ 49.6% of the max,
-   so percentages at or under that have no honest rep answer at all — they
+   so percentages at or under that have no honest rep answer at all, and they
    come back as Infinity and the table prints them as "off the scale"
    rather than inventing a number. */
 const calcReps = (pct) => {
@@ -275,7 +275,7 @@ const calcReps = (pct) => {
   return x > 0 ? Math.floor(-Math.log(x) / RM_K) : Infinity;
 };
 
-/* one decimal, no dangling ".0" — 133.3 kg, but 120 kg */
+/* one decimal, no dangling ".0": 133.3 kg, but 120 kg */
 const trimNum = (n) => String(Math.round(n * 10) / 10);
 
 /* Cardio "1RM equivalent": session-RPE load (Foster) = minutes × RPE */
@@ -318,7 +318,7 @@ const LB_PER_KG = 2.2046226218;
 const convertWeight = (w, from, to) =>
   !(w > 0) || from === to ? w : from === "kg" ? w * LB_PER_KG : w / LB_PER_KG;
 
-/* the unit an entry was logged in — older entries fall back to the default */
+/* the unit an entry was logged in, older entries fall back to the default */
 const unitOf = (e) => (e && e.unit) || state.settings.units;
 
 /* an entry's weight expressed in the default unit, for comparisons only */
@@ -331,7 +331,7 @@ const metricOf = (e) =>
    Every new entry carries a `setList`: one row per set, each with its own
    reps / weight / RPE. It is the only way the app logs now.
 
-   A handful of entries on record predate that — they were logged as a
+   A handful of entries on record predate that: they were logged as a
    total-set count plus the numbers of one top set, and they have no
    setList. They are left exactly as they were rather than rewritten
    (guessing four sets out of one would invent history), so `isDetailed`
@@ -342,7 +342,7 @@ const metricOf = (e) =>
    / weight / rpe). For an entry with a set list those are DERIVED from its
    best set, the one with the highest estimated 1RM, which is what lets
    weekly volume, PR badges, the dashboard and the charts all keep reading
-   the fields they always read. Nothing is ever thrown away — the setList
+   the fields they always read. Nothing is ever thrown away, the setList
    stays on the entry. */
 
 const newSet = (reps = "", weight = "", rpe = "") => ({ id: uid(), reps, weight, rpe });
@@ -350,7 +350,7 @@ const isDetailed = (e) => Array.isArray(e && e.setList);
 const setHasData = (s) => +s.reps > 0 && +s.weight > 0;
 const filledSets = (e) => (e.setList || []).filter(setHasData);
 
-/* The set with the highest estimated 1RM — the one that speaks for the whole
+/* The set with the highest estimated 1RM, the one that speaks for the whole
    exercise everywhere the app shows a single number. */
 function bestSet(list) {
   let best = null, bestM = -Infinity;
@@ -377,7 +377,7 @@ const entryHasData = (e) =>
     : isDetailed(e) ? filledSets(e).length > 0
     : +e.sets > 0 && +e.reps > 0 && +e.weight > 0;
 
-/* Is this entry already on record somewhere — a row in the open sheet, or a
+/* Is this entry already on record somewhere, a row in the open sheet, or a
    row in the log? An entry the picker just produced is neither: it only
    becomes a record when it is saved. The difference is what lets an existing
    row be emptied and saved again while a new one still has to carry numbers.
@@ -392,11 +392,11 @@ const entryOnRecord = (e, isDraft) => isDraft
 
 /* One-line summary of an entry, shared by the history list and the draft cards.
    "top" for a single logged top set, "best" when it's the pick of a full set
-   list — same number either way, but the word tells you where it came from. */
+   list, same number either way, but the word tells you where it came from. */
 function entrySummary(e, unit, withRpe = false) {
   if (e.kind === "cardio") return `${esc(e.minutes)} min × RPE ${esc(e.intensity)}`;
   const label = isDetailed(e) ? "best" : "top";
-  /* always in the unit the set was actually logged in, never converted —
+  /* always in the unit the set was actually logged in, never converted:
      what you typed is what you read back */
   return `${esc(e.sets)} sets · ${label} ${esc(e.reps)} × ${esc(e.weight)} ${unitOf(e)}` +
     (withRpe && e.rpe ? ` · RPE ${esc(e.rpe)}` : "");
@@ -421,20 +421,20 @@ function entrySummary(e, unit, withRpe = false) {
 
    Both are scored through est1RM and only offered when they genuinely
    come out above the set they're beating. Holding the reps on the heavier
-   option is deliberate — dropping reps as the weight goes up is normal
+   option is deliberate: dropping reps as the weight goes up is normal
    training, but it would not be an improvement on the estimate, and this
    card only ever promises an improvement.
 
    NEITHER OPTION IS RECOMMENDED OVER THE OTHER, and that is deliberate.
 
-   This used to run double progression — climb the reps to the top of your
-   range, then take the weight up — with the top of the range inferred from
+   This used to run double progression (climb the reps to the top of your
+   range, then take the weight up) with the top of the range inferred from
    the median top-set reps of your recent sessions. It was wrong twice over.
 
    Wrong mechanically: that median is taken over a window that INCLUDES
    last session, so for the app to decide you were under your range, more
    than half your recent sessions had to have more reps than the most
-   recent one — your reps had to have just gone DOWN. The only thing that
+   recent one, meaning your reps had to have just gone DOWN. The only thing that
    drops your reps is adding weight, and the weight option here holds the
    reps (see above), so the one state that unlocked "+1 rep" was a state
    that following the app could never produce. The ceiling sat wherever you
@@ -445,13 +445,13 @@ function entrySummary(e, unit, withRpe = false) {
    INFERRED. The log records what you did, never what you were aiming for,
    and a rep range is an intention. Crowning an option on the strength of a
    guess about your program is the same mistake as a progress bar filling
-   toward a goal you never set — see the volume list, which had it too.
+   toward a goal you never set. See the volume list, which had it too.
 
    So both options are shown identically and the app ranks them by the one
    thing it can work out exactly: WHICH IS THE SMALLER STEP, meaning which
    raises the estimate least. That lands on the extra rep in the 8-12 range
-   and on the extra weight down on heavy triples — where one more rep is
-   worth far more than a plate — which is true, useful, and assumes nothing
+   and on the extra weight down on heavy triples, where one more rep is
+   worth far more than a plate, which is true, useful, and assumes nothing
    about anyone's programming. The smaller step is listed first and marked
    as such; the other is right beside it, the same size and the same
    colour. The app measures, the lifter decides.                        */
@@ -470,7 +470,7 @@ const weightStep = (unit, w) =>
 const metricFor = (weight, reps, unit) =>
   est1RM(convertWeight(weight, unit, state.settings.units), reps);
 
-/* Every earlier outing of this lift, oldest first — the same "strictly
+/* Every earlier outing of this lift, oldest first, over the same "strictly
    before" window the vs-your-best preview uses, so the two never disagree
    about what counts as earlier. Rows being edited are excluded: a session
    cannot be its own benchmark. */
@@ -501,7 +501,7 @@ function entryBest(f) {
 }
 
 /* Rank two ways over the bar by how far each one moves the estimate, and
-   say which is the smaller — `null` when they tie, because marking one of
+   say which is the smaller, with `null` when they tie, because marking one of
    two equal steps would be inventing a preference again. */
 function bySmallestStep(options) {
   const sorted = [...options].sort((a, b) => a.m - b.m);
@@ -543,7 +543,7 @@ function setSuggestion(f, isDraft) {
   }
 
   /* the set that carried that session, in the unit THIS entry is being
-     typed in — you should be able to read the suggestion straight onto
+     typed in, so you should be able to read the suggestion straight onto
      the plates in front of you */
   const eu = unitOf(prev), fu = unitOf(f);
   const reps = Math.round(+prev.reps);
@@ -564,14 +564,14 @@ function setSuggestion(f, isDraft) {
 }
 
 /* ── LAST TIME, IN FULL ───────────────────────────────────────────────
-   The card above names ONE set — the best of last session — because that is
+   The card above names ONE set, the best of last session, because that is
    the bar it is offering two ways over. One set is not the session. Four sets
    that fell apart and four that held share a best set and were not the same
    day's work, and it is the second, third and fourth you are actually stood
    there trying to match. So they are all here, in the order they were done.
 
    In the unit each was LOGGED in, never converted, which is the rule the rest
-   of the history reads back under — what you typed is what you read.
+   of the history reads back under: what you typed is what you read.
 
    Read-only, deliberately. Everything else tappable in this window puts a
    number in the log, and last week's set is not a number you did today; the
@@ -580,7 +580,7 @@ function lastOuting(f, isDraft) {
   if (!f) return null;
   const earlier = earlierOutings(f, isDraft);
   if (!earlier.length) return null;
-  /* the last DAY you trained it — two entries of the same lift on one day are
+  /* the last DAY you trained it, since two entries of the same lift on one day are
      one session's work, so both are read, in the order they were done */
   const date = earlier[earlier.length - 1].date;
   const rows = [];
@@ -612,8 +612,8 @@ function lastOuting(f, isDraft) {
 
 /* ── WHAT A NEW SET OPENS ON ──────────────────────────────────────────
    The set editor has to be pre-filled with something, and for a long time
-   that something was the set above it. That is right exactly once — the
-   first set, where there is nothing above and it opened blank — and wrong
+   that something was the set above it. That is right exactly once (the
+   first set, where there is nothing above and it opened blank) and wrong
    from the second onward, because it hands you set one's numbers again on
    a session that was never meant to be flat. Somebody working up 60/80/90
    got 60/60/60 offered and had to retype two thirds of their own workout.
@@ -626,7 +626,7 @@ function lastOuting(f, isDraft) {
    three) it falls back to the set above, which is the old behaviour and the
    only honest guess left.
 
-   Converted into the unit this entry is being logged in — the history is
+   Converted into the unit this entry is being logged in, because the history is
    read back in the unit it was written in, but this is a number about to be
    typed into today's log, and it has to be in today's units to mean
    anything. Nothing is written until the set is saved: this is a starting
@@ -640,12 +640,12 @@ function openingSetFor(f, isDraft, index) {
     const w = convertWeight(+r.weight, r.unit || eUnit, eUnit);
     return newSet(String(r.reps), trimNum(w), r.rpe || "");
   }
-  /* nothing at this position last time — the set above is the next best guess */
+  /* nothing at this position last time, so the set above is the next best guess */
   const prev = (f.setList || [])[index - 1];
   return prev ? newSet(prev.reps, prev.weight, prev.rpe) : newSet();
 }
 
-/* "vs. Your Best" — compares against strictly earlier entries of the same
+/* "vs. Your Best": compares against strictly earlier entries of the same
    exercise, exactly like the sheet's row-above MAXIFS window. */
 function computeBadges(log) {
   const bests = {}; const out = {};
@@ -677,7 +677,7 @@ function muscleOf(name, library, fallback) {
   return ex ? ex.muscle : fallback || "—";
 }
 
-/* Dashboard rows — first-appearance order, MAXIFS/COUNTIF equivalents */
+/* Dashboard rows: first-appearance order, MAXIFS/COUNTIF equivalents */
 function dashboardRows(log, library, goals) {
   const seen = new Map();
   for (const e of chronoSort(log)) {
@@ -706,7 +706,7 @@ function weeklyTotals(log, startDate) {
   return { sets, cardioMin };
 }
 
-/* Volume tab: SUMIFS(sets, week, muscle) — cardio counted in minutes */
+/* Volume tab: SUMIFS(sets, week, muscle), cardio counted in minutes */
 function volumeForWeek(log, library, startDate, week) {
   const out = {};
   for (const e of log) {
@@ -721,8 +721,8 @@ function volumeForWeek(log, library, startDate, week) {
 }
 
 /* The same sum over any inclusive span of days. Program weeks keep using
-   volumeForWeek — weekOf() floors everything before the start date into
-   week 1, and a date range would quietly drop those rows — so this is
+   volumeForWeek, since weekOf() floors everything before the start date
+   into week 1, and a date range would quietly drop those rows, so this is
    only ever asked for the rolling window, which has no such edge. */
 function volumeInRange(log, library, from, to) {
   const out = {};
@@ -758,8 +758,8 @@ function rollingSetBlocks(log, today = todayStr()) {
 
 /* ── DELOADS: PLANNED, NOT GUESSED ────────────────────────────────────
    The app used to infer a deload was due by watching for five hard weeks
-   in a row. It was guessing at something only the lifter knows — a light
-   week can be a planned taper, a holiday, or flu — so now the deload is
+   in a row. It was guessing at something only the lifter knows (a light
+   week can be a planned taper, a holiday, or flu), so now the deload is
    something you PUT IN THE CALENDAR: pick a start day and an end day and
    the app counts you down to it.
 
@@ -799,14 +799,14 @@ function deloadStatus(list, today = todayStr()) {
 /* ── PLANNING: A DATED INTENTION, NOT A RECORD ────────────────────────
    A PLAN is the workout you have decided to do on a day that has not
    happened yet. It lives in state.plans as {id, date, name, entries[]},
-   and its entries are ordinary entry objects — the same shape the log
-   uses — so the whole builder (the picker, presets, the set list, the
+   and its entries are ordinary entry objects, the same shape the log
+   uses, so the whole builder (the picker, presets, the set list, the
    set editor, the "beat last time" card) is reused verbatim to write one.
 
    WHAT MAKES IT A PLAN IS THAT IT IS NOT THE LOG.
    Nothing in state.plans is ever counted: not sets, not PRs, not volume,
    not the graphs, not a single badge. That is the whole reason this is a
-   separate list rather than a log entry with a future date — the workable
+   separate list rather than a log entry with a future date: the workable
    trick of "just log Wednesday now" quietly tells the app you have lifted
    things you have not lifted, and every number downstream believes it.
 
@@ -820,7 +820,7 @@ function deloadStatus(list, today = todayStr()) {
 
    PLAN vs PRESET. A preset is a bundle of exercises with no date and no
    numbers: the shape of a session you repeat. A plan is one dated session
-   with the numbers you are going for. They compose — planning a day from
+   with the numbers you are going for. They compose, and planning a day from
    a preset is the normal way to start one.                              */
 
 /* the target snapshot a planned entry hands to the entry that will log it,
@@ -855,7 +855,7 @@ function planMarks(plans) {
    matched; anything less is UNDER. Deliberately NOT judged on estimated
    1RM: three reps at a heavier weight scores higher than the eight you
    planned, and calling that "target hit" would be the app deciding it
-   knows what you meant. Under is never scolded anywhere it is shown —
+   knows what you meant. Under is never scolded anywhere it is shown:
    the plan was a guess made days ago, and the log is what happened.   */
 
 function setVerdict(actual, target) {
@@ -989,7 +989,7 @@ const DEFAULT_SOUND = "chime";
 const DEFAULT_VOLUME = 0.8;
 
 /* `key: "rest"` marks a name the app chose rather than the user, so it can
-   be shown translated. Renaming the timer drops the key — see timer-save. */
+   be shown translated. Renaming the timer drops the key, see timer-save. */
 const seedTimers = () =>
   SEED_TIMERS.map((secs, i) => ({
     id: "seed-timer-" + secs, name: "Rest " + fmtClock(secs), key: "rest", duration: secs,
@@ -998,20 +998,24 @@ const seedTimers = () =>
   }));
 
 const defaultState = () => ({
-  version: 10,
-  settings: { name: "", units: "kg", startDate: todayStr(), daysPerWeek: 4, theme: "dark", lang: "en", weekMode: "program" },
+  version: 11,
+  /* `sex` is "" until asked, and it is only ever asked by the strength
+     standards, whose tables are split male/female. It sits in settings so it
+     is remembered and travels in a backup, not because the app wants a
+     demographic, which is why Profile doesn't offer it. */
+  settings: { name: "", units: "kg", startDate: todayStr(), daysPerWeek: 4, theme: "dark", lang: "en", weekMode: "program", sex: "" },
   library: DEFAULT_LIBRARY,
-  groups: DEFAULT_GROUPS.map((g) => ({ ...g })),   // [{name,key?,color}] — user-editable
+  groups: DEFAULT_GROUPS.map((g) => ({ ...g })),   // [{name,key?,color}], user-editable
   log: [],        // {id,date,exercise,muscle,kind,sets,reps,weight,rpe,unit,minutes,intensity,notes,createdAt,setList?}
   body: [],       // {id,date,weight,waist,chest,arm,thigh,glutes,notes}
   goals: {},      // { [exerciseName]: number }
-  volumeGoals: {},// { [muscleGroup]: target sets per period } — user's own volume target
+  volumeGoals: {},// { [muscleGroup]: target sets per period }, user's own volume target
   presets: [],    // [{id,name,description,pinned,exercises:[{exercise,muscle,kind}],createdAt}]
   timers: seedTimers(), // [{id,name,duration,endsAt,remaining,doneAt,pinned,createdAt}]
-  dayDrafts: [],  // [{id,date,entries,savedAt}] — workout days you backed out of, see closeWorksheet()
-  plans: [],      // [{id,date,name,entries,createdAt}] — days you intend to train, see planTargetOf()
-  deloads: [],    // [{id,start,end}] — planned easy weeks, inclusive ISO dates
-  drafts: {},     // half-finished forms, restored after a crash/lock — see snapshotDrafts()
+  dayDrafts: [],  // [{id,date,entries,savedAt}], workout days you backed out of, see closeWorksheet()
+  plans: [],      // [{id,date,name,entries,createdAt}], days you intend to train, see planTargetOf()
+  deloads: [],    // [{id,start,end}], planned easy weeks, inclusive ISO dates
+  drafts: {},     // half-finished forms, restored after a crash/lock, see snapshotDrafts()
 });
 
 /* Bring an older saved state up to the current shape. Idempotent. */
@@ -1039,7 +1043,7 @@ function migrate(s) {
   if (v < 4) {
     /* v4 moved the unit from a single global setting onto each entry. Every
        weight already on record was typed in the then-current default, so
-       stamp that unit on it — otherwise switching the default later would
+       stamp that unit on it, since otherwise switching the default later would
        silently reinterpret old numbers. Drafts get the same treatment. */
     if (!s.settings) s.settings = {};
     const u = s.settings.units || "kg";
@@ -1054,7 +1058,7 @@ function migrate(s) {
   }
   if (v < 5) {
     /* v5 is the "one mode, one timer list" release:
-       · FSBS is gone — the app always logs set by set now. Entries already on
+       · FSBS is gone, the app always logs set by set now. Entries already on
          record keep their shape (an old top-set row has no setList and still
          renders as one), so no history is rewritten; only the setting goes.
        · Muscle groups became real, editable records instead of a hard-coded
@@ -1088,7 +1092,7 @@ function migrate(s) {
     /* v6 adds the interface language and hands deloads to the user: the old
        radar guessed one was due from five hard weeks, this one only ever
        tells you about a period you put in the calendar yourself. There's
-       nothing to convert — a guess isn't data — so planned deloads start
+       nothing to convert (a guess isn't data), so planned deloads start
        empty.
 
        It also stamps a `key` on the records the app itself named, which is
@@ -1112,7 +1116,7 @@ function migrate(s) {
   }
   if (v < 8) {
     /* v8 gave every timer its own alert: a sound and a volume. Timers that
-       predate it keep doing exactly what they did before — the default is
+       predate it keep doing exactly what they did before, since the default is
        the chime that used to be the only option. */
     s.timers = (s.timers || []).map((t) => ({ sound: DEFAULT_SOUND, volume: DEFAULT_VOLUME, ...t }));
     s.version = 8;
@@ -1120,7 +1124,7 @@ function migrate(s) {
   if (v < 9) {
     /* v9 added the choice between program weeks and a rolling last-7-days
        window. Everyone already on the app has been reading program weeks,
-       so that is what they keep — the setting only ever moves if they
+       so that is what they keep, and the setting only ever moves if they
        move it. */
     if (!s.settings) s.settings = {};
     if (s.settings.weekMode !== "rolling") s.settings.weekMode = "program";
@@ -1128,18 +1132,29 @@ function migrate(s) {
   }
   if (v < 10) {
     /* v10 added planning: days you have decided on but not done yet. There is
-       nothing to convert — an intention was never storable before — so the
+       nothing to convert (an intention was never storable before), so the
        list starts empty, and every entry already in the log has no target on
        it and is read exactly as it always was. */
     if (!Array.isArray(s.plans)) s.plans = [];
     s.version = 10;
+  }
+  if (v < 11) {
+    /* v11 filled the Progress tab's reserved second segment with the strength
+       standards. Its tables are split male/female, so a setting for that had
+       to exist, and it starts empty rather than defaulting, because a default
+       here isn't a preference the user can shrug at, it's the wrong table and
+       therefore the wrong rank. It gets answered in the one place it is used,
+       the first time somebody asks the standards a question. */
+    if (!s.settings) s.settings = {};
+    if (s.settings.sex !== "male" && s.settings.sex !== "female") s.settings.sex = "";
+    s.version = 11;
   }
   return s;
 }
 
 /* Fold a saved object into the shape this version expects: defaults for
    every key the save predates, then the migrations. Shared by the first
-   load and by an imported backup on purpose — a file written by an older
+   load and by an imported backup on purpose: a file written by an older
    version has to come up exactly as the same data would if it had been
    sitting in localStorage all along, or a restore would be a downgrade. */
 function hydrate(saved) {
@@ -1151,7 +1166,7 @@ function loadState() {
   try {
     const raw = localStorage.getItem(STORE_KEY);
     if (raw) return hydrate(JSON.parse(raw));
-  } catch { /* first run — key doesn't exist yet */ }
+  } catch { /* first run, key doesn't exist yet */ }
   return defaultState();
 }
 
@@ -1178,7 +1193,7 @@ function snapshotDrafts() {
   };
 }
 
-/* write straight through — used when the page is about to go away */
+/* write straight through, used when the page is about to go away */
 function writeNow() {
   clearTimeout(saveTimer); saveTimer = null;
   snapshotDrafts();
@@ -1194,13 +1209,13 @@ function patch(p) { state = { ...state, ...p }; persist(); render(); }
 
 /* ── BACKUP: EVERYTHING, OUT AND BACK IN ──────────────────────────────
    The whole point of this app is that it keeps what you did, and the whole
-   risk of it is that a browser holds that in one origin's localStorage —
+   risk of it is that a browser holds that in one origin's localStorage:
    cleared by a "clear browsing data", lost with the phone, and invisible
    to the new phone. Export writes the lot to a file the user keeps; import
    reads one back over the top. Between them they are how you move to a new
    device and how you take a checkpoint before anything risky.
 
-   `state` IS the data — one object, one key in localStorage — so a backup
+   `state` IS the data (one object, one key in localStorage), so a backup
    is that object and nothing has to be enumerated here. That matters more
    than it looks: a hand-listed backup silently stops covering whatever is
    added next, and the first anyone hears of it is a restore missing their
@@ -1211,7 +1226,7 @@ function patch(p) { state = { ...state, ...p }; persist(); render(); }
    happened to be open at the moment of export. It is a picture of the UI,
    not of your training, and restoring it would drop the person on the
    other end into a half-typed set editor belonging to a session they were
-   not in. Parked days are not this — those are state.dayDrafts, they are
+   not in. Parked days are not this: those are state.dayDrafts, they are
    deliberate, and they travel. */
 const BACKUP_APP = "zenofit";
 const BACKUP_FORMAT = 1;
@@ -1305,9 +1320,9 @@ const ui = {
   showProfile: false,
   profileDraft: null,
   profileLangWas: null,   // the saved language, so a previewed one can be backed out of
-  showBody: false,      // Body measurements — a window off the header, not a tab
+  showBody: false,      // Body measurements, a window off the header, not a tab
   groupSheet: false,    // the "muscle groups" manager
-  groupForm: null,      // {name, color, orig, then} — add/edit one group
+  groupForm: null,      // {name, color, orig, then}, add/edit one group
   /* {date, entries:[]} draft. Two different things on it are called a plan
      and they never co-exist, because a sheet is either writing a plan or
      logging a day: `planning: true` + `planId` is the PLAN BEING EDITED,
@@ -1319,11 +1334,11 @@ const ui = {
   picking: false,
   pickerQ: "",
   pickerQuick: null,    // {name, muscle}
-  pickerSeg: "exercises", // exercises | presets — picker mode
+  pickerSeg: "exercises", // exercises | presets, picker mode
   entryForm: null,      // {f, isDraft}
-  setForm: null,        // {s, isNew} — the single-set editor inside a Detailed entry
-  timerForm: null,      // {t, isNew} — the custom-timer editor
-  timerToast: null,     // {id,name} — "time's up" banner, shown on any tab
+  setForm: null,        // {s, isNew}, the single-set editor inside a Detailed entry
+  timerForm: null,      // {t, isNew}, the custom-timer editor
+  timerToast: null,     // {id,name}, "time's up" banner, shown on any tab
   exWin: null,          // exercise detail window: {name} for an existing lift, or {isNew:true}
   exWinEdit: false,     // false = read-only view, true = editable
   exWinDraft: null,     // working copy while editing/creating
@@ -1331,10 +1346,10 @@ const ui = {
   bodyFormWasNew: false,
   deloadOpen: false,
   calMonth: null,       // "YYYY-MM" the calendar is showing
-  calDay: null,         // the day the calendar has selected — what the day card is about
-  planResult: null,     // {date, name, sum} — "here is how the plan went", after saving one
+  calDay: null,         // the day the calendar has selected, what the day card is about
+  planResult: null,     // {date, name, sum}, "here is how the plan went", after saving one
   deloadPick: null,     // {start} while tapping out a new deload's two ends
-  deloadForm: null,     // {id, start, end, isNew} — the deload editor
+  deloadForm: null,     // {id, start, end, isNew}, the deload editor
   accordions: {},   // all accordions start collapsed
   volumeWeek: null,     // program-week mode: which week the Volume tab is reading
   volAnchor: null,      // rolling mode: the LAST of the seven days it is reading
@@ -1343,25 +1358,33 @@ const ui = {
   timerOrder: false,    // …the pinned timer dials are, wherever they appear
   entryOrder: false,    // …the exercise list inside the open workout day is
   libOrder: false,      // …the exercise library is, inside each of its groups
-  progSeg: "progress",  // progress | placeholder — Progress sub-tab
+  progSeg: "progress",  // progress | standards, Progress sub-tab
   progressSelected: null,
+  /* the strength standards lookup (Progress → Standards). Like the 1RM
+     calculator it is a question you ask, not a feed: `std` is the form,
+     `stdResult` the last answer, and neither is cleared by changing tab.
+     See stdForm() for why the form is built once and then left alone. */
+  std: null,            // {slug, sex, bw, bwFrom, lift, liftFromLog}
+  stdResult: null,      // the last check, see stdCheck()
+  stdPick: false,       // the standards' own exercise picker is open
+  stdQ: "",             // …and its search box
   /* the progress graph is an instrument, not a picture: chartView is the
      slice of the series on screen (float index bounds), chartSel the entry
      whose dot is open, chartFull which graph has taken over the screen.
-     There are two graphs — "main" on the Progress tab and "ex" inside the
-     exercise window — and each keeps its own zoom and its own selection. */
-  chartView: { main: null, ex: null },   // {lo, hi} — null means "the whole series"
+     There are two graphs ("main" on the Progress tab and "ex" inside the
+     exercise window) and each keeps its own zoom and its own selection. */
+  chartView: { main: null, ex: null },   // {lo, hi}, null means "the whole series"
   chartSel: { main: null, ex: null },    // id of the logged entry behind the selected dot
   chartFull: null,      // "main" | "ex" | null
   calc: { weight: "", reps: "", unit: null },  // the 1RM calculator's fields
-  calcResult: null,     // {weight, reps, oneRM, unit} — the last calculation
+  calcResult: null,     // {weight, reps, oneRM, unit}, the last calculation
   goalEditing: null,    // exercise name whose goal is being edited
   goalVal: "",
   volGoalEditing: null, // muscle group whose set target is being edited
   volGoalVal: "",
   libraryQ: "",
   libraryFilter: "All",
-  librarySeg: "exercises", // exercises | presets — Library sub-tab
+  librarySeg: "exercises", // exercises | presets, Library sub-tab
 };
 
 function resetTransient() {
@@ -1420,7 +1443,7 @@ const sectionTitle = (children, right = "") =>
 const placeholder = (token, height, children = "") =>
   `<div class="pb-placeholder" style="height:${height}px"><div style="padding:8px">${children || token}<div style="font-size:9px;margin-top:2px;opacity:.7">${children ? token : "swap me in code"}</div></div></div>`;
 
-/* The unit dropdown that lives inside a weight field's label — tap "kg" and
+/* The unit dropdown that lives inside a weight field's label: tap "kg" and
    pick whatever the machine in front of you is stamped in. The calculator
    has one of its own, so the binding is a parameter. */
 const unitSelect = (value, bind = "entryUnit") =>
@@ -1458,7 +1481,7 @@ function accordion(id, title, iconHtml, content) {
 }
 
 /* Animate an accordion open/closed by transitioning its measured height, in
-   place — no full re-render, so no flicker. Height is released to auto when the
+   place, with no full re-render, so no flicker. Height is released to auto when the
    transition ends so the panel can still reflow if its content ever changes. */
 function setAccordion(card, open) {
   const body = card.querySelector(".pb-acc-body");
@@ -1548,8 +1571,8 @@ function playLayerExit(root, node) {
    the rest of the file asks it in CSS rather than guessing in pixels. The
    variables it writes, and what styles.css builds out of them, are
    documented in the VIEWPORT ENGINE block there; this half is only the
-   two answers that cannot be reached from CSS — how much to scale by, and
-   how wide the frame is — plus the listeners that keep them current.
+   two answers that cannot be reached from CSS (how much to scale by, and
+   how wide the frame is) plus the listeners that keep them current.
 
    The shape of the answer:
 
@@ -1557,7 +1580,7 @@ function playLayerExit(root, node) {
      scale  = clamp(1, min(availW / frameW, availH / VP_REF_H), VP_SCALE_MAX)
 
    On any phone frameW *is* availW, so the ratio is 1 and the clamp pins
-   the scale at 1 — the design renders at the size it was drawn, on a 320pt
+   the scale at 1, so the design renders at the size it was drawn, on a 320pt
    SE and on a 440pt Pro Max alike, and the wide handsets simply stop
    leaving grey bars either side. Past VP_FLUID_MAX the frame refuses to
    keep widening (a 900pt-wide phone layout is a bad layout) and grows by
@@ -1574,7 +1597,7 @@ const VP_FLUID_MAX = 480;   // widest the frame is allowed to be laid out at
 const VP_REF_H     = 820;   // the logical height a scaled-up frame aims for
 const VP_SCALE_MAX = 1.35;  // ceiling, so a 4K monitor doesn't get a billboard
 
-/* what the frame is currently scaled by. 1 on every phone — but pointer
+/* what the frame is currently scaled by. 1 on every phone, but pointer
    coordinates arrive in screen pixels while the frame is laid out in its
    own, so anything doing arithmetic between the two divides by this. */
 let vpScale = 1;
@@ -1626,8 +1649,8 @@ function applyViewport() {
   const scale = Math.min(VP_SCALE_MAX, Math.max(1, Math.min(availW / frameW, vpBaseH / VP_REF_H)));
 
   const next = Math.round(scale * 1e4) / 1e4;
-  /* nothing changed is the common case — a scroll that moved the browser
-     toolbar, a keyboard opening — and writing the same values back would
+  /* nothing changed is the common case (a scroll that moved the browser
+     toolbar, a keyboard opening) and writing the same values back would
      invalidate style for no reason, and risk a ResizeObserver loop. Only a
      browser without dvh has to carry on regardless: there --pb-vh is a
      measured number rather than a unit, and it is what just moved. */
@@ -1655,7 +1678,7 @@ window.addEventListener("pageshow", applyViewport);
 if (window.visualViewport) window.visualViewport.addEventListener("resize", applyViewport);
 /* the braces to that belt: a ResizeObserver on the document element is told
    the layout viewport changed by the layout engine itself, so it catches the
-   cases a resize event is known to miss or fire late for — an Android soft
+   cases a resize event is known to miss or fire late for: an Android soft
    keyboard, a desktop window still being dragged, a split-screen divider */
 if (window.ResizeObserver) new ResizeObserver(applyViewport).observe(document.documentElement);
 
@@ -1665,7 +1688,7 @@ const app = document.getElementById("app");
 
 function render() {
   /* re-measure the device first. The engine's own listeners normally have
-     this done already and the call costs nothing when nothing has changed —
+     this done already and the call costs nothing when nothing has changed,
      but a frame is about to be built against these numbers, so this is the
      one moment they are worth being certain of. */
   applyViewport();
@@ -1702,7 +1725,7 @@ function render() {
   /* the frame is exactly one viewport tall so the content area scrolls
      internally and the bottom nav is always visible without scrolling the
      page. Both of its dimensions, and the scale it is drawn at, come from
-     the viewport engine above — see the VIEWPORT ENGINE block in styles.css
+     the viewport engine above, see the VIEWPORT ENGINE block in styles.css
      for what .pb-viewport / .pb-frame resolve to on a given device. */
   let html = `<div class="pb-viewport">
   <div class="pb-root pb-frame">`;
@@ -1728,7 +1751,7 @@ function render() {
   if (tab === "calc") html += renderCalc();
   html += `</div>`;
 
-  /* "time's up" banner — floats above the nav on whatever tab you're on, so a
+  /* "time's up" banner, floating above the nav on whatever tab you're on, so a
      rest timer finishing while you're logging a set still gets your attention */
   if (ui.timerToast) {
     html += `<div class="pb-sheet" style="position:absolute;left:12px;right:12px;bottom:var(--pb-toast-b);z-index:40">
@@ -1744,7 +1767,7 @@ function render() {
     </div>`;
   }
 
-  /* FAB — always-visible overlay on Log */
+  /* FAB: always-visible overlay on Log */
   if (tab === "log" && !ui.workoutSheet) {
     html += `<button data-action="fab" class="pb-btn pb-gold" style="position:absolute;right:18px;bottom:var(--pb-fab-b);width:56px;height:56px;border-radius:18px;box-shadow:0 8px 22px rgba(233,185,73,.35);z-index:30">${icon("plus", 26, 'stroke-width="2.6"')}</button>`;
   }
@@ -1772,6 +1795,7 @@ function render() {
   /* overlays */
   if (ui.workoutSheet) html += renderWorkoutSheet(ui.workoutSheet, library, log, settings, unit);
   if (ui.picking) html += renderExercisePicker(library);
+  if (ui.stdPick) html += renderStdPicker();
   if (ui.entryForm) html += renderEntryFields(ui.entryForm, unit);
   /* the set editor speaks the unit of the exercise it belongs to, not the default */
   if (ui.setForm) html += renderSetForm(ui.setForm, ui.entryForm ? unitOf(ui.entryForm.f) : unit);
@@ -1810,7 +1834,7 @@ function render() {
     prevOverlayKeys.forEach((key) => {
       if (!curOverlayKeys.has(key) && oldOverlayEls[key]) playLayerExit(root, oldOverlayEls[key]);
     });
-    /* crossfade the page body — but not while an overlay is opening/closing,
+    /* crossfade the page body, but not while an overlay is opening/closing,
        since that overlay's own slide is the movement the eye should follow. */
     if (newMain && oldMain && oldMainRect && !overlaysChanged) {
       const tabChanged = prevTab != null && prevTab !== ui.tab;
@@ -1828,7 +1852,7 @@ function render() {
   if (af) af.focus();
 
   paintTimers();   // put the freshly mounted rings/digits at the right position
-  persist();       // every frame is a save point — see snapshotDrafts()
+  persist();       // every frame is a save point, see snapshotDrafts()
 }
 
 /* ───────────────────────────── HOME ───────────────────────────────── */
@@ -1873,7 +1897,7 @@ function renderPinnedPresets() {
 }
 
 /* One pinned timer: a round dial you tap to start, pause or clear, with the
-   explicit pause / reset pair underneath — mid-set, with a bar in your
+   explicit pause / reset pair underneath: mid-set, with a bar in your
    hands, "tap the dial and hope it did the right thing" isn't good enough,
    so every pinned dial gets the same buttons the Timer tab's cards have,
    wherever it appears: Home, the workout window and the exercise window. */
@@ -1882,7 +1906,7 @@ function pinnedTimerDial(t) {
   const left = timerRemaining(t);
   const done = phase === "done";
   const frac = t.duration > 0 ? Math.max(0, Math.min(1, left / t.duration)) : 0;
-  /* an idle dial is a full but quiet ring — clearly "ready", not "finished" */
+  /* an idle dial is a full but quiet ring, clearly "ready", not "finished" */
   const color = done ? "var(--green)" : phase === "paused" ? "var(--steel)" : phase === "idle" ? "var(--raise)" : "var(--gold)";
   const action = done ? "timer-reset" : phase === "running" ? "timer-pause" : "timer-start";
 
@@ -1993,7 +2017,7 @@ function renderDeloadBanner(status) {
    on, with the weights you decided on, and it is on the home screen today
    only because today is when it is. So it sits above the pinned strip and
    below Start, it names the numbers rather than the moves, and it is gone
-   again tomorrow — the strip underneath is still there for the days you
+   again tomorrow, and the strip underneath is still there for the days you
    never planned, which for most people is most of them.
 
    Tomorrow gets one quiet line and no card. Knowing it is coming is
@@ -2080,7 +2104,7 @@ function renderHome(settings, currentWeek, unit) {
            app cannot answer by being tapped. A rule that decides what happens
            to someone's data (what counts, what is dropped, what a preset
            saves, where the numbers live) belongs here. Narration of the
-           interface does not — nobody needs to be told that + adds an
+           interface does not: nobody needs to be told that + adds an
            exercise, and the same detail volunteered mid-set is noise. -->
       ${accordion("howto", T("acc.howto.title"), icon("info", 16, 'style="color:var(--blue)"'), T("acc.howto.body"))}
       ${accordion("counts", T("acc.counts.title"), icon("list-checks", 16, 'style="color:var(--red)"'), T("acc.counts.body"))}
@@ -2242,14 +2266,14 @@ function renderCalendar(log, library, marks, planned, range, legend) {
 
   const cells = monthGrid(month).map((c) => {
     const dl = deloadOn(state.deloads, c.iso);
-    /* "in the period on screen" — the program week, or the seven days
+    /* "in the period on screen", meaning the program week, or the seven days
        ending on the day you picked, depending on the setting */
     const inWeek = c.iso >= range.from && c.iso <= range.to;
     const anchor = rollingWeeks() && c.iso === range.to;
     const isToday = c.iso === today;
     /* Two rows of dots that never fight: a SOLID dot is a group you
        trained, a HOLLOW one is a group you have planned and not done yet.
-       Same dot, same colour, filled or not — which is exactly the
+       Same dot, same colour, filled or not, which is exactly the
        difference between the log and a plan everywhere else in the app.
        Anything already trained is dropped from the planned row so a day
        you did as planned reads as done, not half-done. */
@@ -2380,8 +2404,8 @@ function renderDeloadForm() {
 /* ── WHAT A PLANNED ENTRY SAYS IN ONE LINE ────────────────────────────
    Runs of identical sets are compressed, because "3 sets · 8 × 100 kg" is
    how anybody writes down a plan and "8 × 100 · 8 × 100 · 8 × 100" is not.
-   A planned exercise with no numbers on it is a legitimate plan — the
-   running order, decided, the numbers left for the day — and says so. */
+   A planned exercise with no numbers on it is a legitimate plan (the
+   running order, decided, the numbers left for the day) and says so. */
 function planTargetLine(t, unit) {
   if (!t) return T("plan.noNumbers");
   if (!t.sets) return T("sug.cardioSet", { min: t.minutes, rpe: t.intensity });
@@ -2403,7 +2427,7 @@ function planTargetLine(t, unit) {
 const planEntryLine = (pe) => planTargetLine(planTargetOf(pe), unitOf(pe));
 
 
-/* the exercise rows inside a plan card — a hollow dot (it hasn't happened),
+/* the exercise rows inside a plan card: a hollow dot (it hasn't happened),
    the lift, and the target beside it */
 const planEntryRows = (entries) => (entries || []).map((pe) => `<div style="display:flex;align-items:baseline;gap:8px;font-size:13px">
     <span style="width:8px;height:8px;border-radius:4px;border:1.5px solid ${colorFor(pe.kind === "cardio" ? "Cardio" : muscleOf(pe.exercise, state.library, pe.muscle))};box-sizing:border-box;flex-shrink:0;align-self:center"></span>
@@ -2413,7 +2437,7 @@ const planEntryRows = (entries) => (entries || []).map((pe) => `<div style="disp
 
 /* ── THE DAY CARD ─────────────────────────────────────────────────────
    Tapping a day used to do one invisible thing: move the volume window.
-   It still does, and now it also opens this — the one place that answers
+   It still does, and now it also opens this, the one place that answers
    "what is on this day", past or future, in the same shape either way:
    what you trained, what you planned, and the one or two things you can
    sensibly do about it from here. It is where a plan is born and where a
@@ -2450,9 +2474,9 @@ function renderDayCard(log, library, settings) {
       </button>
     </div>` : "";
 
-  /* the plan, if there is one — and whether it still has a day left to happen on */
+  /* the plan, if there is one, and whether it still has a day left to happen on */
   const planUnused = plan && past && !logged.length;
-  /* what is left of a plan this very day already started is not "not used" —
+  /* what is left of a plan this very day already started is not "not used":
      it is the rest of the session, still owed (see prunePlans) */
   const planLeft = plan && plan.startedOn === day;
   const planned = plan ? `<div style="padding:0 14px 12px">
@@ -2500,7 +2524,7 @@ function renderDayCard(log, library, settings) {
     </div>` : "";
 
   /* and when the day holds nothing at all, the one or two things worth
-     doing to it — which are not the same thing before and after it */
+     doing to it, which are not the same thing before and after it */
   let empty = "";
   if (!logged.length && !plan && !parked) {
     const planBtn = `<button data-action="plan-day" data-d="${day}" class="pb-btn ${past ? "pb-ghost" : "pb-gold"}" style="flex:1;padding:12px 0;font-size:13.5px">
@@ -2522,8 +2546,8 @@ function renderDayCard(log, library, settings) {
 
 /* ── THE WEEK AHEAD, IN A LIST ────────────────────────────────────────
    The calendar shows a month of hollow dots; this says what they are.
-   It is the surface for the thing the whole feature exists for — sitting
-   down on a Sunday and laying out the week — so it reads forwards from
+   It is the surface for the thing the whole feature exists for (sitting
+   down on a Sunday and laying out the week) so it reads forwards from
    today and keeps missed days on the end, where they can be tidied away
    rather than nagging from the middle of the list. */
 const PLAN_HORIZON = 21;   // days ahead the upcoming list looks
@@ -2563,7 +2587,7 @@ function renderPlanList(log) {
 }
 
 /* The Calendar tab: the month, the day you tapped, what is planned, the
-   deloads, and — underneath all of it — the volume readout the tab was
+   deloads, and, underneath all of it, the volume readout the tab was
    originally built around. Planning sits on top because it is the thing
    you come here to DO; the volume numbers are what you come here to READ. */
 function renderCalendarTab(log, library, settings, currentWeek) {
@@ -2589,7 +2613,7 @@ function renderVolume(log, library, settings, currentWeek) {
   const groups = libraryGroups(library);
   for (const e of log) { const m = e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, library, e.muscle); if (!groups.includes(m)) groups.push(m); }
 
-  /* the period on screen, and the one before it — the comparison an
+  /* the period on screen, and the one before it, which is the comparison an
      untargeted group is given instead of a bar it never asked for */
   const range = rolling ? windowEnding(anchor) : weekRange(week, settings.startDate);
   const before = rolling ? windowEnding(addDays(anchor, -7)) : weekRange(week - 1, settings.startDate);
@@ -2615,14 +2639,14 @@ function renderVolume(log, library, settings, currentWeek) {
        WITHOUT A TARGET THERE IS NO BAR. A progress bar is a promise that
        something is being progressed towards, and until you have said what
        you are aiming for the app has nothing honest to put at the far end
-       of it — the old one filled against the biggest group you happened to
+       of it: the old one filled against the biggest group you happened to
        train that week, so the bar moved for reasons that had nothing to do
        with you. It has no business calling a group neglected either: a week
        with no chest work is a rest from chest, not a failure, and nothing
        can tell those apart without a plan to read it against.
 
-       So an untargeted group states the one thing it can stand behind —
-       how this period compares with the one before it — and leaves the ⌖
+       So an untargeted group states the one thing it can stand behind,
+       how this period compares with the one before it, and leaves the ⌖
        button there for when you do want a bar to go with it. */
     const target = targets[g] > 0 ? targets[g] : null;
     const editing = ui.volGoalEditing === g;
@@ -2703,10 +2727,10 @@ function renderVolume(log, library, settings, currentWeek) {
 
 function renderProgress(log, library, goals, badges, settings, unit) {
   const segs = segControl("prog-seg", ui.progSeg,
-    [["progress", T("prog.segProgress")], ["placeholder", T("prog.segPlaceholder")]]);
+    [["progress", T("prog.segProgress")], ["standards", T("prog.segStandards")]]);
 
-  if (ui.progSeg === "placeholder")
-    return `<div class="" style="padding:12px 16px 0">${segs}${renderProgPlaceholder()}</div>`;
+  if (ui.progSeg === "standards")
+    return `<div class="" style="padding:12px 16px 0">${segs}${renderProgStandards(log, library, unit)}</div>`;
 
   const rows = dashboardRows(log, library, goals);
   const selected = ui.progressSelected;
@@ -2808,18 +2832,301 @@ function renderProgress(log, library, goals, badges, settings, unit) {
   </div>`;
 }
 
-/* The second segment of the Progress tab: reserved, on purpose, and labelled
-   as such rather than quietly missing. Ranks and strength standards land here. */
-function renderProgPlaceholder() {
-  return `<div>
-    ${sectionTitle(T("prog.placeholderTitle"))}
-    <!-- PLACEHOLDER_RANKS_SLOT — ranks & strength standards ship in a later version -->
-    ${placeholder("PLACEHOLDER_RANKS_SLOT", 120, T("prog.placeholderSlot"))}
-    <div style="font-size:12px;color:var(--faint);line-height:1.55;margin:12px 4px 0">
-      ${T("prog.placeholderNote")}
+/* ═════════════════════ STRENGTH STANDARDS ══════════════════════════
+   The second segment of the Progress tab. The first segment is you
+   against yourself; this one is you against everybody else: the
+   StrengthLevel tables in standards.js, which say what a man or a woman
+   of a given bodyweight lifts at each of five levels. The app draws
+   those levels as WOOD · GOLD · DIAMOND · TITANIUM · VIBRANIUM, and
+   that rename lives only in the labels: nothing here is written to a
+   record, so the words can change without touching anyone's data.
+
+   IT IS A LOOKUP, NOT A FEED, and that is the whole design. Seventy-one
+   lifts across two sexes and nineteen bodyweights is 12,780 numbers, and
+   any amount of it on screen at once is a wall nobody reads. You point
+   it at ONE lift, say what you weigh and what you lifted, and it answers
+   that one question. Nothing here is logged; nothing here writes to your
+   history. If you add a surface that shows a rank somewhere else, it
+   still has to come through stdCheck(), because there is no ambient rank.
+
+   Two things it deliberately refuses to guess:
+
+   · YOUR SEX. The tables are split, and picking for you hands back a
+     rank that is simply wrong, so the check stays disabled until it is
+     answered once, and then it is remembered in settings.
+   · YOUR NUMBER. A lift STD_MATCH can tie to your library is offered as
+     a pre-fill you can type straight over; everything else starts blank.
+     Rep-count standards (pull-ups, dips, push-ups) never pre-fill at
+     all: the log stores every set as reps × weight, and there is no
+     honest way to read "your best set at bodyweight" back out of that.  */
+
+/* A tier's colour is `--tier-<level>`, defined per theme in the THEMES block
+   of styles.css, a variable rather than a hex, because a tier name has to
+   stay readable on a near-white card as well as a dark one, and the two need
+   different values to manage it. Nothing here does hex-alpha arithmetic on
+   them for that reason; the tints come from the neutral tokens instead. */
+const STD_COLORS = Object.fromEntries(STD_LEVELS.map((l) => [l, `var(--tier-${l})`]));
+
+const stdLevelLabel = (lvl) => T("std.lvl." + lvl);
+
+/* A standards lift's name in the user's language. Same display-layer rule as
+   the built-in library: the slug is the identity, the name is only a label,
+   and English is read straight off the record rather than duplicated. */
+const stdName = (e) => {
+  const table = STD_EX[langCode()];
+  return (e && table && table[e.slug]) || (e ? e.name : "");
+};
+
+/* The bodyweight rows of a table are 5 kg apart. A bodyweight between two of
+   them is read as the line between the two; one off either end is read as
+   that end, because past the last row there is no data to extrapolate from,
+   only arithmetic. */
+function stdRow(ex, sex, bwKg) {
+  const grid = STD_BW[sex] || STD_BW.male;
+  const rows = (sex === "female" ? ex.f : ex.m).split(";").map((r) => r.split(",").map(Number));
+  const last = grid.length - 1;
+  if (!(bwKg > grid[0])) return rows[0];
+  if (bwKg >= grid[last]) return rows[last];
+  let i = 0;
+  while (i < last - 1 && grid[i + 1] <= bwKg) i++;
+  const t = (bwKg - grid[i]) / (grid[i + 1] - grid[i]);
+  return rows[i].map((v, k) => v + (rows[i + 1][k] - v) * t);
+}
+
+/* The five thresholds as they will be READ: converted into the unit on screen
+   and rounded there, once. The ladder and the verdict then run off the same
+   numbers, so a row can never say 102.5 while the rank disagrees with it. */
+function stdThresholds(ex, sex, bwKg, unit) {
+  return stdRow(ex, sex, bwKg).map((v) =>
+    ex.reps ? Math.round(v) : Math.round(convertWeight(v, "kg", unit) * 10) / 10);
+}
+
+/* the highest tier reached, or -1 for under the first one */
+function stdRank(thresholds, value) {
+  let r = -1;
+  thresholds.forEach((t, i) => { if (value >= t) r = i; });
+  return r;
+}
+
+/* a rep count is a whole number of finished reps, so half a rep is no rep */
+const stdValueOf = (ex, raw) => (ex && ex.reps ? Math.floor(+decimalize(raw)) : +decimalize(raw));
+
+const stdReady = (f) => {
+  const ex = f && f.slug ? STD_BY_SLUG[f.slug] : null;
+  return !!ex && !!f.sex && +decimalize(f.bw) > 0 && stdValueOf(ex, f.lift) > 0;
+};
+
+/* The answer, worked out once and then held in ui.stdResult: it carries the
+   numbers it was computed FROM as well as the verdict, so the card can name
+   them and can never end up describing a lift you have since typed over. */
+function stdCheck(f, unit) {
+  if (!stdReady(f)) return null;
+  const ex = STD_BY_SLUG[f.slug];
+  const bw = +decimalize(f.bw);
+  const value = stdValueOf(ex, f.lift);
+  const th = stdThresholds(ex, f.sex, convertWeight(bw, unit, "kg"), unit);
+  const rank = stdRank(th, value);
+  const nextI = rank + 1 < STD_LEVELS.length ? rank + 1 : null;
+  const floor = rank >= 0 ? th[rank] : 0;
+  const span = nextI == null ? 0 : th[nextI] - floor;
+  return {
+    slug: ex.slug, reps: !!ex.reps, sex: f.sex, unit, bw, value, th, rank, nextI,
+    toGo: nextI == null ? null : Math.round((th[nextI] - value) * 10) / 10,
+    progress: nextI == null ? 1 : span > 0 ? Math.min(1, Math.max(0, (value - floor) / span)) : 1,
+  };
+}
+
+/* What the log already knows about this lift, offered as a pre-fill. Only the
+   built-ins STD_MATCH ties to this slug count, matched by their stable id, so
+   a built-in the user renamed still resolves, and only their est. 1RM, which
+   is the number these tables are written in. */
+function stdBestFromLog(slug, log, library) {
+  const ex = STD_BY_SLUG[slug];
+  if (!ex || ex.reps) return null;
+  const names = new Set(library.filter((x) => STD_MATCH[x.id] === slug).map((x) => x.name));
+  if (!names.size) return null;
+  let best = null;
+  for (const e of log) {
+    if (e.kind === "cardio" || !names.has(e.exercise)) continue;
+    const m = metricOf(e);
+    if (m != null && (best == null || m > best)) best = m;
+  }
+  return best;
+}
+
+/* The form is built the first time it is looked at and then left alone, so a
+   number typed over a pre-fill survives every re-render and every trip to
+   another tab. Bodyweight starts at the most recent Body check-in that
+   recorded one: the app already knows what you weigh, and asking again would
+   be asking you to keep a second copy of it. Typing over it is a what-if,
+   not a correction, so it is never written back. */
+function stdForm() {
+  if (!ui.std) {
+    const last = [...(state.body || [])].sort((a, b) => (a.date < b.date ? 1 : -1))
+      .find((r) => +decimalize(r.weight) > 0);
+    ui.std = {
+      slug: null, sex: state.settings.sex || "",
+      bw: last ? String(last.weight) : "", bwFrom: last ? last.date : null,
+      lift: "", liftFromLog: false,
+    };
+  }
+  return ui.std;
+}
+
+/* one threshold as it is printed. "<1" is the tables' own word for a level
+   that sits under a single rep, and it is not the same claim as "0" */
+const stdCell = (v, reps, unit) => (reps
+  ? (v <= 0 ? esc(T("std.underOne")) : v)
+  : `${trimNum(v)}<span style="font-size:10.5px;color:var(--muted);font-weight:600"> ${unit}</span>`);
+
+function renderProgStandards(log, library, unit) {
+  const f = stdForm();
+  const ex = f.slug ? STD_BY_SLUG[f.slug] : null;
+  const res = ui.stdResult;
+  const ready = stdReady(f);
+
+  const liftHint = ex && ex.reps ? T("std.repsHint")
+    : f.liftFromLog ? T("std.liftFromLog")
+    : ex ? T("std.liftHint") : "";
+
+  const form = `<div class="pb-card" style="padding:14px;margin-bottom:16px">
+    <div class="pb-label" style="margin-bottom:6px">${T("std.lift")}</div>
+    <button data-action="std-pick-open" class="pb-btn pb-ghost" style="width:100%;justify-content:flex-start;gap:9px;padding:12px 13px;margin-bottom:12px;text-align:left">
+      ${ex
+        ? `<span style="width:8px;height:8px;border-radius:4px;background:${colorFor(ex.group)};flex-shrink:0"></span>
+           <span style="flex:1;min-width:0;font-weight:600;font-size:14px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(stdName(ex))}</span>
+           ${chip(ex.reps ? T("std.measReps") : T("std.meas1rm"), "var(--muted)")}`
+        : `${icon("search", 15, 'style="color:var(--gold);flex-shrink:0"')}
+           <span style="flex:1;min-width:0;font-size:14px;color:var(--muted)">${T("std.chooseLift")}</span>`}
+      ${icon("chevron-right", 15, 'style="color:var(--faint);flex-shrink:0"')}
+    </button>
+
+    <div class="pb-label" style="margin-bottom:6px">${T("std.sex")}</div>
+    ${segControl("std-sex", f.sex, [["male", T("std.male")], ["female", T("std.female")]])}
+    ${f.sex ? "" : `<div style="font-size:11.5px;color:var(--faint);margin:-8px 0 12px">${T("std.sexHint")}</div>`}
+
+    <div style="display:flex;gap:10px">
+      <div style="flex:1">${field(T("std.bodyweight", { unit }),
+        `<input class="pb-input" ${NUM} data-bind="std.bw" value="${esc(f.bw)}" placeholder="—">`,
+        `<span id="stdBwHint">${f.bwFrom ? T("std.bwFrom", { date: fmtShort(f.bwFrom) })
+          : f.bw ? "" : T("std.bwNone")}</span>`)}</div>
+      <div style="flex:1">${field(ex && ex.reps ? T("std.bestReps") : T("std.best", { unit }),
+        `<input class="pb-input" ${NUM} data-bind="std.lift" value="${esc(f.lift)}" placeholder="—">`,
+        /* patched in place while typing, like the bodyweight hint beside it,
+           see handleBind */
+        `<span id="stdLiftHint">${liftHint}</span>`)}</div>
     </div>
+
+    <button id="stdCheckBtn" data-action="std-check" ${ready ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:14px 0;font-size:15.5px;margin-top:2px;opacity:${ready ? 1 : 0.45}">
+      ${icon("gauge", 17)} ${T("std.check")}
+    </button>
+  </div>`;
+
+  const intro = `<div style="font-size:13px;color:var(--muted);line-height:1.55;margin:0 2px 14px">${T("std.intro")}</div>`;
+  const footer = `<div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 4px 10px">${T("std.footer")}</div>`;
+
+  if (!res)
+    return `<div>
+      ${intro}
+      ${form}
+      <div class="pb-card" style="padding:24px;text-align:center;color:var(--faint);font-size:13px;line-height:1.6">
+        ${icon("medal", 26, 'style="margin:0 auto 10px;display:block"')}
+        ${T("std.empty")}
+      </div>
+      ${footer}
+      <div style="height:14px"></div>
+    </div>`;
+
+  const resEx = STD_BY_SLUG[res.slug];
+  const lvl = res.rank >= 0 ? STD_LEVELS[res.rank] : null;
+  const color = lvl ? STD_COLORS[lvl] : "var(--muted)";
+  const nextLvl = res.nextI == null ? null : STD_LEVELS[res.nextI];
+
+  const ladder = STD_LEVELS.map((l, i) => {
+    const reached = res.rank >= i, at = res.rank === i, c = STD_COLORS[l];
+    return `<div style="display:flex;align-items:center;gap:10px;padding:10px 13px;border-bottom:${i === STD_LEVELS.length - 1 ? "none" : "1px solid var(--border-soft)"};background:${at ? "var(--raise)" : "transparent"}">
+      <div style="width:9px;height:9px;border-radius:5px;flex-shrink:0;background:${reached ? c : "transparent"};border:1.5px solid ${reached ? c : "var(--border)"}"></div>
+      <div style="flex:1;min-width:0;font-size:11.5px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:${reached ? c : "var(--faint)"}">${stdLevelLabel(l)}</div>
+      ${at ? chip(T("std.you"), c) : ""}
+      <div class="pb-num" style="font-weight:700;font-size:15px;flex-shrink:0;color:${reached ? "var(--text)" : "var(--muted)"}">${stdCell(res.th[i], res.reps, res.unit)}</div>
+    </div>`;
+  }).join("");
+
+  return `<div>
+    ${intro}
+    ${form}
+
+    <div class="pb-card" style="padding:16px 15px;margin-bottom:16px;border-color:${lvl ? color : "var(--border)"}">
+      <div class="pb-label" style="margin-bottom:5px">${T("std.youAre")}</div>
+      <div class="pb-num" style="font-size:${lvl ? 34 : 22}px;font-weight:700;line-height:1.05;letter-spacing:.02em;color:${color}">
+        ${lvl ? stdLevelLabel(lvl) : T("std.underFirst", { level: stdLevelLabel(STD_LEVELS[0]) })}
+      </div>
+      <div style="font-size:12.5px;color:var(--muted);margin-top:7px">
+        ${res.reps
+          ? T("std.fromReps", { name: esc(stdName(resEx)), reps: TN("rep", res.value), bw: trimNum(res.bw), unit: res.unit })
+          : T("std.from", { name: esc(stdName(resEx)), value: trimNum(res.value), unit: res.unit, bw: trimNum(res.bw) })}
+      </div>
+      <div style="display:flex;align-items:center;gap:9px;margin-top:11px">
+        <div style="flex:1;height:6px;background:var(--surface2);border-radius:3px;overflow:hidden">
+          <div style="height:100%;width:${Math.round(res.progress * 100)}%;background:${nextLvl ? STD_COLORS[nextLvl] : color};transition:width .25s"></div>
+        </div>
+        <div style="font-size:11.5px;font-weight:700;flex-shrink:0;color:${nextLvl ? "var(--muted)" : color}">
+          ${nextLvl == null ? T("std.top")
+            : res.reps ? T("std.toGoReps", { n: TN("rep", res.toGo), level: stdLevelLabel(nextLvl) })
+            : T("std.toGo", { n: trimNum(res.toGo), unit: res.unit, level: stdLevelLabel(nextLvl) })}
+        </div>
+      </div>
+    </div>
+
+    ${sectionTitle(T("std.ladder"), `<span style="font-size:11px;color:var(--faint)">${T("std.atBodyweight", { bw: trimNum(res.bw), unit: res.unit })}</span>`)}
+    <div class="pb-card" style="overflow:hidden;margin-bottom:16px">${ladder}</div>
+
+    ${footer}
     <div style="height:14px"></div>
   </div>`;
+}
+
+/* The standards' own exercise picker. It is a separate list from the library
+   picker on purpose: these 71 lifts are the tables', not the user's, so
+   nothing here can be added to, renamed, or filed somewhere else: the
+   category headings are the app's own words (T("group.…")) painted in the
+   user's group colours, which is what lets a renamed group keep its colour
+   without lending its name to somebody else's list. */
+function renderStdPicker() {
+  return fullScreen(60, `
+    <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px">
+      <button data-action="std-pick-close" style="color:var(--muted);padding:4px">${icon("arrow-left", 21)}</button>
+      <div style="position:relative;flex:1">
+        ${icon("search", 15, 'style="position:absolute;left:11px;top:12px;color:var(--faint)"')}
+        <input class="pb-input" style="padding-left:34px" placeholder="${T("std.search")}" data-bind="stdq" value="${esc(ui.stdQ)}" data-autofocus>
+      </div>
+    </div>
+    <div class="pb-scroll" data-scrollkey="stdPicker" style="flex:1;overflow-y:auto;padding:8px 16px calc(30px + var(--pb-sab))">
+      <div id="stdPickList">${renderStdPickerList()}</div>
+    </div>
+  `, "stdPick");
+}
+
+function renderStdPickerList() {
+  const q = ui.stdQ.trim().toLowerCase();
+  /* searched on both the shown name and the English one, so someone reading
+     the app in Svenska can still type "bench" and find it */
+  const match = STD_EXERCISES.filter((e) =>
+    !q || stdName(e).toLowerCase().includes(q) || e.name.toLowerCase().includes(q));
+  if (!match.length)
+    return `<div class="pb-card" style="padding:24px;text-align:center;color:var(--muted);font-size:13px;line-height:1.6">${T("std.noMatch")}</div>`;
+
+  const chosen = ui.std && ui.std.slug;
+  return DEFAULT_GROUPS.map((g) => g.name).filter((g) => match.some((e) => e.group === g)).map((g) => `<div style="margin-bottom:14px">
+    ${sectionTitle(`<span style="color:${colorFor(g)}">${T("group." + g)}</span>`)}
+    <div class="pb-card" style="overflow:hidden">
+      ${match.filter((e) => e.group === g).map((e, i, arr) => `<button data-action="std-pick" data-slug="${e.slug}" style="width:100%;display:flex;align-items:center;gap:10px;padding:12px 14px;text-align:left;color:var(--text);border-bottom:${i < arr.length - 1 ? "1px solid var(--border-soft)" : "none"};background:${e.slug === chosen ? "rgba(233,185,73,.07)" : "transparent"}">
+        <div style="flex:1;min-width:0;font-weight:600;font-size:14px">${esc(stdName(e))}</div>
+        ${chip(e.reps ? T("std.measReps") : T("std.meas1rm"), "var(--muted)")}
+        ${e.slug === chosen ? icon("check", 16, 'style="color:var(--gold);flex-shrink:0"') : ""}
+      </button>`).join("")}
+    </div>
+  </div>`).join("");
 }
 
 /* ── the progress graph's own controls ────────────────────────────────
@@ -2932,7 +3239,7 @@ function renderGoalRow(r, unit, last, active) {
 /* ────────────────────── ONE REP MAX CALCULATOR ─────────────────────
    A lift and a rep count in, a whole training block's worth of numbers
    out: the estimated max, what to load for each percentage of it, and
-   what each rep count is worth. It's stand-alone on purpose — nothing
+   what each rep count is worth. It's stand-alone on purpose: nothing
    here is logged, nothing here needs an exercise to exist first, so it
    works for the barbell in front of you at a gym you're visiting once.
 
@@ -2985,7 +3292,7 @@ function renderCalc() {
     </div>`;
 
   const u = res.unit;
-  /* every row is built off the UNROUNDED max — rounding once, at the end of
+  /* every row is built off the UNROUNDED max, since rounding once, at the end of
      each row, is what keeps 95% of a 133.3 kg max reading 126.7 and not the
      126.6 you get from rounding twice */
   const pctRows = CALC_PERCENTS.map((p, i) => {
@@ -3037,7 +3344,7 @@ function renderCalc() {
 /* Every group the user can choose, in their own order: the registered ones
    first, then anything a library row still refers to that somehow isn't
    registered (an old custom exercise, an import). A group with no exercises
-   in it yet is deliberately included — it has to be pickable before it can
+   in it yet is deliberately included, since it has to be pickable before it can
    ever have one. Uncategorized is never here; it isn't a choice. */
 function libraryGroups(library) {
   const g = groupNames();
@@ -3059,7 +3366,7 @@ function allGroups(library) {
    alternatives or details and the flag disappears, at which point the exercise
    is indistinguishable from the built-in ones, which is the point.
 
-   Some exercises don't need any of that — a machine only your gym has, a
+   Some exercises don't need any of that: a machine only your gym has, a
    movement whose name says everything. Dismissing the flag says exactly
    that, and is the other way off the list. */
 const needsDetails = (ex) =>
@@ -3111,7 +3418,7 @@ function renderLibraryList(library) {
 /* ─────────────────── MUSCLE GROUPS (add / recolour) ─────────────────
    The seven built-in groups aren't special: they live in the same list as
    anything you add, and the colour you give a group is the colour it wears
-   everywhere — the stripe down each logged exercise, the volume bars, the
+   everywhere: the stripe down each logged exercise, the volume bars, the
    preset dots, the library headings. Renaming one carries every exercise,
    preset and weekly target across with it, so nothing is orphaned.
 
@@ -3156,8 +3463,8 @@ function renderGroupSheet(library) {
 
    Pointer events rather than HTML5 drag-and-drop: `dragstart` never fires
    on touch, and this is a phone app first. The drag runs entirely on
-   inline transforms without a re-render — render() rebuilds #app wholesale
-   and would drop the node mid-gesture — and only commits on release.
+   inline transforms without a re-render (render() rebuilds #app wholesale
+   and would drop the node mid-gesture) and only commits on release.
 
    One gesture, several lists: a row says which list it belongs to with
    `data-dragrow="<kind>"`, and DRAG_COMMIT says who to hand the finished
@@ -3227,8 +3534,8 @@ function reorderGroups(from, to) {
 /* Reordering presets moves them in state.presets, which is the one list
    every other view is a slice of. The pinned strip on Home is such a
    slice, so dragging there rewrites only the slots the pinned presets
-   already occupy and leaves the unpinned ones exactly where they sit —
-   otherwise arranging your home screen would silently shuffle the
+   already occupy and leaves the unpinned ones exactly where they sit,
+   since otherwise arranging your home screen would silently shuffle the
    library behind it. */
 function reorderPresets(from, to) {
   const all = [...(state.presets || [])];
@@ -3445,7 +3752,7 @@ function presetToEntries(p) {
 
 const presetCountLabel = (n) => `${n} ${n === 1 ? "move" : "moves"}`;
 
-/* the exercise list shown inside a preset card — color dot + name per row */
+/* the exercise list shown inside a preset card: color dot + name per row */
 const presetExerciseList = (exs) =>
   (exs || []).map((ex) => `<div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)">
     <span style="width:8px;height:8px;border-radius:4px;background:${colorFor(ex.muscle)};flex-shrink:0"></span>${esc(exLabel(ex.exercise))}
@@ -3733,7 +4040,7 @@ function exWindowViewBody(ex, hist) {
 
 /* ── the lift's own progress panel ────────────────────────────────────
    Your best ever on this movement, then the same graph the Progress tab
-   draws for it — the whole point being that you can look a lift up, see
+   draws for it, the whole point being that you can look a lift up, see
    what it is, and see where you are on it without leaving the page.
 
    The graph is the real one, gestures and all, drawn from the "ex" scope
@@ -3838,7 +4145,7 @@ function exWindowEditBody(f, library) {
 /* One window, two jobs. `draft.planning` turns the workout sheet into the
    PLAN builder: the same picker, the same presets, the same set list and
    the same "beat last time" card, writing a dated intention instead of a
-   logged day. Reusing it is not a shortcut — deciding what to do and
+   logged day. Reusing it is not a shortcut: deciding what to do and
    writing down what you did are the same shape, and the only screen that
    has ever known that shape is this one. What changes is what the numbers
    MEAN when you leave, and that is a branch in commitWorkout, not here.
@@ -3849,7 +4156,7 @@ function exWindowEditBody(f, library) {
 function renderWorkoutSheet(draft, library, log, settings, unit) {
   const planning = !!draft.planning;
   const wk = rollingWeeks() ? null : weekOf(draft.date, settings.startDate);
-  /* when editing an existing day, its own rows already live in the log — drop
+  /* when editing an existing day, its own rows already live in the log, so drop
      them from the comparison base so the "vs your best" preview isn't counting
      the very rows being edited. */
   const baseLog = draft.editing ? log.filter((e) => !(draft.originalIds || []).includes(e.id)) : log;
@@ -3857,7 +4164,7 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
   const badges = planning ? {} : computeBadges(combined);
 
   /* entries with no numbers yet (typically dropped in from a preset) don't get
-     saved and don't count toward the workout — they're a "fill me in" prompt.
+     saved and don't count toward the workout, they're a "fill me in" prompt.
      A PLAN keeps them: naming the lifts and leaving the weights for the day is
      a plan, not an unfinished one. */
   const filledCount = draft.entries.filter(entryHasData).length;
@@ -3889,7 +4196,7 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
     const empty = !entryHasData(e);
     /* An entry started from a plan carries its target, and the card counts
        the target down as the sets go in. It is the only thing on this
-       screen that is not a record of something — hence the hollow ring
+       screen that is not a record of something, hence the hollow ring
        rather than a filled bar down the side. */
     const res = entryPlanResult(e);
     /* the count is for set lists; a cardio target is one line and the
@@ -3974,7 +4281,7 @@ function renderPickerList(library) {
   const q = ui.pickerQ, quick = ui.pickerQuick;
   /* two different lists on one screen: allGroups() shows the bucket so an
      uncategorized lift can still be picked, libraryGroups() is what a new one
-     can be filed under — the bucket is never a choice, only a Skip. */
+     can be filed under, and the bucket is never a choice, only a Skip. */
   const groups = allGroups(library);
   const pickable = libraryGroups(library);
   const match = library.filter((x) => !q || x.name.toLowerCase().includes(q.toLowerCase()));
@@ -4017,7 +4324,7 @@ function renderPickerList(library) {
   return html;
 }
 
-/* preset bundles shown inside the picker — tap to drop the whole bundle in */
+/* preset bundles shown inside the picker, tap to drop the whole bundle in */
 function renderPresetPickerList() {
   const presets = state.presets || [];
   if (!presets.length)
@@ -4067,7 +4374,7 @@ function renderExercisePicker(library) {
   `, "picker");
 }
 
-/* entry form — strength: sets/reps/weight/RPE · cardio: minutes/intensity */
+/* entry form, strength: sets/reps/weight/RPE · cardio: minutes/intensity */
 function entryComputed() {
   const { f, isDraft } = ui.entryForm;
   const cardio = f.kind === "cardio";
@@ -4095,8 +4402,8 @@ function entryComputed() {
      the weight can wait for the day.
 
      Neither does one that is already on record. Unticking the set you
-     had confirmed is you taking the claim back — the lift goes to planned
-     and not done — and a save button that greys out at exactly that moment
+     had confirmed is you taking the claim back (the lift goes to planned
+     and not done) and a save button that greys out at exactly that moment
      is the app refusing to let someone correct their own log. Only a
      brand-new entry has to carry numbers, because a blank one would be a
      row nobody asked for. */
@@ -4112,19 +4419,19 @@ function entryComputed() {
    little editor. Add as many as you want, edit or drop any of them. */
 /* ── GHOST SETS: THE PLAN, STANDING IN THE SET LIST ───────────────────
    When an entry carries a target, the sets you have not done yet are
-   already in the list — outlined, greyed, in position. Each one has two
+   already in the list, outlined, greyed, in position. Each one has two
    taps on it and they mean different things:
 
      · the row itself opens the set editor WITH THE TARGET LOADED, which
        is where you change it because the fourth rep felt like the eighth;
      · the ✓ logs the set exactly as planned.
 
-   Both are a tap. NOTHING IS EVER FILLED IN FOR YOU — the same rule the
+   Both are a tap. NOTHING IS EVER FILLED IN FOR YOU, the same rule the
    suggestion card lives under, and it matters more here, not less: a plan
    is three days old and was written by somebody who had not warmed up
    yet. What the ghost rows buy is the thing that made the whole feature
-   worth building — a session that went to plan is one tap per set instead
-   of three fields per set — without ever writing a number into the log
+   worth building: a session that went to plan is one tap per set instead
+   of three fields per set, without ever writing a number into the log
    that a finger did not put there.
 
    Done sets keep their target beside them and say, quietly, whether they
@@ -4198,15 +4505,15 @@ function renderSetList(f, unit, planning) {
 /* ── THE SUGGESTION, WHERE YOU ARE STANDING ───────────────────────────
    It goes at the TOP OF THE EXERCISE WINDOW, above Add set, not inside
    the little editor where the numbers are typed. That window is the one
-   moment you are deciding what to do — you have walked to the rack, you
-   have not loaded it yet — and by the time the set editor is open you
+   moment you are deciding what to do (you have walked to the rack, you
+   have not loaded it yet) and by the time the set editor is open you
    have already made the call and are only writing it down. The editor
    still gets a one-line version of the same target, because that is
    where you find out you were one rep short.
 
    Both are tap-to-load: the card opens a new set with the suggestion in
    it, the line fills the set you already have open. Nothing is ever
-   filled in for you without a tap — the log has to stay a record of what
+   filled in for you without a tap, since the log has to stay a record of what
    you did, never of what the app hoped you would do. */
 
 const sugWeight = (w) => String(Math.round(w * 100) / 100);
@@ -4222,7 +4529,7 @@ function sugOption(o, smaller, unit, fill) {
   const data = o.minutes != null
     ? `data-min="${o.minutes}" data-rpe="${o.intensity}"`
     : `data-reps="${o.reps}" data-weight="${sugWeight(o.weight)}"`;
-  /* identical framing on both — the only difference allowed is the quiet
+  /* identical framing on both, and the only difference allowed is the quiet
      tag saying which one moves the estimate less */
   return `<button data-action="${fill}" ${data} style="flex:1;min-width:0;text-align:left;padding:9px 10px;border-radius:11px;color:var(--text);background:var(--surface);border:1px solid var(--border)">
     <div style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)">${label}</div>
@@ -4275,8 +4582,8 @@ function renderSuggestion(form, unit) {
 }
 
 /* The session behind that card, set by set. Sits under whichever of the two
-   cards took the slot above — a plan does not make last time less worth
-   knowing — and says nothing at all before the first time. */
+   cards took the slot above (a plan does not make last time less worth
+   knowing) and says nothing at all before the first time. */
 function renderLastTime(form) {
   const { f, isDraft } = form;
   const last = lastOuting(f, isDraft);
@@ -4311,14 +4618,14 @@ function renderLastTime(form) {
 }
 
 /* ── THE TARGET, WHERE THE SUGGESTION WOULD HAVE BEEN ─────────────────
-   The "beat last time" card and this one answer the same question — what
-   am I going for — and only one of them can be right at a time. When the
+   The "beat last time" card and this one answer the same question, what
+   am I going for, and only one of them can be right at a time. When the
    entry carries a plan the question is already answered, days ago, by the
    person who sat down and answered it; re-offering two ways past last
    session on top of that is the app arguing with its own user. So the
    plan card TAKES THE SLOT, and the suggestion comes back the moment
    there is no plan (which includes any exercise you add to the day that
-   the plan never mentioned — those are ordinary entries and get the
+   the plan never mentioned, since those are ordinary entries and get the
    ordinary card). */
 function renderPlanTarget(f, unit) {
   const t = f.plan;
@@ -4329,8 +4636,8 @@ function renderPlanTarget(f, unit) {
   const beat = res && res.beat > 0;
 
   /* One line, and only when it is worth a line. How the ghost rows work is
-     worth saying before the first set and never again — the same rule that
-     keeps the rest of the app from narrating itself mid-set — and the
+     worth saying before the first set and never again, the same rule that
+     keeps the rest of the app from narrating itself mid-set, and the
      running count is already on the set list right below. What is left is
      the moment the plan is finished, which is the one thing here worth
      interrupting for. */
@@ -4414,7 +4721,7 @@ function renderEntryFields(form, unit) {
       ${field(T("entry.notes"), `<textarea class="pb-input" rows="2" data-bind="entry.notes" placeholder="—" style="resize:none">${esc(f.notes)}</textarea>`,
         detailed ? T("entry.notesHint") : "")}
 
-      <!-- live computed row — the sheet's Est. 1RM + "vs. Your Best" -->
+      <!-- live computed row: the sheet's Est. 1RM + "vs. Your Best" -->
       <div class="pb-card2" style="padding:12px 14px;display:flex;align-items:center;gap:12px;margin-top:4px">
         <div>
           <div class="pb-label">${cardio ? T("entry.sessionLoad") : detailed ? T("entry.bestSet1rm", { unit }) : T("entry.est1rm", { unit })}</div>
@@ -4444,12 +4751,12 @@ function renderEntryFields(form, unit) {
   `, "entryForm");
 }
 
-/* the single-set editor — same idea as the entry form, one level down */
+/* the single-set editor, same idea as the entry form, one level down */
 function renderSetForm(form, unit) {
   const { s, isNew, index } = form;
   const m = est1RM(+s.weight, +s.reps);
   const ok = setHasData(s);
-  /* the same target as the card behind this sheet, one line, one tap —
+  /* the same target as the card behind this sheet, one line, one tap,
      only on a NEW set, because correcting an old one is not a decision
      about what to lift next */
   /* …and nothing at all while the plan still has a set at this position:
@@ -4459,7 +4766,7 @@ function renderSetForm(form, unit) {
   const planned = ui.entryForm && ui.entryForm.f.plan && ui.entryForm.f.plan.sets;
   const stillPlanned = planned && index < planned.length;
   const sug = isNew && ui.entryForm && !stillPlanned ? setSuggestion(ui.entryForm.f, ui.entryForm.isDraft) : null;
-  /* both of them, same as the card behind this sheet — minus whichever one
+  /* both of them, same as the card behind this sheet, minus whichever one
      the open set already IS, which is what you get by tapping it there */
   const opts = sug && sug.kind === "step" && !sug.done
     ? sug.options.filter((o) => !(+s.reps === o.reps && +s.weight === o.weight))
@@ -4521,7 +4828,7 @@ function updateEntryPreview() {
    Body check-ins happen every week or two, not every session, so they no
    longer take up one of the five slots along the bottom of the screen.
    The whole section, unchanged, opens as a window from the ruler button
-   sitting next to the gear — same list, same stats, same editor. */
+   sitting next to the gear: same list, same stats, same editor. */
 
 function renderBodyWindow(body, unit) {
   return fullScreen(80, `
@@ -4574,7 +4881,7 @@ function renderBody(body, unit) {
       ${T("body.footer")}
     </div>
 
-    <!-- PLACEHOLDER_BODY_GRAPH_SLOT — future measurement graphs -->
+    <!-- PLACEHOLDER_BODY_GRAPH_SLOT: future measurement graphs -->
     ${placeholder("PLACEHOLDER_BODY_GRAPH_SLOT", 90, T("body.graphSlot"))}
     <div style="height:14px"></div>
   </div>`;
@@ -4601,8 +4908,8 @@ function renderBodyFormSheet(f, unit) {
    absolute timestamp rather than a ticking countdown, so a running timer
    stays honest through a re-render, a backgrounded tab, or the app being
    closed and reopened: anything that ran out while you were away is caught
-   the moment you come back. Saved timers are reusable — start, pause,
-   reset, start again — and any number can run at once.               */
+   the moment you come back. Saved timers are reusable (start, pause,
+   reset, start again) and any number can run at once.                */
 
 const RING_C = 326.73;   /* 2πr for the r=52 progress ring below */
 
@@ -4650,11 +4957,11 @@ function unlockAudio() {
    A sound is a list of notes: [start, frequency, length, waveform, gain,
    glideTo?]. Times are seconds from the moment it fires; `glideTo` sweeps
    the pitch across the note, which is what makes the siren and the swoop.
-   Keep the peak gains ≤ 1 — the master level below is what actually sets
+   Keep the peak gains ≤ 1, since the master level below is what actually sets
    the loudness, and it's per timer.                                    */
 
 const SOUND_LIB = {
-  /* the original three-tone — still the default */
+  /* the original three-tone, still the default */
   chime:    [[0, 880, .32, "sine", 1], [.34, 880, .32, "sine", 1], [.68, 1175, .36, "sine", 1]],
   /* one clean strike, for people who want to be told once */
   ding:     [[0, 1319, .55, "sine", 1], [0, 2637, .35, "sine", .28]],
@@ -4668,7 +4975,7 @@ const SOUND_LIB = {
   marimba:  [[0, 523, .26, "triangle", 1], [.13, 659, .26, "triangle", 1], [.26, 784, .26, "triangle", 1], [.39, 1046, .5, "triangle", 1]],
   /* digital watch: three tight blips */
   beep:     [[0, 1000, .1, "square", .6], [.16, 1000, .1, "square", .6], [.32, 1000, .16, "square", .6]],
-  /* the impatient one — eight alternating blips you cannot ignore */
+  /* the impatient one: eight alternating blips you cannot ignore */
   alarm:    Array.from({ length: 8 }, (_, i) => [i * .14, i % 2 ? 1100 : 880, .09, "square", .55]),
   /* rising arcade swoop */
   arcade:   [[0, 440, .12, "square", .5], [.1, 660, .12, "square", .5], [.2, 880, .12, "square", .5], [.3, 1320, .3, "square", .5, 1760]],
@@ -4693,7 +5000,7 @@ const volumeOf = (t) => {
 };
 
 /* 0.4 at full volume matches the loudness the single old chime played at,
-   so nothing gets louder by accident — the slider only goes down from what
+   so nothing gets louder by accident, and the slider only goes down from what
    people are already used to */
 const SOUND_CEILING = 0.4;
 
@@ -4716,10 +5023,10 @@ function playSound(id, volume = DEFAULT_VOLUME) {
       osc.connect(gain); gain.connect(audioCtx.destination);
       osc.start(t0 + at); osc.stop(t0 + at + dur + 0.02);
     }
-  } catch { /* ignore — a missing chime never blocks a workout */ }
+  } catch { /* ignore, a missing chime never blocks a workout */ }
 }
 
-/* Asked for on the first Start — a permission prompt needs a user gesture. */
+/* Asked for on the first Start, since a permission prompt needs a user gesture. */
 function askNotifyPermission() {
   try {
     if (window.Notification && Notification.permission === "default") Notification.requestPermission();
@@ -4756,15 +5063,15 @@ function sweepTimers() {
   return true;
 }
 
-/* Repaint running cards in place — never a full render, so the countdown can't
+/* Repaint running cards in place, never a full render, so the countdown can't
    flicker the page or steal focus from a field you're typing in. */
 function paintTimers() {
   for (const t of state.timers || []) {
     if (!t.endsAt) continue;
     const left = timerRemaining(t);
     const clock = fmtClock(left);
-    /* the same timer can be on screen more than once — its card on the Timer
-       tab, its dial on Home, its pill in the workout window — so every copy
+    /* the same timer can be on screen more than once (its card on the Timer
+       tab, its dial on Home, its pill in the workout window) so every copy
        is addressed by attribute, not by a single id. */
     document.querySelectorAll(`[data-tmr-time="${t.id}"]`).forEach((el) => { el.textContent = clock; });
     const frac = t.duration > 0 ? Math.max(0, Math.min(1, left / t.duration)) : 0;
@@ -4893,7 +5200,7 @@ function renderTimers() {
 /* ── timers where you're actually standing ────────────────────────────
    Rest starts the moment a set ends, not after you've closed two windows
    to reach the Timer tab. So your pinned timers ride along at the bottom
-   of the workout window and of each exercise — the same round dials as on
+   of the workout window and of each exercise: the same round dials as on
    the home screen, one tap to start, pause or clear, somewhere you can
    reach without losing what you were typing.
 
@@ -4960,7 +5267,7 @@ function renderTimerForm(form) {
    tick you'll hear over the music, and the 5-minute one you set before
    leaving for the water fountain wants a klaxon.
 
-   Every chip plays as you tap it and the slider previews on release —
+   Every chip plays as you tap it and the slider previews on release, since
    picking an alert you've never heard is how you end up with a timer
    you sleep through. */
 function renderSoundPicker(t) {
@@ -5112,7 +5419,7 @@ function niceTicks(min, max, count = 5, integers = false) {
 
 /* niceTicks' other half: when the axis has been dragged or pinched to a
    domain of its own, that domain is the answer and the ticks have to live
-   inside it rather than rounding it outward — otherwise every pan would
+   inside it rather than rounding it outward, since otherwise every pan would
    nudge the view it was meant to be reading. */
 function ticksWithin(min, max, count = 5) {
   if (!(max > min)) return [min];
@@ -5126,7 +5433,7 @@ function ticksWithin(min, max, count = 5) {
   return out;
 }
 
-/* monotone cubic interpolation (Fritsch–Carlson) — recharts' type="monotone" */
+/* monotone cubic interpolation (Fritsch–Carlson), recharts' type="monotone" */
 function monotonePath(pts) {
   const n = pts.length;
   if (n === 0) return "";
@@ -5192,10 +5499,10 @@ function drawCharts() {
    the other. Every function down here takes the scope with it.
 
    Gestures redraw the chart while they're still going, so the in-flight
-   pointer state has to outlive a redraw too — hence the module-level
+   pointer state has to outlive a redraw too, hence the module-level
    pointer map instead of variables inside the paint function.         */
 
-/* which graph a tapped control belongs to — anything unmarked is the tab's */
+/* which graph a tapped control belongs to, anything unmarked is the tab's */
 const chartScope = (el) => (el && el.dataset.scope) || "main";
 
 const CHART_MIN_SPAN = 0.5;       // zoom right in between two sessions
@@ -5213,7 +5520,7 @@ const chartYSeen = { main: null, ex: null };
    The graph used to stop dead at the first and last session, which reads
    like the end of the road: two points filled the frame and there was
    nowhere left to look. There is nothing after your last set yet, and
-   that empty space is the point — you can pull back until the history is
+   that empty space is the point: you can pull back until the history is
    a small thing in the corner and the rest of the year is in front of
    you. So the window is allowed well past both ends of the data, and the
    only rule left is that some of the line always stays on screen, so
@@ -5238,7 +5545,7 @@ const chartYView = (scope) => {
 };
 
 /* Every write goes through here so a horizontal move can't drop the vertical
-   view it wasn't thinking about, or the other way round — and so the same
+   view it wasn't thinking about, or the other way round, and so the same
    "never quite off screen" rule chartWindow applies sideways applies upward
    too, since a graph dragged past its own numbers is a blank page. */
 function setChartView(scope, v) {
@@ -5255,7 +5562,7 @@ function setChartView(scope, v) {
   ui.chartView[scope] = y ? { lo: v.lo, hi: v.hi, yLo: y.lo, yHi: y.hi } : { lo: v.lo, hi: v.hi };
 }
 
-/* Zoom around a focal index — whatever is under the fingers stays put.
+/* Zoom around a focal index, so whatever is under the fingers stays put.
    `fy` is the value under them; pass it (with the domain the gesture
    started from) to zoom both axes at once, leave it out and the vertical
    axis carries on fitting itself to what's on screen, which is what makes
@@ -5358,7 +5665,7 @@ function paintLineChart(wrap) {
   const vals = (shown.length ? shown : data).map((d) => d.y);
 
   /* Vertical domain: the axis fits itself to whatever is on screen until the
-     moment you move it yourself, and from then on it's yours — that's what
+     moment you move it yourself, and from then on it's yours, which is what
      lets you leave room above the line for the sets you haven't done yet. */
   const yView = chartYView(scope);
   const ticks = yView ? ticksWithin(yView.lo, yView.hi, 5) : niceTicks(Math.min(...vals), Math.max(...vals), 5);
@@ -5379,7 +5686,7 @@ function paintLineChart(wrap) {
 
   /* horizontal grid */
   for (const t of ticks) svg += `<line x1="${left}" x2="${right}" y1="${yOf(t).toFixed(2)}" y2="${yOf(t).toFixed(2)}" stroke="${cGrid}" stroke-dasharray="3 5"/>`;
-  /* One vertical guide per session slot, thinned out when they crowd — drawn
+  /* One vertical guide per session slot, thinned out when they crowd, drawn
      across the whole window rather than only where the data is, so the space
      in front of your last session reads as the same graph continuing and not
      as the graph having run out. The slots are counted off the data, so they
@@ -5392,7 +5699,7 @@ function paintLineChart(wrap) {
     if (x < left - 1 || x > right + 1) continue;
     svg += `<line x1="${x.toFixed(2)}" x2="${x.toFixed(2)}" y1="${top}" y2="${bottom}" stroke="${cGrid}" stroke-dasharray="3 5"/>`;
   }
-  /* axes + labels — only real sessions have a date to write under them */
+  /* axes + labels, and only real sessions have a date to write under them */
   svg += `<line x1="${left}" x2="${right}" y1="${bottom}" y2="${bottom}" stroke="${cAxis}"/>`;
   for (const t of ticks) svg += `<text x="${left - 6}" y="${(yOf(t) + 3.5).toFixed(2)}" fill="${cTick}" font-size="10.5" text-anchor="end">${t}</text>`;
   const lSkip = Math.max(1, Math.ceil((span + 1) / 7));
@@ -5590,7 +5897,7 @@ const newBodyRow = () => ({ id: uid(), date: todayStr(), weight: "", waist: "", 
    leaving the window to go add an exercise to the Library a gamble. Now a
    day with anything in it is parked in state.dayDrafts instead: it shows
    up at the top of the log, waits as long as you like, and reopens exactly
-   as you left it. A draft is NOT the log — nothing in it counts toward
+   as you left it. A draft is NOT the log: nothing in it counts toward
    sets, PRs, volume, weeks or the graphs until you actually save the day.
 
    (Distinct from state.drafts, which is the crash/lock snapshot of whatever
@@ -5618,7 +5925,7 @@ function closeWorksheet() {
   const draft = ui.workoutSheet;
   ui.workoutSheet = null; ui.picking = false; ui.entryForm = null; ui.setForm = null;
   /* Backing out of a PLAN keeps it. There is nothing to protect anyone
-     from — a plan is not the log, and a half-written plan for Wednesday is
+     from: a plan is not the log, and a half-written plan for Wednesday is
      still a plan for Wednesday. Emptying it out deletes it, same as a
      parked day. */
   if (draft && draft.planning) { commitPlan(draft); return; }
@@ -5650,7 +5957,7 @@ function volStep(dir) {
    counts.
 
    A plan keeps its blank entries. "Wednesday: these six lifts, weights on
-   the day" is a finished plan — dropping the ones without numbers, the
+   the day" is a finished plan, and dropping the ones without numbers, the
    way commitWorkout drops them, would delete most of it. And emptying a
    plan out is how you delete one, exactly as it is for a parked day. */
 function commitPlan(draft) {
@@ -5670,13 +5977,13 @@ function commitPlan(draft) {
     id, date: draft.date, name: (draft.name || "").trim(),
     entries, createdAt: draft.createdAt || Date.now(),
     /* editing what is left of a part-done plan must not forget the day the
-       rest of it is owed to — see prunePlans */
+       rest of it is owed to, see prunePlans */
     ...(prev && prev.startedOn ? { startedOn: prev.startedOn } : {}),
   }]) });
 }
 
 /* Turn one planned exercise into the blank entry that will log it. The
-   numbers do not come across — they become a TARGET on the side, which is
+   numbers do not come across, they become a TARGET on the side, which is
    the only thing standing between "I planned 8 × 100" and a log that
    says you lifted it. */
 function planEntryToDraftEntry(pe, planId, ix) {
@@ -5706,7 +6013,7 @@ const stripPlanLink = (e) => {
    Saving a day you planned is the one moment the app has something worth
    saying, so it says it once, here, and then never again unprompted. It
    counts planned sets, not lifts, because that is the unit the plan was
-   written in — and it counts them against the WHOLE plan, including the
+   written in, and it counts them against the WHOLE plan, including the
    exercises that never got filled in and are about to be dropped from the
    log, so skipping the last lift cannot quietly improve the score. */
 function renderPlanResult() {
@@ -5746,14 +6053,14 @@ function renderPlanResult() {
 /* ── SAVING A DAY IS NOT SAYING YOU ARE DONE WITH IT ──────────────────
    The plan a day was answering used to be deleted whole the moment the day
    was saved, on the assumption that saving is the end of the session. It is
-   not. People save after the first lift and carry on — and doing that used
+   not. People save after the first lift and carry on, and doing that used
    to cost them the rest of the plan twice over: the untouched entries were
    dropped as blanks (rightly, they hold no numbers) and the plan that would
    have put them back was gone with them.
 
    So a plan is consumed LIFT BY LIFT. What you filled in is done with; what
    is still sitting blank in the sheet has not happened yet and stays on the
-   plan, ready to be picked up — reopening the day hydrates it straight back
+   plan, ready to be picked up, and reopening the day hydrates it straight back
    in (see edit-day). A lift you DELETED from the sheet is gone from both,
    because taking it out is the decision not to do it. Only when nothing is
    left over does the plan disappear. */
@@ -5771,14 +6078,14 @@ function prunePlans(draft) {
     if (!left.length) continue;                     // this plan has had its day
     open += left.length;
     /* the day the work actually happened on, which is what lets that day pick
-       the remainder back up — and what keeps an untouched plan out of an
+       the remainder back up, and what keeps an untouched plan out of an
        unrelated edit of some other day it happens to sit on */
     next.push({ ...p, entries: left, startedOn: draft.date });
   }
   return { plans: next, open };
 }
 
-/* the card shown once when a plan is finally spent — read off the WHOLE
+/* the card shown once when a plan is finally spent, read off the WHOLE
    draft, blanks included, so skipping the last lift cannot quietly improve
    the score */
 const planResultOf = (draft, sum) => ({
@@ -5792,12 +6099,12 @@ const planResultOf = (draft, sum) => ({
 
 function commitWorkout(draft) {
   if (draft && draft.planning) return commitPlan(draft);
-  /* only real, filled-in entries get logged — blank preset placeholders are
+  /* only real, filled-in entries get logged, and blank preset placeholders are
      dropped so they never pollute the history with empty rows. A blank one
      that came from a plan is not lost with them: prunePlans leaves it on the
      plan, where it was already waiting. */
   const filled = draft.entries.filter(entryHasData).map((e) => syncEntry(stripPlanLink(e)));
-  /* Nothing filled in is nothing to save — unless this is a day already on
+  /* Nothing filled in is nothing to save, unless this is a day already on
      record that has just been emptied, which is its owner saying it did not
      happen after all. That has to be answerable: otherwise the only way back
      out of a set you unticked is deleting the whole day. */
@@ -5819,7 +6126,7 @@ function commitWorkout(draft) {
     const kept = state.log.filter((e) => !originalIds.has(e.id));
     /* Restamped in sheet order rather than kept as they were. createdAt is
        never shown; it exists only to order a day's rows, and the order the
-       sheet is in is the order its owner just put it in — an exercise added
+       sheet is in is the order its owner just put it in, since an exercise added
        back into an old day would otherwise be stuck at the bottom forever. */
     const stamped = filled.map((e, i) => ({ ...e, date: draft.date, createdAt: now + i }));
     ui.workoutSheet = null;
@@ -5865,7 +6172,7 @@ const actions = {
     const f = ui.profileDraft;
     ui.showProfile = false; ui.profileDraft = null;
     applyTheme(f.theme);
-    /* the two modes read different pointers, so both are reset to "now" —
+    /* the two modes read different pointers, so both are reset to "now",
        otherwise switching lands you on a period you never chose */
     ui.volumeWeek = weekOf(todayStr(), f.startDate);
     ui.volAnchor = todayStr();
@@ -5892,7 +6199,7 @@ const actions = {
   "toggle-accordion": (el) => {
     const id = el.dataset.id;
     ui.accordions[id] = !ui.accordions[id];
-    /* animate the existing card in place — a full render() would rebuild the
+    /* animate the existing card in place, since a full render() would rebuild the
        whole page and cause the flicker the user reported. */
     const card = el.closest(".pb-acc");
     if (card) setAccordion(card, ui.accordions[id]);
@@ -5910,7 +6217,7 @@ const actions = {
     render();
   },
   /* One period back or forward. In rolling mode that is a whole seven-day
-     window, not a single day — stepping a day at a time would make the
+     window, not a single day, since stepping a day at a time would make the
      arrows useless for the comparison underneath, and a single day is what
      tapping the calendar is for. */
   "vol-prev": () => { volStep(-1); },
@@ -5919,7 +6226,7 @@ const actions = {
   /* ── planning ─────────────────────────────────────────────────────
      Every one of these opens or closes the same workout window; what
      differs is the flag it carries and therefore where the numbers end
-     up. There is no plan editor, on purpose — see renderWorkoutSheet. */
+     up. There is no plan editor, on purpose, see renderWorkoutSheet. */
 
   /* start a plan for a day, or reopen the one already on it */
   "plan-day": (el) => {
@@ -5960,7 +6267,7 @@ const actions = {
     ui.volAnchor = d; ui.volumeWeek = Math.max(1, weekOf(d, state.settings.startDate));
     render();
   },
-  /* log a day that is not today, from the calendar — the long way round
+  /* log a day that is not today, from the calendar. The long way round
      used to be New Workout and then correcting the date */
   "log-day": (el) => {
     const d = el.dataset.d;
@@ -5981,7 +6288,7 @@ const actions = {
     const p = (state.plans || []).find((x) => x.id === el.dataset.id);
     if (!p) return;
     const today = todayStr();
-    /* there is only ever one workout for today — the same rule
+    /* there is only ever one workout for today, the same rule
        actions["log-exercise"] follows, for the same reason */
     if (!ui.workoutSheet || ui.workoutSheet.planning) {
       const parked = (state.dayDrafts || []).find((d) => d.date === today);
@@ -5990,8 +6297,8 @@ const actions = {
         : { date: today, entries: [] };
     }
     const w = ui.workoutSheet;
-    /* A day can answer more than one plan — "Push A" and "Arms" were
-       planned separately and you are doing both — so the sheet carries a
+    /* A day can answer more than one plan ("Push A" and "Arms" were
+       planned separately and you are doing both) so the sheet carries a
        LIST of the plans it is consuming, and every one of them is cleared
        when the day is saved. Leaving the second one behind would have it
        showing as missed forever. Starting the same plan twice must still
@@ -6101,6 +6408,39 @@ const actions = {
     if (e) { ui.entryForm = { f: { ...e }, isDraft: false }; render(); }
   },
   "prog-seg": (el) => { ui.progSeg = el.dataset.id; ui.chartFull = null; render(); },
+
+  /* ── strength standards ───────────────────────────────────────────────
+     Every one of these throws the last answer away, because each of them
+     changes one of the three things the answer was worked out from. A
+     verdict that outlives its inputs is the one way a table like this can
+     lie, and the card names its inputs precisely so it can't. */
+  "std-sex": (el) => {
+    const sex = el.dataset.id;
+    stdForm().sex = sex;
+    ui.stdResult = null;
+    /* answered where it is used, and remembered, see the note on
+       settings.sex in defaultState() for why it isn't in Profile */
+    patch({ settings: { ...state.settings, sex } });
+  },
+  "std-pick-open": () => { ui.stdQ = ""; ui.stdPick = true; render(); },
+  "std-pick-close": () => { ui.stdPick = false; render(); },
+  "std-pick": (el) => {
+    const f = stdForm();
+    f.slug = el.dataset.slug;
+    /* offered, never imposed: the field is a plain input over the top of it */
+    const best = stdBestFromLog(f.slug, state.log, state.library);
+    f.lift = best == null ? "" : String(best);
+    f.liftFromLog = best != null;
+    ui.stdResult = null;
+    ui.stdPick = false;
+    render();
+  },
+  "std-check": () => {
+    const res = stdCheck(stdForm(), state.settings.units);
+    if (!res) return;                    // the button is disabled, but never trust that alone
+    ui.stdResult = res;
+    render();
+  },
   "select-progress": (el) => {
     ui.progressSelected = el.dataset.name;
     ui.chartView.main = null; ui.chartSel.main = null;   // a different lift is a different chart
@@ -6128,7 +6468,7 @@ const actions = {
     const oneRM = est1RM(w, r);
     if (oneRM == null) return;                     // nothing typed yet
     /* oneRM is the number on screen; `exact` is the same max unrounded, which
-       is what the two tables are built from — see renderCalc */
+       is what the two tables are built from, see renderCalc */
     ui.calcResult = { weight: w, reps: r, oneRM, exact: w / rmCurve(r), unit: ui.calc.unit || state.settings.units };
     render();
   },
@@ -6162,7 +6502,7 @@ const actions = {
   },
   "group-edit": (el) => {
     const name = el.dataset.g;
-    /* show the label, remember the stored name — see group-save */
+    /* show the label, remember the stored name, see group-save */
     ui.groupForm = { name: groupLabel(name), color: colorFor(name), orig: name, then: null };
     render();
   },
@@ -6178,7 +6518,7 @@ const actions = {
       return;
     }
     /* The field is prefilled with the group's LABEL, so leaving a built-in
-       untouched (to change only its colour) must not count as a rename —
+       untouched (to change only its colour) must not count as a rename,
        otherwise "Chest" would freeze into whatever language you happened to
        be in. Typing something else is a real rename, and the group becomes
        the user's: it loses its key and stops being translated. */
@@ -6225,14 +6565,14 @@ const actions = {
     if (then === "exwin" && ui.exWinDraft) ui.exWinDraft.muscle = name;
     if (then) ui.groupSheet = false;     // opened from a workout, not the manager
     patch(p);
-    /* quick-add was mid-question ("which muscle does it train?") — answer it */
+    /* quick-add was mid-question ("which muscle does it train?"), answer it */
     if (then === "quickadd" && ui.pickerQuick) {
       const el = document.createElement("button");
       el.dataset.g = name;
       actions["quick-add-muscle"](el);
     }
   },
-  /* Deleting a group never takes exercises down with it — whatever is still
+  /* Deleting a group never takes exercises down with it, and whatever is still
      in it is tipped into the Uncategorized bucket, where it stays findable
      and loggable until it's given a real group. */
   "group-delete": () => {
@@ -6275,7 +6615,7 @@ const actions = {
     ui.exWinDraft = { id: uid(), name: "", muscle: "", type: "", equipment: "", alternatives: "", note: "", image: "", video: "", custom: true };
     ui.exWin = { isNew: true }; ui.exWinEdit = true; render();
   },
-  /* open the detail window (read-only) — every "info" button lands here.
+  /* open the detail window (read-only). Every "info" button lands here.
      Exercises are keyed by name across the app, so we look up by name. */
   "open-exercise-window": (el) => {
     ui.exWin = { name: el.dataset.name };
@@ -6290,8 +6630,8 @@ const actions = {
      you were already looking at. This is the short way: it opens today's
      workout behind you and drops you in this exercise's entry form.
 
-     "Today's workout" is whichever one is already going — the window you
-     have open, or the day you parked earlier and never saved — so a
+     "Today's workout" is whichever one is already going: the window you
+     have open, or the day you parked earlier and never saved, so a
      shortcut can never split one day in two. Nothing is logged until the
      day itself is saved, exactly as if you had walked there.          */
   "log-exercise": (el) => {
@@ -6366,8 +6706,8 @@ const actions = {
       .map((e) => ({ ...e }));
     if (!entries.length) return;
     /* A day saved half-way through still has the rest of its plan waiting on
-       it. The lifts you never reached are hydrated back in — blank, with
-       their targets, exactly as plan-start deals them — so "save now, carry
+       it. The lifts you never reached are hydrated back in, blank, with
+       their targets, exactly as plan-start deals them, so "save now, carry
        on after" is one flow instead of a plan you have to start again.
        Matched on startedOn, not on the plan's own date: pressing Start on
        tomorrow's plan logs it today, and today is where the rest of it is
@@ -6469,7 +6809,7 @@ const actions = {
   "close-picker": () => { ui.picking = false; ui.pickerQ = ""; ui.pickerQuick = null; render(); },
   "picker-seg": (el) => { ui.pickerSeg = el.dataset.id; if (el.dataset.id === "exercises") { ui.pickerQuick = null; } render(); },
   "quick-add-start": () => { ui.pickerQuick = { name: ui.pickerQ.trim(), muscle: "" }; render(); },
-  /* The name is the only thing that has to be answered here — "Skip for now"
+  /* The name is the only thing that has to be answered here. "Skip for now"
      sends the same el with the bucket as its group, so a lift invented in the
      middle of a set can be logged now and filed later. It lands in
      Uncategorized still wearing its NEW flag, which is the reminder. */
@@ -6494,7 +6834,7 @@ const actions = {
   "close-entry": () => {
     const { f, isDraft } = ui.entryForm;
     /* backing out of an exercise you've filled in but never added to the day
-       throws real work away — in Detailed mode that can be a whole set list */
+       throws real work away, and in Detailed mode that can be a whole set list */
     const orphan = isDraft && entryHasData(f) && !ui.workoutSheet.entries.some((x) => x.id === f.id);
     if (orphan && !confirm(T("entry.confirmDiscard"))) return;
     ui.entryForm = null; ui.setForm = null; render();
@@ -6514,7 +6854,7 @@ const actions = {
     if (isDetailed(f)) {
       ui.setForm = { s: newSet(d.reps, d.weight, ""), isNew: true, index: (f.setList || []).length };
     } else {
-      /* an older top-set entry has no set list to open — fill its fields,
+      /* an older top-set entry has no set list to open, so fill its fields,
          and give it a set count if it hasn't got one yet */
       ui.entryForm.f = { ...f, reps: d.reps, weight: d.weight, sets: +f.sets > 0 ? f.sets : "1" };
     }
@@ -6576,7 +6916,7 @@ const actions = {
   },
 
   /* ── timers ───────────────────────────────────────────────────────── */
-  /* pinning from the list — the cap is enforced here, once, for every route in */
+  /* pinning from the list, the cap is enforced here, once, for every route in */
   "timer-pin": (el) => {
     const t = (state.timers || []).find((x) => x.id === el.dataset.id);
     if (!t) return;
@@ -6586,7 +6926,7 @@ const actions = {
     }
     patch({ timers: state.timers.map((x) => (x.id === t.id ? { ...x, pinned: !x.pinned } : x)) });
   },
-  /* pinning from inside the editor — the flag rides on the draft until you save */
+  /* pinning from inside the editor, the flag rides on the draft until you save */
   "timer-form-pin": () => {
     const f = ui.timerForm;
     if (!f) return;
@@ -6610,7 +6950,7 @@ const actions = {
     }, isNew: false };
     render();
   },
-  /* tapping a sound is also how you hear it — at the volume you've set, so
+  /* tapping a sound is also how you hear it, at the volume you've set, so
      what you're auditioning is what the gym will hear */
   "timer-sound": (el) => {
     if (!ui.timerForm) return;
@@ -6704,7 +7044,7 @@ const actions = {
       ? { ...ui.entryForm.f, setList: filledSets(ui.entryForm.f) }
       : ui.entryForm.f);
     const exists = entryOnRecord(f, isDraft);
-    /* an emptied row that is already on record goes back empty — that is the
+    /* an emptied row that is already on record goes back empty, which is the
        whole point of unticking it, and it keeps its plan, so the lift reads
        as planned and not done and can be ticked again later. Only a brand-new
        entry is turned away. */
@@ -6766,8 +7106,8 @@ function handleBind(el) {
   const bind = el.dataset.bind;
   if (!bind) return;
   let v = el.value;
-  /* A number field keeps whatever separator you typed on screen — only stray
-     characters are pushed back out — while the value that gets stored is
+  /* A number field keeps whatever separator you typed on screen (only stray
+     characters are pushed back out) while the value that gets stored is
      always period-separated, so 82,5 and 82.5 are the same number. */
   if (el.dataset.num != null) {
     const clean = v.replace(/[^\d.,]/g, "");
@@ -6787,6 +7127,26 @@ function handleBind(el) {
     ui.pickerQ = v;
     const list = document.getElementById("pickList");
     if (list) { list.innerHTML = renderPickerList(state.library); if (window.lucide) lucide.createIcons(); }
+  } else if (bind === "stdq") {
+    ui.stdQ = v;
+    const list = document.getElementById("stdPickList");
+    if (list) { list.innerHTML = renderStdPickerList(); if (window.lucide) lucide.createIcons(); }
+  } else if (bind.startsWith("std.")) {
+    const key = bind.slice(4), f = stdForm();
+    f[key] = v;
+    /* Both hints under these two fields are claims about where the number
+       came from (your log, your last check-in), and the moment it is typed
+       over the claim is false. They are retired HERE rather than at the next
+       render, because typing never causes one. */
+    const setHint = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
+    if (key === "lift" && f.liftFromLog) {
+      f.liftFromLog = false;
+      const ex = STD_BY_SLUG[f.slug];
+      setHint("stdLiftHint", ex && ex.reps ? T("std.repsHint") : T("std.liftHint"));
+    }
+    if (key === "bw" && f.bwFrom) { f.bwFrom = null; setHint("stdBwHint", ""); }
+    const btn = document.getElementById("stdCheckBtn");
+    if (btn) { const ok = stdReady(f); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
   } else if (bind === "goal") {
     ui.goalVal = v;
   } else if (bind === "volGoal") {
@@ -6829,7 +7189,7 @@ function handleBind(el) {
     }
   } else if (bind === "exwinMuscle") {
     /* "＋ New group…" hands straight over to the group editor, which drops the
-       finished group back onto this draft — see actions["group-save"]. */
+       finished group back onto this draft, see actions["group-save"]. */
     if (v === "__new") actions["group-new"]({ dataset: { then: "exwin" } });
     else { ui.exWinDraft.muscle = v; render(); }
   } else if (bind === "profileLang") {
@@ -6851,7 +7211,7 @@ function handleBind(el) {
     ui.groupForm.color = v; render();
   } else if (bind === "entryUnit") {
     /* the unit belongs to the whole exercise, so it can be changed from the
-       entry form or from any of its set editors. A discrete tap, not typing —
+       entry form or from any of its set editors. A discrete tap, not typing,
        a full render keeps the set list, the 1RM card and the workout card
        behind it all speaking the same unit. */
     if (ui.entryForm) { ui.entryForm.f.unit = v; render(); }
@@ -6870,7 +7230,7 @@ function handleBind(el) {
   } else if (bind.startsWith("profile.")) {
     ui.profileDraft[bind.slice(8)] = v;
   }
-  /* every field is a checkpoint — nothing typed is ever only in memory */
+  /* every field is a checkpoint, nothing typed is ever only in memory */
   persist();
 }
 
@@ -6883,7 +7243,7 @@ document.addEventListener("input", (e) => {
 document.addEventListener("change", (e) => {
   if (e.target.matches('input[type="file"]')) { handleFile(e.target); return; }
   /* letting go of the volume slider plays the alert at the level you just
-     chose — the only honest way to pick one */
+     chose, the only honest way to pick one */
   if (e.target.matches("input[type=range]")) {
     handleBind(e.target);
     if (ui.timerForm) playSound(soundOf(ui.timerForm.t), volumeOf(ui.timerForm.t));
@@ -6892,7 +7252,7 @@ document.addEventListener("change", (e) => {
   if (e.target.matches("select, input[type=date], input[type=color]")) handleBind(e.target);
 });
 
-/* file uploads (exercise photo) — read, downscale, stash on the draft, redraw */
+/* file uploads (exercise photo): read, downscale, stash on the draft, redraw */
 function handleFile(el) {
   const file = el.files && el.files[0];
   if (!file) return;
@@ -6917,7 +7277,7 @@ function handleFile(el) {
    Best effort at a real lock, in order of how well it actually works:
 
    1. manifest.webmanifest declares "orientation": "portrait". Install the app
-      to the home screen on Android and the OS genuinely refuses to rotate it —
+      to the home screen on Android and the OS genuinely refuses to rotate it,
       this is the only true lock a web app can get, and it needs no code.
    2. The Screen Orientation API below. Chrome/Android honours it once the
       document is fullscreen; everywhere else it throws and we move on.
@@ -6938,7 +7298,7 @@ window.addEventListener("click", function once() {
 
 /* ─────────────────────────────── GO ────────────────────────────────── */
 
-/* Put back whatever was half-finished when the app last went away — the open
+/* Put back whatever was half-finished when the app last went away: the open
    workout, the exercise you were mid-way through, even the set editor. */
 (function restoreDrafts() {
   const d = state.drafts || {};

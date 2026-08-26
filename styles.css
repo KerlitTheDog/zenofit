@@ -9,8 +9,8 @@ html, body { height: 100%; }
    blocked by the viewport tag + the gesture handlers in app.js */
 html { touch-action: manipulation; -webkit-text-size-adjust: 100%; }
 /* the app is exactly one screen tall and scrolls inside itself, so anything
-   the page itself does with an overscroll — Android's pull-to-refresh, iOS's
-   rubber band under the bottom nav — is the frame appearing to come loose */
+   the page itself does with an overscroll (Android's pull-to-refresh, iOS's
+   rubber band under the bottom nav) is the frame appearing to come loose */
 html, body { overscroll-behavior: none; }
 body { background: var(--outer); }
 
@@ -22,7 +22,7 @@ body { background: var(--outer); }
 :root,
 :root[data-theme="dark"]{
   color-scheme:dark;
-  /* Discord-style dark — shades of neutral grey, gold accent */
+  /* Discord-style dark: shades of neutral grey, gold accent */
   --outer:#131417;
   --bg:#1e1f22; --surface:#2b2d31; --surface2:#313338; --raise:#3a3d44;
   --border:#3f4248; --border-soft:#292b2f;
@@ -30,10 +30,18 @@ body { background: var(--outer); }
   --text:#f2f3f5; --muted:#b5bac1; --faint:#80848e;
   --gold:#e9b949; --gold-ink:#1a1507;
   --red:#d05a50; --blue:#5d8bcc; --green:#6aa465; --steel:#aab4c0;
+  /* The five strength-standard tiers (Progress → Standards). Each is its own
+     variable rather than borrowing --steel or --red, so retuning one never
+     moves anything else; GOLD is the one exception and is deliberately the
+     app's own accent, because a second gold on the same screen reads as a
+     mistake. Every value is picked to clear 4.5:1 against BOTH the card and
+     the tinted row of the tier you are standing on. */
+  --tier-wood:#d19d70; --tier-gold:var(--gold); --tier-diamond:#5fc9dd;
+  --tier-titanium:#aab4c0; --tier-vibranium:#bf9fdd;
 }
 :root[data-theme="light"]{
   color-scheme:light;
-  /* Clean light — grey base, white cards, deeper gold for contrast */
+  /* Clean light: grey base, white cards, deeper gold for contrast */
   --outer:#c7cbd1;
   --bg:#dddddd; --surface:#ececec; --surface2:#e8eaed; --raise:#dcdfe4;
   --border:#d0d4da; --border-soft:#e4e6ea;
@@ -41,11 +49,15 @@ body { background: var(--outer); }
   --text:#1f2124; --muted:#5b5f66; --faint:#868b93;
   --gold:#a9761a; --gold-ink:#ffffff;
   --red:#c23b32; --blue:#3f74c4; --green:#4f8a46; --steel:#5f6b78;
+  /* deepened the same way --gold is, so a tier name stays readable on a
+     near-white card */
+  --tier-wood:#7d5133; --tier-gold:var(--gold); --tier-diamond:#08616f;
+  --tier-titanium:#525e6b; --tier-vibranium:#6f4e96;
 }
 /* ── VIEWPORT ENGINE ───────────────────────────────────────────────────
-   Every measurement that has to answer to the device — how wide the frame
+   Every measurement that has to answer to the device, how wide the frame
    is, how tall, and how much of it the phone's own furniture (status bar,
-   notch, home indicator) is standing on — is resolved here into a handful
+   notch, home indicator) is standing on, is resolved here into a handful
    of custom properties, and everything downstream is written in terms of
    them. `applyViewport()` in app.js writes the two that need measuring
    (--pb-scale and --pb-frame-w); the rest is arithmetic the browser does
@@ -53,11 +65,11 @@ body { background: var(--outer); }
    needs no re-render to be picked up.
 
    The rule the engine is built around: **a phone is drawn exactly as the
-   design was drawn.** Up to VP_FLUID_MAX (480pt, in app.js — the sizing
+   design was drawn.** Up to VP_FLUID_MAX (480pt, in app.js: the sizing
    constants live there, with the code that uses them, and are deliberately
    not restated here) the frame simply takes the width it is handed and
    --pb-scale stays 1, so every handset from a 320pt SE to a 440pt Pro Max
-   keeps today's type sizes and spacing — the only thing that changes on a
+   keeps today's type sizes and spacing, and the only thing that changes on a
    wide one is that the dead grey bars either side of it are gone. Scaling
    is held back for screens no phone has (tablets, desktop), where a 480pt
    strip marooned in the middle of a 1440pt display is not what "fits the
@@ -89,7 +101,7 @@ body { background: var(--outer); }
   --pb-sat:calc(var(--pb-sat-raw) / var(--pb-scale));
   --pb-sab:calc(var(--pb-sab-raw) / var(--pb-scale));
 
-  /* derived chrome — the numbers the old code repeated by hand. Each one is
+  /* derived chrome, the numbers the old code repeated by hand. Each one is
      the measurement it always was plus whatever the device is taking. */
   --pb-nav-h:calc(67px + var(--pb-sab));         /* bottom nav, all in */
   --pb-header-pt:calc(14px + var(--pb-sat));     /* top padding of any top bar */
@@ -124,7 +136,7 @@ body { background: var(--outer); }
 }
 /* the frame: laid out at logical size, then scaled as one piece. Height is
    the viewport divided by the scale precisely so that height × scale lands
-   back on the viewport — the app is always exactly one screen tall. */
+   back on the viewport, so the app is always exactly one screen tall. */
 .pb-frame{
   flex:0 0 auto;
   width:var(--pb-frame-w);
@@ -133,7 +145,7 @@ body { background: var(--outer); }
   border-left:1px solid var(--border-soft); border-right:1px solid var(--border-soft);
   transform-origin:top center;
 }
-/* only ever set on a screen bigger than any phone — a transform on the root
+/* only ever set on a screen bigger than any phone, since a transform on the root
    would otherwise cost every phone a compositing layer to scale by 1 */
 .pb-scaled .pb-frame{ transform:scale(var(--pb-scale)); }
 
@@ -157,7 +169,7 @@ select.pb-input{ appearance:none; }
 
 /* The unit picker that sits inside a weight field's own label. It has to read
    as part of the label (small, uppercase, quiet) while still looking obviously
-   tappable — gold text in a bordered pill with a chevron. The unit is per
+   tappable: gold text in a bordered pill with a chevron. The unit is per
    exercise because gyms mix kg and lbs machines under one roof. */
 .pb-unit-select{
   -webkit-appearance:none; appearance:none;
@@ -248,7 +260,7 @@ input[type="date"].pb-input::-webkit-date-and-time-value{
 .pb-drag{ touch-action:none; cursor:grab; }
 .pb-drag:active{ cursor:grabbing; }
 
-/* a finished timer breathes until you deal with it — impossible to miss from
+/* a finished timer breathes until you deal with it, impossible to miss from
    across the gym, but not a strobe */
 .pb-timer-done{ animation:pbPulse 1.5s ease-in-out infinite; }
 @keyframes pbPulse{
@@ -266,7 +278,7 @@ input[type="date"].pb-input::-webkit-date-and-time-value{
    lock on iOS, so when a phone is turned landscape (short viewport) we hide the
    app and ask for portrait. Rotating back restores it instantly, state intact.
    The max-height gate keeps tablets/desktop in landscape unaffected, and the
-   coarse-pointer gate keeps a short desktop window out of it too — a browser
+   coarse-pointer gate keeps a short desktop window out of it too, because a browser
    dragged down to 480px tall is not a phone lying on its side. */
 @media (orientation: landscape) and (max-height: 500px) and (pointer: coarse){
   #app{ display:none; }

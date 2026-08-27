@@ -363,6 +363,46 @@ function bestSet(list) {
 
 /* Refresh an entry's headline fields from its sets. Call this after any
    change to setList. No-op for cardio and for legacy top-set entries. */
+/* ── TWO WAYS OF NOT RESTING ──────────────────────────────────────────
+   A DROPSET is one exercise: a set, then straight into a lighter one with
+   no rest. A SUPERSET is two exercises: this one, then straight into the
+   next with no rest. They are the same shape at two different levels, so
+   they are stored the same way and read by the same function.
+
+   Each is a single boolean on the item that CONTINUES the one above it:
+   `set.drop` and `entry.superWith`. Nothing stores a group id, and that is
+   deliberate. A group id is a second source of truth about an order the
+   list already knows, and the moment you drag a row (both lists are
+   draggable now) the id and the order start disagreeing. Read upward from
+   the order instead and they cannot: a run is however many consecutive
+   items are marked, and rearranging or deleting one silently reshapes the
+   runs into whatever the new order says. A mark on the FIRST item means
+   nothing and is ignored, which is what makes deleting the head of a run
+   safe rather than something to clean up after.
+
+   WHAT THEY DO NOT DO IS ARITHMETIC. No volume multiplier, no intensity
+   adjustment, no fatigue discount. A drop is a set and counts as one set;
+   a supersetted lift is a lift. est. 1RM, PRs, weekly volume, the graph
+   and the last-time comparison all read exactly what they read before,
+   because the app does not know what a dropset is worth and neither does
+   anybody else. These say what you DID, which is the only claim the log
+   is ever allowed to make. */
+
+const isDrop = (s) => !!(s && s.drop);
+const isSuper = (e) => !!(e && e.superWith);
+
+/* Per-index marks for a linked list of this kind. `cont[i]` is "this one
+   continues the one above"; `head[i]` is "this one starts a run of two or
+   more", which is the only place a run gets a label. */
+function linkMarks(list, linked) {
+  const rows = list || [];
+  const cont = rows.map((x, i) => i > 0 && linked(x));
+  return { cont, head: rows.map((x, i) => !cont[i] && !!cont[i + 1]) };
+}
+
+const dropMarks = (sets) => linkMarks(sets, isDrop);
+const superMarks = (entries) => linkMarks(entries, isSuper);
+
 function syncEntry(e) {
   if (!isDetailed(e) || e.kind === "cardio") return e;
   const filled = filledSets(e);
@@ -897,6 +937,65 @@ function entryPlanResult(e) {
   };
 }
 
+/* ── THE SAME VERDICT, POINTED AT LAST TIME ───────────────────────────
+   A plan is one thing you can be measured against. Your own last session
+   is the other, and for most days it is the only one there is.
+
+   THE HOLE THIS FILLS. Est. 1RM speaks for an exercise through its BEST
+   set, which is the right way to answer "what could I lift for a single"
+   and the wrong way to answer "did today go better than last time". Match
+   your top set and add a rep to your second and the estimate does not
+   move, because the estimate was never about your second set. The graph
+   goes flat on a session that was strictly better than the one before it.
+
+   So this compares SET FOR SET BY POSITION: set two answers last time's
+   set two, exactly as a planned set is answered by the set in its slot,
+   and reusing setVerdict is the point. It refuses to judge on est. 1RM
+   for the same reason the plan version does: more reps at the same weight
+   is a better set, and a rep-max curve that calls it "no change" is the
+   app arguing with someone about their own training.
+
+   Sets past where last time ran out are simply unjudged. There is no
+   verdict for a fourth set on a day that had three, and there is no
+   penalty either, so a session can never score worse for containing more
+   work, which is exactly the trap an average over sets falls into.
+
+   Position is only honest if the order is, which is why the set list can
+   be dragged into the order the sets actually happened (reorderSets). */
+function lastTimeSets(f, isDraft) {
+  const last = lastOuting(f, isDraft);
+  if (!last) return null;
+  const eUnit = unitOf(f);
+  /* into the unit being typed in today, rounded where it will be read, so a
+     kg set and the same set logged in lbs cannot disagree by a float hair */
+  const rows = last.rows
+    .filter((r) => +r.reps > 0 && +r.weight > 0)
+    .map((r) => ({
+      reps: +r.reps,
+      weight: Math.round(convertWeight(+r.weight, r.unit || eUnit, eUnit) * 10) / 10,
+    }));
+  return rows.length ? { date: last.date, rows } : null;
+}
+
+/* How this entry stands against that session. Null when there is nothing to
+   compare with: a plan already answers the question, cardio is not sets, and
+   a first outing has no yesterday. */
+function entryLastResult(f, isDraft) {
+  if (!f || f.plan || f.kind === "cardio" || !isDetailed(f)) return null;
+  if (!filledSets(f).length) return null;
+  const prev = lastTimeSets(f, isDraft);
+  if (!prev) return null;
+  const list = f.setList || [];
+  const verdicts = list.map((s, i) => (prev.rows[i] ? setVerdict(s, prev.rows[i]) : null));
+  return {
+    date: prev.date, rows: prev.rows, verdicts,
+    beat: verdicts.filter((v) => v === "beat").length,
+    hit: verdicts.filter((v) => v === "hit").length,
+    under: verdicts.filter((v) => v === "under").length,
+    extra: Math.max(0, list.filter(setHasData).length - prev.rows.length),
+  };
+}
+
 /* the same sum over a whole day, for the card that greets you after you
    save one and for the chip on the day in your history */
 function dayPlanResult(entries) {
@@ -1357,6 +1456,11 @@ const ui = {
   pinnedOrder: false,   // …the pinned preset strip on Home is
   timerOrder: false,    // …the pinned timer dials are, wherever they appear
   entryOrder: false,    // …the exercise list inside the open workout day is
+  /* …the set list is, and this one holds the ENTRY'S ID rather than a flag:
+     opening a different lift is then not a state to clean up, it simply
+     stops matching, so none of the twenty places that open an entry form
+     has to remember to switch the mode off. */
+  setOrder: null,
   libOrder: false,      // …the exercise library is, inside each of its groups
   progSeg: "progress",  // progress | standards, Progress sub-tab
   progressSelected: null,
@@ -1405,6 +1509,7 @@ function resetTransient() {
   ui.pinnedOrder = false;
   ui.timerOrder = false;
   ui.entryOrder = false;
+  ui.setOrder = null;
   ui.libOrder = false;
   ui.volumeWeek = weekOf(todayStr(), state.settings.startDate);
   ui.volAnchor = todayStr();
@@ -2192,8 +2297,11 @@ function renderHistory(log, library, badges, settings, unit) {
     const sets = entries.filter((e) => e.kind !== "cardio").reduce((a, e) => a + (+e.sets || 0), 0);
     const mins = entries.filter((e) => e.kind === "cardio").reduce((a, e) => a + (+e.minutes || 0), 0);
     const dayRes = dayPlanResult(entries);
-    const rows = entries.map((e) => {
+    /* lifts done back to back read that way months later too */
+    const daySupers = superMarks(entries);
+    const rows = entries.map((e, ei) => {
       const b = badges[e.id] || {};
+      const chain = daySupers.cont[ei];
       const muscle = e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, library, e.muscle);
       /* an entry that was planned keeps saying so, forever: the target it
          was given is stored on it, so "did I do what I said I would" is
@@ -2203,7 +2311,10 @@ function renderHistory(log, library, badges, settings, unit) {
         <button data-action="edit-entry" data-id="${e.id}" style="flex:1;min-width:0;text-align:left;padding:11px 4px 11px 14px;display:flex;gap:10px;align-items:center;color:var(--text)">
           <div style="width:4px;align-self:stretch;border-radius:2px;background:${colorFor(muscle)}"></div>
           <div style="flex:1;min-width:0">
-            <div style="font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(exLabel(e.exercise))}</div>
+            <div style="display:flex;align-items:center;gap:5px;min-width:0">
+              ${chain ? icon("link", 11, 'style="color:var(--blue);flex-shrink:0"') : ""}
+              <div style="font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(exLabel(e.exercise))}</div>
+            </div>
             <div style="font-size:12.5px;color:var(--muted);margin-top:1px">
               ${entryHasData(e) ? entrySummary(e, unit, true) : T("entry.notDone")}
             </div>
@@ -3580,7 +3691,30 @@ const DRAG_COMMIT = {
   pinnedTimer: reorderPinnedTimers,
   entry: reorderDraftEntries,
   libExercise: reorderLibraryExercises,
+  set: reorderSets,
 };
+
+/* The sets inside the open entry. Everywhere else in the app an order is a
+   presentation choice; here it is read as data. entryLastResult matches set
+   two against last time's set two, so a session you worked up and then
+   logged bottom-first would come back as a string of "under" verdicts that
+   describe nothing but the order you typed it in. Being able to drag the
+   list into the order the sets actually happened is what keeps that
+   comparison honest, and it is the reason this list is draggable at all.
+
+   Nothing derived moves with it: bestSet() takes the highest estimate
+   wherever it sits, so the headline number, the PR badge and the graph are
+   all exactly as they were. */
+function reorderSets(from, to) {
+  const f = ui.entryForm && ui.entryForm.f;
+  if (!f || !Array.isArray(f.setList)) return;
+  if (from >= f.setList.length || to >= f.setList.length) return;
+  const next = [...f.setList];
+  const [moved] = next.splice(from, 1);
+  next.splice(to, 0, moved);
+  f.setList = next;
+  persist(); render();
+}
 
 /* The exercises inside the open day. Nothing is committed anywhere else:
    the sheet is the draft, and the order it is in is the order commitWorkout
@@ -4181,6 +4315,8 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
      timer dials: the cards are what you tap to open a lift mid-set, and a
      grip handle living on one is a mis-tap away from the wrong exercise. */
   const reordering = ui.entryOrder && draft.entries.length > 1;
+  /* lifts run straight into the one above them are drawn as one block */
+  const supers = superMarks(draft.entries);
   const entries = reordering
     ? `<div class="pb-card" style="overflow:hidden;margin-bottom:8px">
         ${draft.entries.map((e, i) => reorderRow("entry", i, draft.entries.length,
@@ -4191,9 +4327,10 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
       <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 4px 10px">
         ${T("wo.reorderHint", { icon: icon("grip-vertical", 11) })}
       </div>`
-    : draft.entries.map((e) => {
+    : draft.entries.map((e, ei) => {
     const b = badges[e.id] || {};
     const empty = !entryHasData(e);
+    const chain = supers.cont[ei];
     /* An entry started from a plan carries its target, and the card counts
        the target down as the sets go in. It is the only thing on this
        screen that is not a record of something, hence the hollow ring
@@ -4207,8 +4344,10 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
           <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${T("plan.doneOf", { n: res.done, total: res.total })}${res.beat ? " · " + T("plan.nBeat", { n: res.beat }) : ""}</span>
         </div>`
       : "";
-    return `<div class="pb-card" style="display:flex;align-items:center;margin-bottom:8px;overflow:hidden${empty ? (res ? ";border:1px dashed var(--steel)" : ";border:1px dashed rgba(233,185,73,.55)") : ""}">
+    return `${supers.head[ei] ? `<div style="display:flex;align-items:center;gap:6px;margin:2px 2px 4px;font-size:10.5px;font-weight:700;letter-spacing:.07em;color:var(--blue)">${icon("link", 12)} ${T("wo.superset")}</div>` : ""}
+    <div class="pb-card" style="display:flex;align-items:center;margin-bottom:${chain || supers.cont[ei + 1] ? 4 : 8}px;margin-left:${chain ? 16 : 0}px;overflow:hidden${empty ? (res ? ";border:1px dashed var(--steel)" : ";border:1px dashed rgba(233,185,73,.55)") : ""}${chain ? ";border-left:2px solid var(--blue)" : ""}">
       <button data-action="edit-draft-entry" data-id="${e.id}" style="flex:1;min-width:0;display:flex;align-items:center;gap:10px;padding:12px 4px 12px 14px;text-align:left;color:var(--text)">
+        ${chain ? icon("corner-down-right", 12, 'style="color:var(--blue);flex-shrink:0;margin-right:-4px"') : ""}
         <div style="width:4px;align-self:stretch;border-radius:2px;background:${colorFor(e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, library, e.muscle))}"></div>
         <div style="flex:1;min-width:0">
           <div style="font-weight:600;font-size:14px">${esc(exLabel(e.exercise))}</div>
@@ -4397,20 +4536,29 @@ function entryComputed() {
     const prev = earlier.reduce((m, e) => { const v = metricOf(e); return v == null ? m : Math.max(m, v); }, -Infinity);
     preview = prev === -Infinity ? "first" : metric > prev ? "pr" : metric === prev ? "match" : "below";
   }
-  /* A workout entry has to carry numbers to be worth saving. A PLANNED one
-     does not: "Wednesday, and lat pulldowns are in it" is a decision, and
-     the weight can wait for the day.
+  /* ── NOTHING IN IT IS A THING YOU CAN SAVE ──────────────────────────
+     This used to refuse a brand-new entry with no numbers on it, on the
+     grounds that a blank row is a row nobody asked for. That was wrong
+     about who was asking. Halfway through the hamstring curls you decide
+     the calf raises are next and you want them ON THE DAY, now, while you
+     are thinking of it, with the numbers to follow when you have done
+     them. Being made to type 1 rep at 1 kg to get past the button and
+     then correct it afterwards is the app taking a note and turning it
+     into a false record.
 
-     Neither does one that is already on record. Unticking the set you
-     had confirmed is you taking the claim back (the lift goes to planned
-     and not done) and a save button that greys out at exactly that moment
-     is the app refusing to let someone correct their own log. Only a
-     brand-new entry has to carry numbers, because a blank one would be a
-     row nobody asked for. */
+     So a lift can be lined up empty and left waiting for its numbers.
+     It is NOT a plan: a plan is a dated intention that can sit in the
+     calendar for weeks and is counted by nothing (state.plans), while
+     this is a card in the day you are training right now, one screen
+     away, and it becomes an ordinary logged lift the moment you fill it
+     in. What has not changed: commitWorkout still drops whatever is
+     still blank when the DAY is saved, so a lift you lined up and never
+     did leaves no empty row behind in your history. */
   const planning = isDraft && !!(ui.workoutSheet && ui.workoutSheet.planning);
   const onRecord = entryOnRecord(f, isDraft);
-  const valid = planning || onRecord || entryHasData(f);
-  return { cardio, metric, preview, valid, onRecord };
+  const lineUp = isDraft && !planning && !onRecord && !entryHasData(f);
+  const valid = planning || onRecord || isDraft || entryHasData(f);
+  return { cardio, metric, preview, valid, onRecord, lineUp };
 }
 
 /* ── the set list inside a Detailed entry ──────────────────────────────
@@ -4451,29 +4599,57 @@ function ghostSetRow(t, n, unit) {
 
 const VERDICT_COLOR = { beat: "var(--gold)", hit: "var(--green)", under: "var(--muted)" };
 
-function renderSetList(f, unit, planning) {
+function renderSetList(f, unit, planning, isDraft) {
   const list = f.setList || [];
   const filled = filledSets(f);
   const top = bestSet(filled);
   const targets = (f.plan && f.plan.sets) || [];
   const res = entryPlanResult(f);
+  /* With no plan to answer to, the reference is your own last session, set
+     for set. Never while WRITING a plan: that is an intention, and there is
+     nothing to grade yet. See entryLastResult for what this is fixing. */
+  const lastRes = planning ? null : entryLastResult(f, isDraft);
+
+  /* Rearranging is a mode, for the same reason it is one for the exercises
+     in a day and the pinned strips: a set row is what you tap to correct a
+     number, and a grip handle living on one is a mis-tap from editing the
+     wrong set. */
+  const reordering = ui.setOrder === f.id && list.length > 1;
+  /* a drop continues the set above it with no rest, so it is drawn hanging
+     off that set rather than as another equal row in the column */
+  const drops = dropMarks(list);
+
+  const dragRows = list.map((s, i) => reorderRow("set", i, list.length,
+    setHasData(s) ? `${esc(s.reps)} × ${esc(s.weight)} ${unit}` : T("sets.fillIn"),
+    setHasData(s)
+      ? T("sets.est1rm", { n: est1RM(+s.weight, +s.reps) }) + (s.rpe ? ` · RPE ${esc(s.rpe)}` : "")
+      : T("sets.blank"),
+    `<span class="pb-num" style="font-size:12.5px;font-weight:700;color:var(--faint);flex-shrink:0;margin-right:14px">${i + 1}</span>`)).join("");
 
   const rows = list.map((s, i) => {
     const m = est1RM(+s.weight, +s.reps);
     const isBest = top && s.id === top.id && filled.length > 1;
     const blank = !setHasData(s);
+    /* a plan outranks last time: it is the thing you decided to do */
     const t = targets[i];
-    const v = t ? setVerdict(s, t) : null;
-    return `<div class="pb-card" style="display:flex;align-items:center;margin-bottom:8px;overflow:hidden${blank ? ";border:1px dashed rgba(233,185,73,.55)" : ""}">
+    const prev = !t && lastRes ? lastRes.rows[i] : null;
+    const ref = t || prev;
+    const v = ref ? setVerdict(s, ref) : null;
+    const refLine = t ? T("plan.vsTarget", { target: `${esc(t.reps)} × ${esc(t.weight)}` })
+      : prev ? T("sets.vsLast", { target: `${prev.reps} × ${trimNum(prev.weight)}` })
+      : "";
+    const cont = drops.cont[i];
+    return `${drops.head[i] ? `<div style="display:flex;align-items:center;gap:6px;margin:2px 2px 4px;font-size:10.5px;font-weight:700;letter-spacing:.07em;color:var(--steel)">${icon("chevrons-down", 12)} ${T("sets.dropset")}</div>` : ""}
+    <div class="pb-card" style="display:flex;align-items:center;margin-bottom:${cont || drops.cont[i + 1] ? 4 : 8}px;margin-left:${cont ? 16 : 0}px;overflow:hidden${blank ? ";border:1px dashed rgba(233,185,73,.55)" : ""}${cont ? ";border-left:2px solid var(--steel)" : ""}">
       <button data-action="edit-set" data-id="${s.id}" style="flex:1;min-width:0;display:flex;align-items:center;gap:11px;padding:11px 4px 11px 12px;text-align:left;color:var(--text)">
-        <div class="pb-num" style="width:24px;height:24px;border-radius:7px;background:var(--surface2);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:700;color:var(--muted);flex-shrink:0">${i + 1}</div>
+        <div class="pb-num" style="width:24px;height:24px;border-radius:7px;background:${cont ? "transparent" : "var(--surface2)"};border:1px ${cont ? "dashed var(--steel)" : "solid var(--border)"};display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:700;color:var(--muted);flex-shrink:0">${cont ? icon("corner-down-right", 12) : i + 1}</div>
         <div style="flex:1;min-width:0">
           <div style="font-weight:600;font-size:14.5px;color:${blank ? "var(--gold)" : "var(--text)"}">
             ${blank ? T("sets.fillIn") : `${esc(s.reps)} × ${esc(s.weight)} ${unit}`}
           </div>
-          ${!blank ? `<div style="font-size:11.5px;color:var(--faint)">${T("sets.est1rm", { n: m })}${s.rpe ? ` · RPE ${esc(s.rpe)}` : ""}${t ? ` · ${T("plan.vsTarget", { target: `${esc(t.reps)} × ${esc(t.weight)}` })}` : ""}</div>` : ""}
+          ${!blank ? `<div style="font-size:11.5px;color:var(--faint)">${T("sets.est1rm", { n: m })}${s.rpe ? ` · RPE ${esc(s.rpe)}` : ""}${refLine ? ` · ${refLine}` : ""}</div>` : ""}
         </div>
-        ${v ? `<span style="font-size:10px;font-weight:700;letter-spacing:.05em;color:${VERDICT_COLOR[v]};flex-shrink:0;white-space:nowrap">${T("plan.v." + v)}</span>` : ""}
+        ${v ? `<span style="font-size:10px;font-weight:700;letter-spacing:.05em;color:${VERDICT_COLOR[v]};flex-shrink:0;white-space:nowrap">${T((t ? "plan.v." : "last.v.") + v)}</span>` : ""}
         ${isBest ? chip(T("sets.best"), "var(--gold)") : ""}
         ${icon("pencil", 14, 'style="color:var(--faint);flex-shrink:0;margin-left:2px"')}
       </button>
@@ -4485,18 +4661,40 @@ function renderSetList(f, unit, planning) {
   const ghosts = targets.slice(list.length)
     .map((t, k) => ghostSetRow(t, list.length + k + 1, (f.plan && f.plan.unit) || unit)).join("");
 
-  const head = res
-    ? sectionTitle(T("sets.titleN", { n: filled.length }),
-        `<span style="font-size:11px;color:${res.done >= res.total ? "var(--green)" : "var(--steel)"}">${T("plan.doneOf", { n: res.done, total: res.total })}</span>`)
-    : sectionTitle(filled.length ? T("sets.titleN", { n: filled.length }) : T("sets.title"),
-        list.length ? `<span style="font-size:11px;color:var(--faint)">${T("sets.tapToEdit")}</span>` : "");
+  /* What last time cost you is never counted up at you: under is not scolded
+     here any more than it is under a plan, so the tally only ever names what
+     went right. Nothing said at all on a session that simply held. */
+  const won = lastRes ? [
+    lastRes.beat ? T("last.nBeat", { n: lastRes.beat }) : "",
+    lastRes.hit ? T("last.nSame", { n: lastRes.hit }) : "",
+  ].filter(Boolean).join(" · ") : "";
+
+  const status = res
+    ? `<span style="font-size:11px;color:${res.done >= res.total ? "var(--green)" : "var(--steel)"}">${T("plan.doneOf", { n: res.done, total: res.total })}</span>`
+    : won ? `<span style="font-size:11px;color:var(--gold)">${won}</span>`
+    : list.length && !reordering ? `<span style="font-size:11px;color:var(--faint)">${T("sets.tapToEdit")}</span>`
+    : "";
+
+  const head = sectionTitle(filled.length ? T("sets.titleN", { n: filled.length }) : T("sets.title"),
+    `<span style="display:flex;align-items:center;gap:10px">${status}${orderToggle("set-reorder", reordering, list.length > 1)}</span>`);
 
   return `
     ${head}
-    <button data-action="add-set" class="pb-btn pb-ghost" style="width:100%;padding:13px 0;border-style:dashed;margin-bottom:10px">
-      ${icon("plus", 17)} ${T("sets.add")}
-    </button>
-    ${list.length || ghosts ? rows + ghosts : `<div class="pb-card" style="padding:20px;text-align:center;color:var(--faint);font-size:13px;line-height:1.55;margin-bottom:10px">
+    ${reordering ? "" : `<div style="display:flex;gap:8px;margin-bottom:10px">
+      <button data-action="add-set" class="pb-btn pb-ghost" style="flex:1;padding:13px 0;border-style:dashed">
+        ${icon("plus", 17)} ${T("sets.add")}
+      </button>
+      ${list.length ? `<button data-action="add-drop" class="pb-btn pb-ghost" title="${T("sets.addDropHint")}" style="flex:0 0 auto;padding:13px 15px;border-style:dashed;color:var(--steel)">
+        ${icon("chevrons-down", 16)} ${T("sets.addDrop")}
+      </button>` : ""}
+    </div>`}
+    ${reordering
+      ? `<div class="pb-card" style="overflow:hidden;margin-bottom:8px">${dragRows}</div>
+         <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 4px 10px">
+           ${T("sets.reorderHint", { icon: icon("grip-vertical", 11) })}
+         </div>`
+      : list.length || ghosts ? rows + ghosts
+      : `<div class="pb-card" style="padding:20px;text-align:center;color:var(--faint);font-size:13px;line-height:1.55;margin-bottom:10px">
       ${T(planning ? "plan.setsNone" : "sets.none")}
     </div>`}`;
 }
@@ -4667,7 +4865,7 @@ function renderPlanTarget(f, unit) {
 
 function renderEntryFields(form, unit) {
   const { f, isDraft } = form;
-  const { cardio, metric, preview, valid, onRecord } = entryComputed();
+  const { cardio, metric, preview, valid, onRecord, lineUp } = entryComputed();
   const detailed = isDetailed(f);
   const eUnit = unitOf(f);
   /* the form doesn't need a flag of its own: an entry being drafted always
@@ -4675,13 +4873,34 @@ function renderEntryFields(form, unit) {
      whether it is writing a plan or a day */
   const planning = isDraft && !!(ui.workoutSheet && ui.workoutSheet.planning);
 
+  /* The lift this one would run straight into: the one above it in the day,
+     or the current last one for an entry that has not been added yet. Only a
+     sheet has an "above" at all, so editing a single logged row from the Log
+     tab is not offered it. */
+  const sheetEntries = isDraft && ui.workoutSheet ? ui.workoutSheet.entries : null;
+  const myIx = sheetEntries ? sheetEntries.findIndex((x) => x.id === f.id) : -1;
+  const above = !sheetEntries ? null
+    : myIx > 0 ? sheetEntries[myIx - 1]
+    : myIx === -1 && sheetEntries.length ? sheetEntries[sheetEntries.length - 1]
+    : null;
+  const superRow = above
+    ? `<button data-action="entry-super-toggle" style="width:100%;display:flex;align-items:center;gap:10px;padding:11px 12px;margin-bottom:14px;border-radius:11px;border:1px ${isSuper(f) ? "solid var(--blue)" : "dashed var(--border)"};background:${isSuper(f) ? "rgba(93,139,204,.10)" : "transparent"};text-align:left">
+        ${icon("link", 16, `style="color:${isSuper(f) ? "var(--blue)" : "var(--faint)"};flex-shrink:0"`)}
+        <span style="flex:1;min-width:0">
+          <span style="display:block;font-size:13.5px;font-weight:600;color:${isSuper(f) ? "var(--text)" : "var(--muted)"}">${T("wo.supersetWith")}</span>
+          <span style="display:block;font-size:11px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(exLabel(above.exercise))}</span>
+        </span>
+        <span style="width:18px;height:18px;border-radius:6px;flex-shrink:0;border:1px solid ${isSuper(f) ? "var(--blue)" : "var(--border)"};background:${isSuper(f) ? "var(--blue)" : "transparent"};display:flex;align-items:center;justify-content:center;color:#fff">${isSuper(f) ? icon("check", 12) : ""}</span>
+      </button>`
+    : "";
+
   const inputs = cardio
     ? `<div style="display:flex;gap:10px">
         <div style="flex:1">${field(T("entry.minutes"), `<input class="pb-input" ${NUM} data-bind="entry.minutes" value="${esc(f.minutes)}" placeholder="—">`)}</div>
         <div style="flex:1">${field(T("entry.intensity"), `<input class="pb-input" ${NUM} data-bind="entry.intensity" value="${esc(f.intensity)}" placeholder="—">`)}</div>
       </div>`
     : detailed
-    ? renderSetList(f, eUnit, planning)
+    ? renderSetList(f, eUnit, planning, isDraft)
     : `<div style="display:flex;gap:10px">
         <div style="flex:1">${field(T("entry.totalSets"), `<input class="pb-input" ${NUM} data-bind="entry.sets" value="${esc(f.sets)}" placeholder="—">`)}</div>
         <div style="flex:1">${field(T("entry.topReps"), `<input class="pb-input" ${NUM} data-bind="entry.reps" value="${esc(f.reps)}" placeholder="—">`)}</div>
@@ -4718,6 +4937,7 @@ function renderEntryFields(form, unit) {
       ${f.plan ? renderPlanTarget(f, eUnit) : renderSuggestion(form, unit)}
       ${renderLastTime(form)}
       ${inputs}
+      ${superRow}
       ${field(T("entry.notes"), `<textarea class="pb-input" rows="2" data-bind="entry.notes" placeholder="—" style="resize:none">${esc(f.notes)}</textarea>`,
         detailed ? T("entry.notesHint") : "")}
 
@@ -4743,7 +4963,8 @@ function renderEntryFields(form, unit) {
 
     <div style="position:absolute;bottom:0;left:0;right:0;padding:12px 16px calc(18px + var(--pb-sab));background:linear-gradient(transparent, var(--bg) 30%)">
       <button id="entrySaveBtn" data-action="save-entry-form" ${valid ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:15px 0;font-size:16px;opacity:${valid ? 1 : 0.45}">
-        ${icon("check", 18)} ${planning ? T("plan.addToPlan")
+        ${icon(lineUp ? "clock" : "check", 18)} ${planning ? T("plan.addToPlan")
+          : lineUp ? T("entry.lineUp")
           : onRecord && !entryHasData(f) ? T("entry.saveNotDone")
           : isDraft ? T("entry.addToWorkout") : T("common.saveChanges")}
       </button>
@@ -4777,7 +4998,20 @@ function renderSetForm(form, unit) {
          ${opts.map((o) => sugOption(o, o.kind === sug.smaller && opts.length > 1, unit, "sug-fill")).join("")}
        </div>`
     : "";
+  /* Only offered where it can mean anything: the first set of a lift has
+     nothing above it to have dropped from. */
+  const dropRow = index > 0
+    ? `<button data-action="set-drop-toggle" style="width:100%;display:flex;align-items:center;gap:10px;padding:11px 12px;margin-bottom:12px;border-radius:11px;border:1px ${isDrop(s) ? "solid var(--steel)" : "dashed var(--border)"};background:${isDrop(s) ? "var(--surface2)" : "transparent"};text-align:left">
+        ${icon("chevrons-down", 16, `style="color:${isDrop(s) ? "var(--steel)" : "var(--faint)"};flex-shrink:0"`)}
+        <span style="flex:1;min-width:0">
+          <span style="display:block;font-size:13.5px;font-weight:600;color:${isDrop(s) ? "var(--text)" : "var(--muted)"}">${T("sets.dropFrom", { n: index })}</span>
+          <span style="display:block;font-size:11px;color:var(--faint)">${T("sets.dropFromHint")}</span>
+        </span>
+        <span style="width:18px;height:18px;border-radius:6px;flex-shrink:0;border:1px solid ${isDrop(s) ? "var(--steel)" : "var(--border)"};background:${isDrop(s) ? "var(--steel)" : "transparent"};display:flex;align-items:center;justify-content:center;color:var(--bg)">${isDrop(s) ? icon("check", 12) : ""}</span>
+      </button>`
+    : "";
   return sheet(isNew ? T("setForm.add", { n: index + 1 }) : T("setForm.edit", { n: index + 1 }), "setForm", `
+    ${dropRow}
     <div style="display:flex;gap:10px">
       <div style="flex:1">${field(labelWith(T("setForm.reps")), `<input class="pb-input" ${NUM} data-bind="set.reps" value="${esc(s.reps)}" placeholder="—" data-autofocus>`)}</div>
       <div style="flex:1">${field(labelWith(T("setForm.weight"), unitSelect(unit)), `<input class="pb-input" ${NUM} data-bind="set.weight" value="${esc(s.weight)}" placeholder="—">`)}</div>
@@ -6103,7 +6337,11 @@ function commitWorkout(draft) {
      dropped so they never pollute the history with empty rows. A blank one
      that came from a plan is not lost with them: prunePlans leaves it on the
      plan, where it was already waiting. */
-  const filled = draft.entries.filter(entryHasData).map((e) => syncEntry(stripPlanLink(e)));
+  /* Blanks dropping out can leave a superset link on what is now the first
+     lift of the day, pointing at nothing. Marks on a first item are ignored
+     everywhere they are read, so this only tidies what gets written down. */
+  const filled = draft.entries.filter(entryHasData)
+    .map((e, i) => syncEntry(stripPlanLink(i === 0 && e.superWith ? { ...e, superWith: false } : e)));
   /* Nothing filled in is nothing to save, unless this is a day already on
      record that has just been emptied, which is its owner saying it did not
      happen after all. That has to be answerable: otherwise the only way back
@@ -6742,6 +6980,14 @@ const actions = {
   "pinned-reorder": () => { ui.pinnedOrder = !ui.pinnedOrder; render(); },
   "timer-reorder": () => { ui.timerOrder = !ui.timerOrder; render(); },
   "entry-reorder": () => { ui.entryOrder = !ui.entryOrder; render(); },
+  /* keyed by the entry's id rather than toggled on and off, so the mode
+     cannot outlive the lift it was turned on for, see ui.setOrder */
+  "set-reorder": () => {
+    const f = ui.entryForm && ui.entryForm.f;
+    if (!f) return;
+    ui.setOrder = ui.setOrder === f.id ? null : f.id;
+    render();
+  },
   /* leaving reorder mode is also the moment the search box comes back, so
      drop whatever was typed before it was hidden rather than reapplying a
      filter the user last saw three taps ago */
@@ -6873,6 +7119,27 @@ const actions = {
     if (!f || !isDetailed(f)) return;
     const i = f.setList.length;
     ui.setForm = { s: openingSetFor(f, ui.entryForm.isDraft, i), isNew: true, index: i };
+    render();
+  },
+  /* the same new set as any other, marked as continuing the one above. The
+     positional pre-fill in openingSetFor already does the right thing here:
+     if you dropped last week, last week's drop is what it offers. */
+  "add-drop": () => {
+    const f = ui.entryForm && ui.entryForm.f;
+    if (!f || !isDetailed(f) || !f.setList.length) return;
+    const i = f.setList.length;
+    ui.setForm = { s: { ...openingSetFor(f, ui.entryForm.isDraft, i), drop: true }, isNew: true, index: i };
+    render();
+  },
+  "entry-super-toggle": () => {
+    const f = ui.entryForm && ui.entryForm.f;
+    if (!f) return;
+    f.superWith = !f.superWith;
+    render();
+  },
+  "set-drop-toggle": () => {
+    if (!ui.setForm || !ui.setForm.index) return;   // index 0 has nothing above it
+    ui.setForm.s.drop = !ui.setForm.s.drop;
     render();
   },
   "edit-set": (el) => {
@@ -7044,11 +7311,13 @@ const actions = {
       ? { ...ui.entryForm.f, setList: filledSets(ui.entryForm.f) }
       : ui.entryForm.f);
     const exists = entryOnRecord(f, isDraft);
-    /* an emptied row that is already on record goes back empty, which is the
-       whole point of unticking it, and it keeps its plan, so the lift reads
-       as planned and not done and can be ticked again later. Only a brand-new
-       entry is turned away. */
-    if (!planning && !exists && !entryHasData(f)) return;
+    /* Nothing is turned away any more. An emptied row already on record goes
+       back empty, which is the whole point of unticking it, and a brand-new
+       one with nothing in it is a lift lined up for later (see the note over
+       `lineUp` in entryComputed). The only blank still refused is one being
+       written straight to the log with no day around it, which no route in
+       the app can produce. */
+    if (!planning && !isDraft && !exists && !entryHasData(f)) return;
     if (isDraft) {
       ui.workoutSheet.entries = exists
         ? ui.workoutSheet.entries.map((x) => (x.id === f.id ? f : x))

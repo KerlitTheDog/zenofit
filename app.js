@@ -105,6 +105,11 @@ const DEFAULT_GROUPS = [
   { name: "Legs", key: "Legs", color: "#aab4c0" }, { name: "Core", key: "Core", color: "#8fa39a" },
   { name: "Cardio", key: "Cardio", color: "#a07ec2" },
 ];
+/* key → the name the app shipped that group under. groupLabel asks this to
+   tell "still ours" from "renamed", the same question exLabelOf asks of a
+   built-in lift, which is what lets the key stay behind as pure IDENTITY. */
+const DEFAULT_GROUP_NAME = Object.fromEntries(DEFAULT_GROUPS.map((g) => [g.key, g.name]));
+
 /* fallback ring for a muscle that somehow isn't a registered group */
 const EXTRA_COLORS = ["#c98f5a", "#7ea0b8", "#b0a06a", "#9a8fb8"];
 /* the palette offered when picking a group colour (a custom one is also allowed) */
@@ -139,6 +144,18 @@ const groupColor = (name) => {
 const colorFor = (muscle, i = 0) =>
   groupColor(muscle) || EXTRA_COLORS[i % EXTRA_COLORS.length];
 
+/* ── THE CARDIO GROUP IS NOT THE WORD "CARDIO" ────────────────────
+   One group decides something real: whether a lift is logged in minutes ×
+   RPE instead of sets × weight. That made its NAME load-bearing, and the
+   name is the one thing about a group the user is free to change, so
+   calling it Conditioning quietly stopped new exercises in it being cardio
+   at all. The `key` is what identifies it, and it now survives a rename
+   (see actions["group-save"]); the name is only what it is called today. */
+const cardioGroup = () => {
+  const g = ((state && state.groups) || DEFAULT_GROUPS).find((x) => x.key === "Cardio");
+  return g ? g.name : "Cardio";
+};
+
 /* ═══════════════════ NAMES: STORED vs SHOWN ═══════════════════════════
    Everything the app stores is keyed by its English name: an entry points
    at "Bench Press (Barbell)", a goal is filed under it, an exercise sits in
@@ -159,11 +176,15 @@ const exRow = (ex) => {
   return i != null && table ? table[i] : null;
 };
 
-/* a muscle group's label, built-ins carry a `key`, renamed ones don't */
+/* A muscle group's label. The `key` alone used to answer this, which meant
+   it had to be dropped on a rename to stop "Pecs" coming back as "Chest",
+   and dropping it threw away the group's identity along with the claim
+   about its name. So the key stays and the NAME answers instead: still the
+   one we shipped, still ours to translate; changed, and it is their word. */
 function groupLabel(name) {
   if (name === UNCATEGORIZED) return T("group.Uncategorized");
   const g = ((state && state.groups) || DEFAULT_GROUPS).find((x) => x.name === name);
-  return g && g.key ? T("group." + g.key) : name;
+  return g && g.key && g.name === DEFAULT_GROUP_NAME[g.key] ? T("group." + g.key) : name;
 }
 
 function exLabelOf(ex) {
@@ -176,6 +197,24 @@ function exLabelOf(ex) {
      and neither surface able to find the other. */
   return ex.name === DEFAULT_LIBRARY[DEFAULT_INDEX[ex.id]].name ? row[0] : ex.name;
 }
+
+/* ── SEARCH HAS TO READ WHAT IS ON SCREEN ────────────────────────
+   Names are STORED in English and SHOWN translated, so a filter that reads
+   only `ex.name` finds nothing at all in Ukrainian or Svenska: the library
+   search comes back empty for a lift sitting right there in the list, and
+   the picker, seeing no exact match either, offers to add a lift you
+   already have — under its translated name, as a second row keyed by a
+   name nothing else points at. Both names are tried, so either one finds
+   it, and a lift can only be "new" when neither of them says otherwise.
+   (renderStdPicker has always searched both; these two had not.) */
+const exMatches = (ex, q) => {
+  const s = String(q || "").trim().toLowerCase();
+  return !s || ex.name.toLowerCase().includes(s) || exLabelOf(ex).toLowerCase().includes(s);
+};
+const exIsNamed = (ex, q) => {
+  const s = String(q || "").trim().toLowerCase();
+  return !!s && (ex.name.toLowerCase() === s || exLabelOf(ex).toLowerCase() === s);
+};
 
 /* an exercise's label, looked up from the log by its stored name */
 function exLabel(name) {
@@ -292,10 +331,10 @@ const cardioScore = (minutes, intensity) =>
    Cardio muscle group is what says so; `type` is only still consulted because
    exercises created before the compound/isolation/cardio picker was dropped
    may carry "Cardio" there and nothing else. */
-const isCardioEx = (ex) => ex && (ex.type === "Cardio" || ex.muscle === "Cardio");
+const isCardioEx = (ex) => ex && (ex.type === "Cardio" || ex.muscle === cardioGroup());
 
 /* …and the same question asked of a group name, for a record being saved */
-const cardioType = (muscle) => (muscle === "Cardio" ? "Cardio" : "");
+const cardioType = (muscle) => (muscle === cardioGroup() ? "Cardio" : "");
 
 /* Dates follow the app's language, not the device's: someone reading the app
    in Svenska on an English phone should get "24 aug", not "Aug 24". */
@@ -740,6 +779,14 @@ function muscleOf(name, library, fallback) {
   return ex ? ex.muscle : fallback || "—";
 }
 
+/* Which group an entry counts toward, which is the question a dozen dots,
+   stripes and volume rows all ask. A cardio entry is filed under the cardio
+   group whatever it has been renamed to; everything else under whatever
+   group its exercise sits in now, falling back to the one stamped on the
+   entry for a lift that has since left the library. */
+const groupOfEntry = (e, library) =>
+  e.kind === "cardio" ? cardioGroup() : muscleOf(e.exercise, library || state.library, e.muscle);
+
 /* Dashboard rows: first-appearance order, MAXIFS/COUNTIF equivalents */
 function dashboardRows(log, library, goals) {
   const seen = new Map();
@@ -906,7 +953,7 @@ function planMarks(plans) {
   const out = {};
   for (const p of plans || [])
     for (const e of p.entries || []) {
-      const m = e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, state.library, e.muscle);
+      const m = groupOfEntry(e);
       (out[p.date] = out[p.date] || new Set()).add(m);
     }
   return out;
@@ -1120,7 +1167,7 @@ const seedTimers = () =>
   }));
 
 const defaultState = () => ({
-  version: 11,
+  version: 12,
   /* `sex` is "" until asked, and it is only ever asked by the strength
      standards, whose tables are split male/female. It sits in settings so it
      is remembered and travels in a backup, not because the app wants a
@@ -1270,6 +1317,18 @@ function migrate(s) {
     if (!s.settings) s.settings = {};
     if (s.settings.sex !== "male" && s.settings.sex !== "female") s.settings.sex = "";
     s.version = 11;
+  }
+  if (v < 12) {
+    /* v12 repairs group keys. Deleting ANY group used to rebuild the survivors
+       from a list of names, which silently dropped every one of their keys, so
+       one delete un-translated all seven shipped groups and lost track of
+       which of them was cardio. The same back-fill v5 ran does the repair,
+       because a group still carrying the name we shipped it under is one of
+       ours whatever has happened to it since; a group the user renamed is
+       past helping, and is theirs anyway. */
+    const seeded = new Set(DEFAULT_GROUPS.map((g) => g.name));
+    s.groups = (s.groups || []).map((g) => (seeded.has(g.name) && !g.key ? { ...g, key: g.name } : g));
+    s.version = 12;
   }
   return s;
 }
@@ -2313,7 +2372,7 @@ function renderDayDrafts() {
       </div>
       <div style="padding:0 14px 10px;display:flex;flex-direction:column;gap:5px">
         ${exs.map((e) => `<div style="display:flex;align-items:center;gap:8px;font-size:13px;color:${entryHasData(e) ? "var(--muted)" : "var(--faint)"}">
-          <span style="width:8px;height:8px;border-radius:4px;background:${colorFor(e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, state.library, e.muscle))};flex-shrink:0"></span>
+          <span style="width:8px;height:8px;border-radius:4px;background:${colorFor(groupOfEntry(e))};flex-shrink:0"></span>
           <span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(exLabel(e.exercise))}</span>
           ${entryHasData(e) ? "" : `<span style="font-size:11px;color:var(--faint)">${T("draft.empty")}</span>`}
         </div>`).join("")}
@@ -2354,7 +2413,7 @@ function renderHistory(log, library, badges, settings, unit) {
     const rows = entries.map((e, ei) => {
       const b = badges[e.id] || {};
       const chain = daySupers.cont[ei];
-      const muscle = e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, library, e.muscle);
+      const muscle = groupOfEntry(e, library);
       /* an entry that was planned keeps saying so, forever: the target it
          was given is stored on it, so "did I do what I said I would" is
          answerable from the log alone months later */
@@ -2415,7 +2474,7 @@ function renderHistory(log, library, badges, settings, unit) {
 function dayMarks(log, library) {
   const out = {};
   for (const e of log) {
-    const m = e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, library, e.muscle);
+    const m = groupOfEntry(e, library);
     (out[e.date] = out[e.date] || new Set()).add(m);
   }
   return out;
@@ -2593,7 +2652,7 @@ const planEntryLine = (pe) => planTargetLine(planTargetOf(pe), unitOf(pe));
 /* the exercise rows inside a plan card: a hollow dot (it hasn't happened),
    the lift, and the target beside it */
 const planEntryRows = (entries) => (entries || []).map((pe) => `<div style="display:flex;align-items:baseline;gap:8px;font-size:13px">
-    <span style="width:8px;height:8px;border-radius:4px;border:1.5px solid ${colorFor(pe.kind === "cardio" ? "Cardio" : muscleOf(pe.exercise, state.library, pe.muscle))};box-sizing:border-box;flex-shrink:0;align-self:center"></span>
+    <span style="width:8px;height:8px;border-radius:4px;border:1.5px solid ${colorFor(groupOfEntry(pe))};box-sizing:border-box;flex-shrink:0;align-self:center"></span>
     <span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)">${esc(exLabel(pe.exercise))}</span>
     <span class="pb-num" style="font-size:12px;color:var(--muted);white-space:nowrap;flex-shrink:0">${planEntryLine(pe)}</span>
   </div>`).join("");
@@ -2627,7 +2686,7 @@ function renderDayCard(log, library, settings) {
       <div class="pb-label" style="margin-bottom:7px">${T("plan.trained")}${result ? ` · <span style="color:var(--gold)">${T("plan.hitOf", { n: result.hit, total: result.total })}</span>` : ""}</div>
       <div style="display:flex;flex-direction:column;gap:5px">
         ${logged.map((e) => `<div style="display:flex;align-items:baseline;gap:8px;font-size:13px">
-          <span style="width:8px;height:8px;border-radius:4px;background:${colorFor(e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, library, e.muscle))};flex-shrink:0;align-self:center"></span>
+          <span style="width:8px;height:8px;border-radius:4px;background:${colorFor(groupOfEntry(e, library))};flex-shrink:0;align-self:center"></span>
           <span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)">${esc(exLabel(e.exercise))}</span>
           <span class="pb-num" style="font-size:12px;color:var(--muted);white-space:nowrap;flex-shrink:0">${entrySummary(e, unitOf(e))}</span>
         </div>`).join("")}
@@ -2774,7 +2833,7 @@ function renderVolume(log, library, settings, currentWeek) {
   const week = ui.volumeWeek;
   const anchor = ui.volAnchor || todayStr();
   const groups = libraryGroups(library);
-  for (const e of log) { const m = e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, library, e.muscle); if (!groups.includes(m)) groups.push(m); }
+  for (const e of log) { const m = groupOfEntry(e, library); if (!groups.includes(m)) groups.push(m); }
 
   /* the period on screen, and the one before it, which is the comparison an
      untargeted group is given instead of a bar it never asked for */
@@ -2791,7 +2850,7 @@ function renderVolume(log, library, settings, currentWeek) {
   const targets = state.volumeGoals || {};
 
   const rows = groups.map((g, i) => {
-    const isCardio = g === "Cardio";
+    const isCardio = g === cardioGroup();
     const bucket = g === UNCATEGORIZED;
     const v = vol[g] || 0;
     const unit = isCardio ? T("unit.min") : T("unit.sets");
@@ -3548,8 +3607,7 @@ function renderLibraryList(library) {
   const q = ordering ? "" : ui.libraryQ;
   const groups = allGroups(library);   // the bucket is shown here, just never offered
   const shown = library.filter((ex) =>
-    (filter === "All" || ex.muscle === filter) &&
-    (!q || ex.name.toLowerCase().includes(q.toLowerCase())));
+    (filter === "All" || ex.muscle === filter) && exMatches(ex, q));
 
   return groups.filter((g) => shown.some((x) => x.muscle === g)).map((g) => {
     const rows = shown.filter((x) => x.muscle === g);
@@ -4060,7 +4118,7 @@ function renderPresetForm() {
     ${sectionTitle(T("preset.included", { n: TN("move", exs.length) }))}
     <div class="pb-card" style="overflow:hidden;margin-bottom:16px">
       ${exs.map((e, i) => `<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:${i < exs.length - 1 ? "1px solid var(--border-soft)" : "none"}">
-        <span style="width:8px;height:8px;border-radius:4px;background:${colorFor(e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, state.library, e.muscle))};flex-shrink:0"></span>
+        <span style="width:8px;height:8px;border-radius:4px;background:${colorFor(groupOfEntry(e))};flex-shrink:0"></span>
         <div style="font-weight:600;font-size:13.5px">${esc(exLabel(e.exercise))}</div>
       </div>`).join("")}
     </div>
@@ -4462,8 +4520,8 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
     ? `<div class="pb-card" style="overflow:hidden;margin-bottom:8px">
         ${draft.entries.map((e, i) => reorderRow("entry", i, draft.entries.length,
           esc(exLabel(e.exercise)),
-          entryHasData(e) ? entrySummary(e, unit) : esc(groupLabel(e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, library, e.muscle))),
-          `<span style="width:8px;height:8px;border-radius:4px;flex-shrink:0;margin-right:14px;background:${colorFor(e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, library, e.muscle))}"></span>`)).join("")}
+          entryHasData(e) ? entrySummary(e, unit) : esc(groupLabel(groupOfEntry(e, library))),
+          `<span style="width:8px;height:8px;border-radius:4px;flex-shrink:0;margin-right:14px;background:${colorFor(groupOfEntry(e, library))}"></span>`)).join("")}
       </div>
       <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 4px 10px">
         ${T("wo.reorderHint", { icon: icon("grip-vertical", 11) })}
@@ -4489,7 +4547,7 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
     <div class="pb-card" style="display:flex;align-items:center;margin-bottom:${chain || supers.cont[ei + 1] ? 4 : 8}px;margin-left:${chain ? 16 : 0}px;overflow:hidden${empty ? (res ? ";border:1px dashed var(--steel)" : ";border:1px dashed rgba(233,185,73,.55)") : ""}${chain ? ";border-left:2px solid var(--blue)" : ""}">
       <button data-action="edit-draft-entry" data-id="${e.id}" style="flex:1;min-width:0;display:flex;align-items:center;gap:10px;padding:12px 4px 12px 14px;text-align:left;color:var(--text)">
         ${chain ? icon("corner-down-right", 12, 'style="color:var(--blue);flex-shrink:0;margin-right:-4px"') : ""}
-        <div style="width:4px;align-self:stretch;border-radius:2px;background:${colorFor(e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, library, e.muscle))}"></div>
+        <div style="width:4px;align-self:stretch;border-radius:2px;background:${colorFor(groupOfEntry(e, library))}"></div>
         <div style="flex:1;min-width:0">
           <div style="font-weight:600;font-size:14px">${esc(exLabel(e.exercise))}</div>
           <div style="font-size:12px;color:${empty ? (res ? "var(--muted)" : "var(--gold)") : "var(--muted)"}">
@@ -4564,8 +4622,8 @@ function renderPickerList(library) {
      can be filed under, and the bucket is never a choice, only a Skip. */
   const groups = allGroups(library);
   const pickable = libraryGroups(library);
-  const match = library.filter((x) => !q || x.name.toLowerCase().includes(q.toLowerCase()));
-  const exact = library.some((x) => x.name.toLowerCase() === q.trim().toLowerCase());
+  const match = library.filter((x) => exMatches(x, q));
+  const exact = library.some((x) => exIsNamed(x, q));
 
   let html = "";
   if (q.trim() && !exact && !quick) {
@@ -6522,7 +6580,7 @@ const planResultOf = (draft, sum) => ({
   date: draft.date, name: draft.planName || "", sum,
   lifts: draft.entries.filter((e) => e.plan).map((e) => ({
     exercise: e.exercise,
-    muscle: e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, state.library, e.muscle),
+    muscle: groupOfEntry(e),
     res: entryPlanResult(e),
   })),
 });
@@ -6955,11 +7013,18 @@ const actions = {
        untouched (to change only its colour) must not count as a rename,
        otherwise "Chest" would freeze into whatever language you happened to
        be in. Typing something else is a real rename, and the group becomes
-       the user's: it loses its key and stops being translated. */
+       the user's: groupLabel stops translating it, because the name is no
+       longer the one we shipped.
+
+       The KEY still rides through, because it is identity rather than a
+       claim about the name: it is what still finds the cardio group after
+       someone has called it Conditioning, and cardioGroup() is what decides
+       whether a lift is logged in minutes. Dropping it on a rename is what
+       made renaming that one group silently break logging in it. */
     const orig = f.orig;
     const untouched = !!orig && typed === groupLabel(orig);
     const name = untouched ? orig : typed;
-    const keep = untouched ? (groupList().find((g) => g.name === orig) || {}).key : undefined;
+    const keep = orig ? (groupList().find((g) => g.name === orig) || {}).key : undefined;
 
     if (groupNames().some((g) => g.toLowerCase() === name.toLowerCase() && g !== orig)) {
       alert(T("groups.clash", { name: typed }));
@@ -7033,15 +7098,26 @@ const actions = {
     if (!confirm(msg)) return;
 
     const p = {
-      groups: libraryGroups(state.library).filter((g) => g !== name).map((g) => ({ name: g, color: colorFor(g) })),
+      /* Rebuilt from the group RECORDS, not from a list of names. Mapping
+         names back into fresh {name, color} objects threw away every
+         surviving group's `key`, so deleting one group you invented
+         un-translated all seven of the shipped ones and lost track of which
+         was cardio. Only the deleted group should change. */
+      groups: libraryGroups(state.library).filter((g) => g !== name).map((g) => {
+        const rec = groupList().find((x) => x.name === g);
+        return rec ? { ...rec } : { name: g, color: colorFor(g) };
+      }),
     };
-    if (used) {
-      p.library = state.library.map((ex) => (ex.muscle === name ? { ...ex, muscle: UNCATEGORIZED } : ex));
-      p.log = state.log.map((e) => (e.muscle === name ? { ...e, muscle: UNCATEGORIZED } : e));
-      p.presets = (state.presets || []).map((pr) => ({
-        ...pr, exercises: (pr.exercises || []).map((x) => (x.muscle === name ? { ...x, muscle: UNCATEGORIZED } : x)),
-      }));
-    }
+    /* Everything filed under it is tipped into the bucket, and the sweep is
+       unconditional: `used` counts LIBRARY rows, and a logged entry can
+       still name a group after its exercise has left the library. Same list
+       as the rename above, and the same rule about keeping it complete. */
+    const swap = (x) => (x.muscle === name ? { ...x, muscle: UNCATEGORIZED } : x);
+    p.library = state.library.map(swap);
+    p.log = state.log.map(swap);
+    p.plans = (state.plans || []).map((pl) => ({ ...pl, entries: (pl.entries || []).map(swap) }));
+    p.dayDrafts = (state.dayDrafts || []).map((d) => ({ ...d, entries: (d.entries || []).map(swap) }));
+    p.presets = (state.presets || []).map((pr) => ({ ...pr, exercises: (pr.exercises || []).map(swap) }));
     if (state.volumeGoals && state.volumeGoals[name] != null) {
       const vg = { ...state.volumeGoals };
       delete vg[name];                       // the bucket can't carry a target
@@ -7284,7 +7360,7 @@ const actions = {
     if (!f || !draft || !f.name.trim() || !draft.entries.length) return;
     const exercises = draft.entries.map((e) => ({
       exercise: e.exercise,
-      muscle: e.kind === "cardio" ? "Cardio" : muscleOf(e.exercise, state.library, e.muscle),
+      muscle: groupOfEntry(e),
       kind: e.kind || "strength",
     }));
     const preset = { id: uid(), name: f.name.trim(), description: (f.description || "").trim(), pinned: false, exercises, createdAt: Date.now() };

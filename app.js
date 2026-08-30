@@ -64,10 +64,10 @@
    dropset chains, the plan's ghost rows, the last-time verdicts, the PR
    badge, the graph and sets-per-week all work for them unchanged.       */
 const KIND = {
-  strength:   { sets: true,  fields: ["reps", "weight"], rpe: true },
-  bodyweight: { sets: true,  fields: ["reps"],           rpe: true },
-  hold:       { sets: true,  fields: ["secs"],           rpe: true },
-  cardio:     { sets: false, fields: ["minutes", "intensity"] },
+  strength:   { sets: true },
+  bodyweight: { sets: true },
+  hold:       { sets: true },
+  cardio:     { sets: false },
 };
 const KIND_ORDER = ["strength", "bodyweight", "hold", "cardio"];
 const DEFAULT_KIND = "strength";
@@ -119,13 +119,12 @@ const DEFAULT_LIBRARY = [
   ["Cardio: Rowing","Cardio","Cardio","Rower","Cycling","Full-body conditioning that also hits the mid back. Drive with your legs first and keep your back neutral the whole stroke."],
 ].map(([name, muscle, type, equipment, alternatives, note], i) => ({
   id: "default-" + i, name, muscle, type, equipment, alternatives, note,
-  /* Every seeded lift is logged the way it always was, which is why the
-     pull-ups and the plank are still `strength` rather than the bodyweight
-     and hold kinds they could obviously be: re-declaring them here would
-     change the form under everyone who already has reps × weight on record
-     for them, and hide that history from their own "last time". They are
-     one tap away in the exercise editor for anyone who wants them. */
-  kind: type === "Cardio" ? "cardio" : DEFAULT_KIND,
+  /* No `kind` on any of them, deliberately: they all sit in a group that
+     answers for them, the three cardio machines included. Note the seeded
+     pull-ups and plank are therefore strength, not the bodyweight and hold
+     kinds they could obviously be — re-declaring them here would change the
+     form under everyone who already has reps × weight on record for them.
+     They are one tap away in the exercise editor for anyone who wants them. */
   image: "", video: "", custom: false,
 }));
 
@@ -194,25 +193,61 @@ const colorFor = (muscle, i = 0) =>
   groupColor(muscle) || EXTRA_COLORS[i % EXTRA_COLORS.length];
 
 
-/* Resolving a kind at each of the three levels it lives at, off the table
-   at the top of the file. A group's, an exercise's, and an entry's. The entry's is FROZEN on
-   the record the moment it is logged: re-declaring a group must never
-   reach back and change what a session on record claims to have been. */
+/* ── THE GROUP DECIDES, THE EXERCISE MAY DISAGREE ──────────────────
+   Three levels, and only two of them store anything.
+
+   A GROUP always carries a kind. An EXERCISE carries one only when it is an
+   EXCEPTION to its group: `ex.kind` absent means "whatever my group is
+   for", which is why filing a lift under a cardio group makes it cardio,
+   and why re-declaring a group takes its exercises with it. Stamping a kind
+   on every row instead (which is what v13 did) made the group setting inert
+   — the exercises all had their own answer already and never asked.
+
+   An ENTRY is different: its kind is FROZEN on the record the moment it is
+   logged. Re-declaring a group must never reach back and change what a
+   session on record claims to have been. */
 const groupKind = (name) => {
   const g = ((state && state.groups) || DEFAULT_GROUPS).find((x) => x.name === name);
   return g && KIND[g.kind] ? g.kind : DEFAULT_KIND;
 };
 
-const exKind = (ex) => {
-  if (!ex) return DEFAULT_KIND;
-  if (KIND[ex.kind]) return ex.kind;
-  /* library rows from before kinds existed: `type` carried "Cardio", and
-     the group answered for everything else */
-  if (ex.type === "Cardio") return "cardio";
-  return groupKind(ex.muscle);
+const exKind = (ex) => (ex && KIND[ex.kind] ? ex.kind : groupKind(ex && ex.muscle));
+
+/* An exercise stores its kind only while it differs from its group's, so
+   "same as my group" is the absence of an answer rather than a copy of one
+   that would go stale the moment the group changed. Everything that writes
+   a library row goes through this. */
+const withKind = (ex, kind, gk) => {
+  const out = { ...ex };
+  const groups = KIND[gk] ? gk : groupKind(out.muscle);
+  if (KIND[kind] && kind !== groups) out.kind = kind;
+  else delete out.kind;
+  return out;
 };
 
 const kindOf = (e) => (e && KIND[e.kind] ? e.kind : DEFAULT_KIND);
+
+/* ── WHICH SESSIONS ARE COMPARABLE ───────────────────────────────
+   An exercise can change what it is logged in, and its old sessions do not
+   change with it: they stay exactly as they were written. That leaves two
+   sets of numbers under one name, and a rep count is not a kilo. Pooling
+   them put an est. 1RM and a rep count on one axis, called a good session
+   a drop, and set the "beat last time" card a target in the wrong units.
+
+   So the rule is: **a lift is READ in the kind it is logged in today, and
+   only sessions in that kind are compared.** The others are still shown —
+   they happened — but they are not plotted, not ranked and never the bar
+   to beat. `readKind` is that "today", taken from the library rather than
+   from the last row logged, since the library is what the next set will be
+   typed into. */
+const readKind = (name) => {
+  const ex = ((state && state.library) || []).find((x) => x.name === name);
+  return ex ? exKind(ex) : null;
+};
+const sameKindAs = (name, fallback) => {
+  const k = readKind(name) || fallback || DEFAULT_KIND;
+  return (e) => kindOf(e) === k;
+};
 const isSetKind = (k) => !!(KIND[k] && KIND[k].sets);
 
 
@@ -497,10 +532,13 @@ const setScore = (s, kind = DEFAULT_KIND) =>
    session's load; "10 reps" scoring 10 is the set said twice. */
 const scoreWorthShowing = (kind) => kind === "strength" || kind === "cardio";
 
+/* `unit` omitted falls back to the default; `unit` given as "" means print
+   no unit at all, which is how a row of sets says "kg" once at the end
+   instead of after every one of them (planTargetLine). */
 const setLine = (s, kind = DEFAULT_KIND, unit) =>
   kind === "bodyweight" ? T("unit.nReps", { n: esc(s.reps) })
     : kind === "hold" ? T("unit.nSecs", { n: esc(s.secs) })
-    : `${esc(s.reps)} × ${esc(s.weight)} ${unit || state.settings.units}`;
+    : `${esc(s.reps)} × ${esc(s.weight)}${(unit == null ? state.settings.units : unit) ? " " + (unit == null ? state.settings.units : unit) : ""}`;
 
 const filledSets = (e) => (e.setList || []).filter((s) => setHasData(s, kindOf(e)));
 
@@ -598,7 +636,7 @@ function entrySummary(e, unit, withRpe = false) {
   const label = T(isDetailed(e) ? "sets.summaryBest" : "sets.summaryTop");
   /* always in the unit the set was actually logged in, never converted:
      what you typed is what you read back */
-  return `${esc(e.sets)} ${T("unit.sets")} · ${label} ${setLine(e, k, unitOf(e))}` +
+  return `${TN("set", +e.sets || 0)} · ${label} ${setLine(e, k, unitOf(e))}` +
     (withRpe && e.rpe ? ` · RPE ${esc(e.rpe)}` : "");
 }
 
@@ -679,8 +717,13 @@ function earlierOutings(f, isDraft) {
   const draft = ui.workoutSheet;
   const editingIds = draft && draft.editing ? new Set(draft.originalIds || []) : null;
   const date = f.date || (isDraft && draft ? draft.date : null) || todayStr();
+  const k = kindOf(f);
   return chronoSort(state.log).filter((e) =>
     e.exercise === f.exercise && e.id !== f.id &&
+    /* a session logged in another kind is not a session you can be asked to
+       beat: see readKind. This one filter is what keeps the suggestion
+       card, "last time", the opening set and the set verdicts agreeing. */
+    kindOf(e) === k &&
     /* a row someone unticked back to not-done is not a session they had.
        Leaving it in would let it BE the "last day you trained this" and
        come back with nothing in it, hiding the real last time behind it. */
@@ -889,14 +932,17 @@ function computeBadges(log) {
   for (const e of chronoSort(log)) {
     const m = metricOf(e);
     if (m == null) { out[e.id] = { badge: null, metric: null }; continue; }
-    const prev = bests[e.exercise];
+    /* keyed by lift AND kind: twelve pull-ups are not a PR over a 90 kg
+       weighted single, and neither is the reverse */
+    const key = e.exercise + "\u0000" + kindOf(e);
+    const prev = bests[key];
     let badge;
     if (prev === undefined) badge = "first";
     else if (m > prev) badge = "pr";
     else if (m === prev) badge = "match";
     else badge = "below";
     out[e.id] = { badge, metric: m, prevBest: prev ?? null };
-    bests[e.exercise] = prev === undefined ? m : Math.max(prev, m);
+    bests[key] = prev === undefined ? m : Math.max(prev, m);
   }
   return out;
 }
@@ -930,10 +976,15 @@ const groupOfEntry = (e, library) =>
 function dashboardRows(log, library, goals) {
   const seen = new Map();
   for (const e of chronoSort(log)) {
-    const m = metricOf(e);
-    if (!seen.has(e.exercise))
-      seen.set(e.exercise, { name: e.exercise, best: null, sessions: 0, last: e.date, kind: kindOf(e), cardio: kindOf(e) === "cardio" });
+    if (!seen.has(e.exercise)) {
+      /* the kind this lift is read in TODAY, so this row and the exercise
+         window can never disagree about what its number means */
+      const kind = readKind(e.exercise) || kindOf(e);
+      seen.set(e.exercise, { name: e.exercise, best: null, sessions: 0, last: e.date, kind, cardio: kind === "cardio", offKind: 0 });
+    }
     const r = seen.get(e.exercise);
+    if (kindOf(e) !== r.kind) { r.offKind += 1; continue; }
+    const m = metricOf(e);
     r.sessions += 1;
     if (e.date > r.last) r.last = e.date;
     if (m != null) r.best = r.best == null ? m : Math.max(r.best, m);
@@ -955,16 +1006,21 @@ function weeklyTotals(log, startDate) {
   return { sets, cardioMin };
 }
 
-/* Volume tab: SUMIFS(sets, week, muscle), cardio counted in minutes */
+/* Volume tab: SUMIFS(sets, week, muscle), cardio counted in minutes.
+   Each group comes back as {sets, minutes}, never one figure: see below. */
 function volumeForWeek(log, library, startDate, week) {
   const out = {};
   for (const e of log) {
     if (weekOf(e.date, startDate) !== week) continue;
-    /* cardio is counted in minutes and everything else in sets, but both
-       land under the entry's OWN group: hard-coding "Cardio" filed every
-       cardio session under a group the user may not even have. */
+    /* Sets and minutes are two different things and are never added
+       together, even when they land in the same group. A group is free to
+       hold both (declare it cardio and make one lift an exception, or the
+       other way round), and adding a 30-minute row to two sets of bench
+       produced "32 sets", which is not a number about anything. */
     const m = groupOfEntry(e, library);
-    out[m] = (out[m] || 0) + (kindOf(e) === "cardio" ? +e.minutes || 0 : +e.sets || 0);
+    const row = out[m] || (out[m] = { sets: 0, minutes: 0 });
+    if (kindOf(e) === "cardio") row.minutes += +e.minutes || 0;
+    else row.sets += +e.sets || 0;
   }
   return out;
 }
@@ -977,11 +1033,15 @@ function volumeInRange(log, library, from, to) {
   const out = {};
   for (const e of log) {
     if (e.date < from || e.date > to) continue;
-    /* cardio is counted in minutes and everything else in sets, but both
-       land under the entry's OWN group: hard-coding "Cardio" filed every
-       cardio session under a group the user may not even have. */
+    /* Sets and minutes are two different things and are never added
+       together, even when they land in the same group. A group is free to
+       hold both (declare it cardio and make one lift an exception, or the
+       other way round), and adding a 30-minute row to two sets of bench
+       produced "32 sets", which is not a number about anything. */
     const m = groupOfEntry(e, library);
-    out[m] = (out[m] || 0) + (kindOf(e) === "cardio" ? +e.minutes || 0 : +e.sets || 0);
+    const row = out[m] || (out[m] = { sets: 0, minutes: 0 });
+    if (kindOf(e) === "cardio") row.minutes += +e.minutes || 0;
+    else row.sets += +e.sets || 0;
   }
   return out;
 }
@@ -1320,7 +1380,7 @@ const seedTimers = () =>
   }));
 
 const defaultState = () => ({
-  version: 13,
+  version: 14,
   /* `sex` is "" until asked, and it is only ever asked by the strength
      standards, whose tables are split male/female. It sits in settings so it
      is remembered and travels in a backup, not because the app wants a
@@ -1509,6 +1569,29 @@ function migrate(s) {
       : { ...ex, kind: ex.type === "Cardio" ? "cardio" : kindForGroup(ex.muscle) }));
     s.version = 13;
   }
+  if (v < 14) {
+    /* v14 made a group's kind mean something. v13 had stamped a kind onto
+       every library row, which quietly made the group setting inert: each
+       exercise already had its own answer and never asked its group. Now a
+       row stores a kind only while it is an EXCEPTION to its group, so the
+       stamps are dropped wherever they simply agreed with it.
+
+       An exercise whose old answer DISAGREES keeps it as a real exception:
+       that covers a lift stamped cardio by `type` before kinds existed but
+       sitting in a group nobody has declared cardio. Nothing in the log is
+       touched, here as everywhere. */
+    const gk = (name) => {
+      const g = (s.groups || []).find((x) => x.name === name);
+      return g && KIND[g.kind] ? g.kind : DEFAULT_KIND;
+    };
+    s.library = (s.library || []).map((ex) => {
+      const was = KIND[ex.kind] ? ex.kind : (ex.type === "Cardio" ? "cardio" : gk(ex.muscle));
+      const out = { ...ex };
+      if (was !== gk(ex.muscle)) out.kind = was; else delete out.kind;
+      return out;
+    });
+    s.version = 14;
+  }
   return s;
 }
 
@@ -1519,7 +1602,13 @@ function migrate(s) {
    sitting in localStorage all along, or a restore would be a downgrade. */
 function hydrate(saved) {
   const base = defaultState();
-  return migrate({ ...base, ...saved, settings: { ...base.settings, ...(saved && saved.settings) } });
+  /* `version` is taken from the SAVE, never inherited from the defaults
+     spread in underneath it. A file without one is old (that is what its
+     absence means) and has to run every migration; letting it pick up
+     today's number instead declared it current and skipped the lot. */
+  const merged = { ...base, ...saved, settings: { ...base.settings, ...(saved && saved.settings) } };
+  merged.version = (saved && saved.version) || 1;
+  return migrate(merged);
 }
 
 function loadState() {
@@ -2822,7 +2911,7 @@ function planTargetLine(t, unit) {
   /* "3 sets · 8 × 100 kg" only earns the count when there is more than one
      of them; a single set is just the set */
   if (runs.length === 1 && runs[0].n > 1)
-    return `${runs[0].n} ${T("unit.sets")} · ${setLine(runs[0], k, u)}`;
+    return `${TN("set", runs[0].n)} · ${setLine(runs[0], k, u)}`;
   /* the unit rides on the last one only, so a row of sets does not repeat it */
   return runs.map((r, i) => `${r.n > 1 ? r.n + " × " : ""}${setLine(r, k, i === runs.length - 1 ? u : "")}`.trim()).join(" · ");
 }
@@ -3010,6 +3099,12 @@ function renderCalendarTab(log, library, settings, currentWeek) {
   </div>`;
 }
 
+/* one period's figure for a group, in the unit that group is graded in */
+const prevOf = (v, g, isCardio) => {
+  const c = (v && v[g]) || { sets: 0, minutes: 0 };
+  return isCardio ? c.minutes : c.sets;
+};
+
 function renderVolume(log, library, settings, currentWeek) {
   const rolling = rollingWeeks();
   const week = ui.volumeWeek;
@@ -3034,7 +3129,14 @@ function renderVolume(log, library, settings, currentWeek) {
   const rows = groups.map((g, i) => {
     const isCardio = groupKind(g) === "cardio";
     const bucket = g === UNCATEGORIZED;
-    const v = vol[g] || 0;
+    const cell = vol[g] || { sets: 0, minutes: 0 };
+    /* The group's own kind says which of the two figures is THE number:
+       the one a target is set against and the one compared with last
+       period. The other is still shown when there is any of it, because a
+       group holding both is a fact about the group, not an error. */
+    const v = isCardio ? cell.minutes : cell.sets;
+    const other = isCardio ? cell.sets : cell.minutes;
+    const otherUnit = isCardio ? T("unit.sets") : T("unit.min");
     const unit = isCardio ? T("unit.min") : T("unit.sets");
     /* A personal target takes over the assessment when the user sets one.
        Everyone's "enough" is different. Muscle groups target sets; cardio
@@ -3065,8 +3167,8 @@ function renderVolume(log, library, settings, currentWeek) {
         : T("vol.toGo", { n: Math.round((target - v) * 10) / 10, unit });
     } else if (bucket) {
       note = T("vol.noGroup");
-    } else if (prevVol && (v > 0 || (prevVol[g] || 0) > 0)) {
-      const d = Math.round((v - (prevVol[g] || 0)) * 10) / 10;
+    } else if (prevVol && (v > 0 || prevOf(prevVol, g, isCardio) > 0)) {
+      const d = Math.round((v - prevOf(prevVol, g, isCardio)) * 10) / 10;
       const period = T(rolling ? "vol.periodRolling" : "vol.periodWeek");
       note = d > 0 ? T("vol.more", { n: d, unit, period })
         : d < 0 ? T("vol.fewer", { n: -d, unit, period })
@@ -3092,6 +3194,7 @@ function renderVolume(log, library, settings, currentWeek) {
         <span style="width:7px;height:7px;border-radius:4px;background:${colorFor(g, i)};flex-shrink:0"></span>
         <div style="font-weight:600;font-size:13.5px;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(groupLabel(g))}</div>
         <div class="pb-num" style="font-weight:700;font-size:16px;color:${v ? "var(--text)" : "var(--faint)"}">${v}<span style="font-size:10px;color:var(--faint);font-weight:600"> ${unit}</span></div>
+        ${other > 0 ? `<div class="pb-num" style="font-weight:600;font-size:12px;color:var(--faint);flex-shrink:0">+ ${other} ${otherUnit}</div>` : ""}
         ${targetCell}
       </div>
       ${target ? `<div style="height:5px;background:var(--surface2);border-radius:3px;margin-top:7px;overflow:hidden">
@@ -3351,7 +3454,9 @@ function stdBestFromLog(slug, log, library) {
   if (!names.size) return null;
   let best = null;
   for (const e of log) {
-    if (e.kind === "cardio" || !names.has(e.exercise)) continue;
+    /* strength only: a rep count or a hold in seconds is not a weight, and
+       offering one as "your best from the log" is offering a lie in kilos */
+    if (kindOf(e) !== "strength" || !names.has(e.exercise)) continue;
     const m = metricOf(e);
     if (m != null && (best == null || m > best)) best = m;
   }
@@ -4198,10 +4303,20 @@ function newEntry(name, muscle, kind, createdAt = Date.now()) {
   return e;
 }
 
-/* Turn a preset's exercises into fresh, blank draft entries. */
+/* Turn a preset's exercises into fresh, blank draft entries.
+
+   The kind comes from the LIBRARY, not from the copy stored on the preset.
+   A preset is a bundle of exercises with no numbers on it, so it has no
+   business remembering how they were logged the day it was saved: a preset
+   built before a lift became bodyweight was still handing out reps-and-
+   weight forms afterwards, while the same lift picked straight out of the
+   library gave the new one. Two doors, two forms, and neither session could
+   see the other's history. The stored kind is kept only as the answer for
+   an exercise that has since left the library. */
 function presetToEntries(p) {
   const base = Date.now();
-  return (p.exercises || []).map((ex, i) => newEntry(ex.exercise, ex.muscle, ex.kind, base + i));
+  return (p.exercises || []).map((ex, i) =>
+    newEntry(ex.exercise, ex.muscle, readKind(ex.exercise) || ex.kind, base + i));
 }
 
 const presetCountLabel = (n) => `${n} ${n === 1 ? "move" : "moves"}`;
@@ -4428,10 +4543,19 @@ function renderExerciseWindow(library) {
    history list below it reads days, since two entries of the same lift on
    one day are one session's work and nobody remembers them as two.       */
 function exerciseHistory(name, log) {
-  const series = chronoSort(log)
+  const all = chronoSort(log)
     .filter((e) => e.exercise === name)
     .map((e) => ({ ...e, m: metricOf(e) }))
     .filter((e) => e.m != null);
+
+  /* What this lift is logged in TODAY. Everything that RANKS — the graph,
+     the best ever, the PR flags — reads only the sessions in that kind,
+     because a rep count and an est. 1RM cannot be put in order together.
+     The list below still shows every session: they happened, and a ledger
+     that hides them is worse than one that labels them. */
+  const kind = readKind(name) || (all.length ? kindOf(all[all.length - 1]) : DEFAULT_KIND);
+  const series = all.filter((e) => kindOf(e) === kind);
+  const offKind = all.length - series.length;
 
   let best = null, run = null;
   const chart = series.map((e) => {
@@ -4445,27 +4569,26 @@ function exerciseHistory(name, log) {
      The session's headline number and its flag are the FIRST of its points
      to reach the day's best: taking the last would call a day that opened
      with a PR and backed off a "match" of itself. */
+  const byId = Object.fromEntries(chart.map((p) => [p.e.id, p]));
   const sessions = [];
-  for (const p of chart) {
+  for (const e of all) {
     const open = sessions.length ? sessions[sessions.length - 1] : null;
-    if (open && open.date === p.e.date) open.points.push(p);
-    else sessions.push({ date: p.e.date, points: [p] });
+    if (open && open.date === e.date) open.entries.push(e);
+    else sessions.push({ date: e.date, entries: [e] });
   }
   for (const ses of sessions) {
-    const top = ses.points.reduce((a, p) => (p.y > a.y ? p : a), ses.points[0]);
-    ses.entries = ses.points.map((p) => p.e);
-    ses.m = top.y;
-    ses.badge = top.badge;
+    const points = ses.entries.map((e) => byId[e.id]).filter(Boolean);
+    /* a session in the kind being read gets a headline number and a flag;
+       one from before a change of kind gets neither, and says so instead */
+    const top = points.length ? points.reduce((a, p) => (p.y > a.y ? p : a), points[0]) : null;
+    ses.m = top ? top.y : null;
+    ses.badge = top ? top.badge : null;
+    ses.offKind = !top;
     Object.assign(ses, outingRows(ses.entries));   // rows, note, best
   }
   sessions.reverse();
 
-  /* the kind the LOG says this lift was done in, taken from its most recent
-     session rather than from the library, so a lift that has since been
-     re-declared still reads its own history back in the shape it was
-     written */
-  const kind = series.length ? kindOf(series[series.length - 1]) : DEFAULT_KIND;
-  return { series, chart, sessions, best, kind, cardio: kind === "cardio",
+  return { series, chart, sessions, best, kind, offKind, cardio: kind === "cardio",
            unit: metricUnit(kind, state.settings.units) };
 }
 
@@ -4616,10 +4739,12 @@ function exWindowHistory(hist) {
         <div class="pb-num" style="font-weight:600;font-size:13.5px;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
           ${fmtDate(ses.date, { weekday: "short", day: "numeric", month: "short", year: "numeric" })}
         </div>
-        ${BADGE_SHORT[ses.badge] ? chip(BADGE_SHORT[ses.badge], ses.badge === "pr" ? "var(--gold)" : "") : ""}
-        <div class="pb-num" style="font-weight:700;font-size:15px;flex-shrink:0;color:${ses.badge === "pr" ? "var(--gold)" : "var(--text)"}">
+        ${ses.offKind
+          ? chip(T("kind." + (ses.rows[0] && ses.rows[0].kind || DEFAULT_KIND)), "var(--steel)")
+          : BADGE_SHORT[ses.badge] ? chip(BADGE_SHORT[ses.badge], ses.badge === "pr" ? "var(--gold)" : "") : ""}
+        ${ses.m != null ? `<div class="pb-num" style="font-weight:700;font-size:15px;flex-shrink:0;color:${ses.badge === "pr" ? "var(--gold)" : "var(--text)"}">
           ${ses.m}<span style="font-size:10px;color:var(--muted);font-weight:600"> ${hist.unit}</span>
-        </div>
+        </div>` : ""}
         ${icon("chevron-right", 14, 'style="color:var(--faint);flex-shrink:0"')}
       </div>
       ${sets ? `<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:7px">${sets}</div>` : ""}
@@ -4637,7 +4762,7 @@ function exWindowHistory(hist) {
     ${sectionTitle(T("ex.historyTitle"), `<span style="font-size:11px;color:var(--faint)">${TN("session", hist.sessions.length)}</span>`)}
     <div class="pb-card" style="overflow:hidden">${rows}${more}</div>
     <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:8px 2px 0">
-      ${ui.workoutSheet ? T("ex.historyHintOpen") : T("ex.historyHint")}
+      ${hist.offKind ? T("kind.offKindNote", { n: TN("session", hist.offKind), kind: T("kind." + hist.kind) }) + " " : ""}${ui.workoutSheet ? T("ex.historyHintOpen") : T("ex.historyHint")}
     </div>`;
 }
 
@@ -5161,10 +5286,15 @@ function sugOption(o, smaller, unit, fill) {
   return `<button data-action="${fill}" ${data} style="flex:1;min-width:0;text-align:left;padding:9px 10px;border-radius:11px;color:var(--text);background:var(--surface);border:1px solid var(--border)">
     <div style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)">${label}</div>
     <div class="pb-num" style="font-size:14px;font-weight:700;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${line}</div>
-    <div style="display:flex;align-items:baseline;gap:5px;margin-top:1px">
-      <span style="font-size:10.5px;color:var(--faint)">${T("sug.gives", { n: o.m })}</span>
-      ${smaller ? `<span style="font-size:9.5px;color:var(--steel);white-space:nowrap">${T("sug.smaller")}</span>` : ""}
-    </div>
+    ${(() => {
+      /* "11 reps → 11" is the option said twice; only a score you cannot
+         read off the option itself earns the line (see scoreWorthShowing) */
+      const gives = o.secs == null && o.weight == null && o.minutes == null
+        ? "" : `<span style="font-size:10.5px;color:var(--faint)">${T("sug.gives", { n: o.m })}</span>`;
+      return gives || smaller ? `<div style="display:flex;align-items:baseline;gap:5px;margin-top:1px">
+        ${gives}${smaller ? `<span style="font-size:9.5px;color:var(--steel);white-space:nowrap">${T("sug.smaller")}</span>` : ""}
+      </div>` : "";
+    })()}
   </button>`;
 }
 
@@ -5486,10 +5616,14 @@ function renderSetForm(form, unit) {
   /* both of them, same as the card behind this sheet, minus whichever one
      the open set already IS, which is what you get by tapping it there */
   /* both of them minus whichever the open set already IS — or the single
-     one, on a kind with only one way forward */
+     one, on a kind with only one way forward. Compared on the fields THIS
+     kind has: bodyweight was matching on a weight neither side has, so the
+     option it was already showing never went away. */
+  const isOpenSet = (o) => k === "hold" ? +s.secs === o.secs
+    : k === "bodyweight" ? +s.reps === o.reps
+    : +s.reps === o.reps && +s.weight === o.weight;
   const opts = sug && !sug.done && (sug.kind === "step" || sug.kind === "bodyweight" || sug.kind === "hold")
-    ? sug.options.filter((o) => !(o.reps != null ? +s.reps === o.reps && +s.weight === o.weight
-        : o.secs != null ? +s.secs === o.secs : false))
+    ? sug.options.filter((o) => !isOpenSet(o))
     : [];
   const target = opts.length
     ? `<div class="pb-label" style="margin-bottom:6px">${T("sug.tryLabel")}</div>
@@ -6722,11 +6856,26 @@ function commitPlan(draft) {
    numbers do not come across, they become a TARGET on the side, which is
    the only thing standing between "I planned 8 × 100" and a log that
    says you lifted it. */
+/* A planned target is written in the shape the lift had when it was
+   planned. If the lift has been re-declared since, those numbers cannot be
+   answered: reps-and-weight ghost rows on a lift that now asks for seconds
+   are a form nobody can fill in. The LIFT survives (it was still the plan)
+   and the target is dropped, which reads as "planned, numbers on the day". */
+const planTargetUsable = (pe, kind) => {
+  const t = planTargetOf(pe);
+  if (!t) return null;
+  return (KIND[t.kind] ? t.kind : DEFAULT_KIND) === kind ? t : null;
+};
+
 function planEntryToDraftEntry(pe, planId, ix) {
-  const e = newEntry(pe.exercise, pe.muscle, pe.kind);
+  /* the lift is logged the way it is logged TODAY, exactly as it would be
+     if you had added it by hand, and its target only rides along while it
+     still fits that shape (planTargetUsable) */
+  const kind = readKind(pe.exercise) || kindOf(pe);
+  const e = newEntry(pe.exercise, pe.muscle, kind);
   e.unit = pe.unit || state.settings.units;
   if (pe.notes) e.notes = pe.notes;
-  const t = planTargetOf(pe);
+  const t = planTargetUsable(pe, kind);
   if (t) e.plan = t;
   /* Which planned lift this entry IS, kept only while it is a draft. Saving a
      day half-way through has to tell a planned lift you have not reached from
@@ -7248,7 +7397,16 @@ const actions = {
   },
   "group-color": (el) => { if (ui.groupForm) { ui.groupForm.color = el.dataset.c; render(); } },
   "group-kind": (el) => { if (ui.groupForm && KIND[el.dataset.k]) { ui.groupForm.kind = el.dataset.k; render(); } },
-  "exwin-kind": (el) => { if (ui.exWinDraft && KIND[el.dataset.k]) { ui.exWinDraft.kind = el.dataset.k; render(); } },
+  /* Picking the group's own kind is not an override, it is the absence of
+     one: tapping it puts the lift back to following its group, so a later
+     change to the group carries it along. Picking anything else is the
+     exception, and stays one. */
+  "exwin-kind": (el) => {
+    const f = ui.exWinDraft, k = el.dataset.k;
+    if (!f || !KIND[k]) return;
+    ui.exWinDraft = withKind(f, k);
+    render();
+  },
   "group-save": () => {
     const f = ui.groupForm;
     if (!f) return;
@@ -7325,7 +7483,10 @@ const actions = {
 
     const then = f.then;
     ui.groupForm = null;
-    if (then === "exwin" && ui.exWinDraft) ui.exWinDraft.muscle = name;
+    /* the group is not in state yet, so hand withKind the kind it is about
+       to be saved with rather than letting it look one up that isn't there */
+    if (then === "exwin" && ui.exWinDraft)
+      ui.exWinDraft = withKind({ ...ui.exWinDraft, muscle: name }, ui.exWinDraft.kind, KIND[f.kind] ? f.kind : DEFAULT_KIND);
     if (then) ui.groupSheet = false;     // opened from a workout, not the manager
     patch(p);
     /* quick-add was mid-question ("which muscle does it train?"), answer it */
@@ -7386,7 +7547,7 @@ const actions = {
   },
 
   "add-exercise": () => {
-    ui.exWinDraft = { id: uid(), name: "", muscle: "", kind: DEFAULT_KIND, equipment: "", alternatives: "", note: "", image: "", video: "", custom: true };
+    ui.exWinDraft = { id: uid(), name: "", muscle: "", equipment: "", alternatives: "", note: "", image: "", video: "", custom: true };
     ui.exWin = { isNew: true }; ui.exWinEdit = true; render();
   },
   /* open the detail window (read-only). Every "info" button lands here.
@@ -7496,10 +7657,10 @@ const actions = {
     }
 
     /* compound vs isolation was noise nobody filed anything under, and its
-       `type` field is dead: what a lift is logged in is `kind`, declared by
-       its group and overridable here. Untouched, it follows the group,
-       which is what re-filing a lift into a cardio group should mean. */
-    const ex = { ...f, name, muscle, kind: KIND[f.kind] ? f.kind : groupKind(muscle) };
+       `type` field is dead: what a lift is logged in is `kind`, and withKind
+       stores it only while it differs from the group's, so re-filing a lift
+       into a cardio group is all it takes to make it cardio. */
+    const ex = withKind({ ...f, name, muscle }, f.kind);
     const p = { library: orig ? state.library.map((x) => (x.id === ex.id ? ex : x)) : [...state.library, ex] };
 
     if (was && was !== name) {
@@ -7671,7 +7832,7 @@ const actions = {
      Uncategorized still wearing its NEW flag, which is the reminder. */
   "quick-add-muscle": (el) => {
     const g = el.dataset.g;
-    const ex = { id: uid(), name: ui.pickerQuick.name, muscle: g, kind: groupKind(g), equipment: "", alternatives: "", note: "", custom: true };
+    const ex = { id: uid(), name: ui.pickerQuick.name, muscle: g, equipment: "", alternatives: "", note: "", custom: true };
     ui.picking = false; ui.pickerQ = ""; ui.pickerQuick = null;
     ui.entryForm = { f: newEntry(ex.name, ex.muscle, exKind(ex)), isDraft: true };
     patch({ library: [...state.library, ex] });
@@ -7996,7 +8157,12 @@ function handleBind(el) {
      characters are pushed back out) while the value that gets stored is
      always period-separated, so 82,5 and 82.5 are the same number. */
   if (el.dataset.num != null) {
-    const clean = v.replace(/[^\d.,]/g, "");
+    /* digits and ONE separator. A second one made "5.5.5", which reads back
+       as Not a Number: the field looked fine, the Save button just stayed
+       grey, and nothing on screen said why. */
+    let clean = v.replace(/[^\d.,]/g, "");
+    const cut = clean.search(/[.,]/);
+    if (cut >= 0) clean = clean.slice(0, cut + 1) + clean.slice(cut + 1).replace(/[.,]/g, "");
     if (clean !== v) {
       const pos = el.selectionStart;
       el.value = clean;
@@ -8077,7 +8243,13 @@ function handleBind(el) {
     /* "＋ New group…" hands straight over to the group editor, which drops the
        finished group back onto this draft, see actions["group-save"]. */
     if (v === "__new") actions["group-new"]({ dataset: { then: "exwin" } });
-    else { ui.exWinDraft.muscle = v; render(); }
+    else {
+      /* Re-filing a lift re-points what it is logged in, unless it was
+         carrying an exception, which is the whole point of an exception.
+         withKind drops an override that the new group makes redundant. */
+      ui.exWinDraft = withKind({ ...ui.exWinDraft, muscle: v }, ui.exWinDraft.kind);
+      render();
+    }
   } else if (bind === "profileLang") {
     /* Preview the language live, the way the theme buttons do: the whole
        screen is written in it, so picking blind and only finding out on
@@ -8109,11 +8281,6 @@ function handleBind(el) {
     ui.timerForm.t[bind.slice(6)] = v; updateTimerPreview();
   } else if (bind.startsWith("exwin.")) {
     ui.exWinDraft[bind.slice(6)] = v;
-    /* changing the group re-points the kind at the new group's, since that
-       is what filing a lift under Cardio is meant to do. An explicit
-       override is re-made by tapping one, which is the honest cost of not
-       having to remember which lifts you had overridden. */
-    if (bind === "exwin.muscle" && KIND[groupKind(v)]) { ui.exWinDraft.kind = groupKind(v); render(); }
     const btn = document.getElementById("exwinSaveBtn");
     if (btn) { const ok = ui.exWinDraft.name.trim() && ui.exWinDraft.muscle.trim(); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
   } else if (bind.startsWith("body.")) {

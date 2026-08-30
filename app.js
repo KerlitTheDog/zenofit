@@ -168,7 +168,13 @@ function groupLabel(name) {
 
 function exLabelOf(ex) {
   const row = exRow(ex);
-  return row ? row[0] : (ex ? ex.name : "");
+  if (!row) return ex ? ex.name : "";
+  /* A built-in the user RENAMED is theirs now, the same rule exFieldOf
+     applies to the prose below. Without it the library went on showing the
+     shipped name in a translated UI while the log, the plans and the
+     presets had all been moved to the new one: one lift wearing two names,
+     and neither surface able to find the other. */
+  return ex.name === DEFAULT_LIBRARY[DEFAULT_INDEX[ex.id]].name ? row[0] : ex.name;
 }
 
 /* an exercise's label, looked up from the log by its stored name */
@@ -5107,11 +5113,61 @@ function renderEntryFields(form, unit) {
   `, "entryForm");
 }
 
+/* ── IS THE SET YOU ARE TYPING BETTER THAN LAST TIME? ─────────────────
+   The set editor has always shown the est. 1RM of the numbers in the two
+   boxes, and on its own that figure answers nothing: nobody carries last
+   week's estimate around in their head. The "beat last time" card offers
+   two ways over the bar, but the whole point of typing your own numbers is
+   that you did not want either of them, and until now that left you
+   backing out of the editor to go and look the old number up.
+
+   So the est. 1RM says which side of last session it lands on. The bar is
+   the same one the suggestion card argues from, the lift's estimate LAST
+   SESSION, which is its best set: the app already treats that as what the
+   lift is worth on a given day, and a second definition of "last time" on
+   the same screen would be one too many.
+
+   Read through lastTimeSets, which has already converted that session into
+   the unit being typed in today, because the number this is subtracted
+   from is drawn in the entry's unit and a kg estimate held up against an
+   lbs one is not a comparison at all.
+
+   It states a fact about a number, it does not propose one, so unlike the
+   suggestion card it stays put under a plan: the plan owns "what am I
+   going for", this only ever says what you have typed so far comes to. */
+function lastBestMetric(f, isDraft) {
+  const prev = lastTimeSets(f, isDraft);
+  if (!prev) return null;
+  let m = null;
+  for (const r of prev.rows) {
+    const v = est1RM(r.weight, r.reps);
+    if (v != null && (m == null || v > m)) m = v;
+  }
+  return m == null ? null : { m, date: prev.date };
+}
+
+/* One line under that number: the verdict, in the colours the set list's
+   own beat/same/under verdicts wear, then the bar it was measured against,
+   because a comparison that will not name what it compared with is just an
+   opinion. Text and colour only, no icon: this is rewritten in place while
+   you type (see updateSetPreview) and a freshly injected lucide
+   placeholder has nothing to turn it into a glyph. */
+function vsLastLine(m, ref) {
+  if (!ref) return "";
+  const base = `<span style="color:var(--faint)">${T("vsLast.base", { n: ref.m, date: fmtShort(ref.date) })}</span>`;
+  if (m == null) return base;
+  const d = Math.round((m - ref.m) * 10) / 10;
+  const v = d > 0 ? "beat" : d < 0 ? "under" : "hit";
+  const word = d === 0 ? T("vsLast.same") : T(d > 0 ? "vsLast.over" : "vsLast.under", { n: Math.abs(d) });
+  return `<span style="color:${VERDICT_COLOR[v]};font-weight:700">${word}</span> · ${base}`;
+}
+
 /* the single-set editor, same idea as the entry form, one level down */
 function renderSetForm(form, unit) {
   const { s, isNew, index } = form;
   const m = est1RM(+s.weight, +s.reps);
   const ok = setHasData(s);
+  const vsRef = ui.entryForm ? lastBestMetric(ui.entryForm.f, ui.entryForm.isDraft) : null;
   /* the same target as the card behind this sheet, one line, one tap,
      only on a NEW set, because correcting an old one is not a decision
      about what to lift next */
@@ -5157,6 +5213,7 @@ function renderSetForm(form, unit) {
     <div class="pb-card2" style="padding:11px 14px;margin-bottom:14px">
       <div class="pb-label">${T("entry.est1rm", { unit })}</div>
       <div id="setMetric" class="pb-num" style="font-size:26px;font-weight:700;color:var(--gold);line-height:1.05">${m ?? "—"}</div>
+      <div id="setVsLast" style="font-size:11.5px;line-height:1.45;margin-top:${vsRef ? 5 : 0}px">${vsLastLine(m, vsRef)}</div>
     </div>
 
     <button id="setSaveBtn" data-action="save-set" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:14px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
@@ -5168,14 +5225,18 @@ function renderSetForm(form, unit) {
   `, 100);
 }
 
-/* live 1RM + save-button state while typing in the set editor */
+/* live 1RM, its verdict against last time, and save-button state while
+   typing in the set editor. Patched in place rather than re-rendered, so
+   the caret never moves out from under the finger typing into it. */
 function updateSetPreview() {
   if (!ui.setForm) return;
   const s = ui.setForm.s;
   const m = est1RM(+s.weight, +s.reps);
   const el = document.getElementById("setMetric");
+  const vs = document.getElementById("setVsLast");
   const btn = document.getElementById("setSaveBtn");
   if (el) el.textContent = m ?? "—";
+  if (vs && ui.entryForm) vs.innerHTML = vsLastLine(m, lastBestMetric(ui.entryForm.f, ui.entryForm.isDraft));
   if (btn) { const ok = setHasData(s); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
 }
 
@@ -7065,17 +7126,61 @@ const actions = {
     ui.exWinEdit = false; ui.exWinDraft = null; render();
   },
   "exwin-remove-image": () => { if (ui.exWinDraft) { ui.exWinDraft.image = ""; render(); } },
+  /* ── A RENAME HAS TO TAKE THE LIFT'S WHOLE PAST WITH IT ─────────────
+     An exercise's NAME is its identity: a logged entry points at it, a
+     plan and a preset name it, a goal is filed under it. Writing a new
+     name into the library alone left every one of them pointing at a lift
+     that no longer existed, which is worse than doing nothing: the session
+     still showed up in the day, and opening it found nothing in the
+     library to edit. Same move as actions["group-save"], same reason, and
+     the same rule holds for anything added later that stores a name.
+
+     Two guards around it. The field is prefilled with the LABEL, so a
+     built-in left untouched in a translated UI must not count as a rename,
+     or "Bench Press (Barbell)" would freeze into whatever language you
+     happened to be reading in. And a name already in the library is
+     refused rather than merged: two rows under one name is exactly the
+     desync this is here to fix, arrived at from the other end. */
   "exwin-save": () => {
     const f = ui.exWinDraft;
     if (!f || !(f.name.trim() && f.muscle.trim())) return;
     const muscle = f.muscle.trim();
+    const orig = state.library.find((x) => x.id === f.id);
+    const typed = f.name.trim();
+    const name = orig && typed === exLabelOf(orig) ? orig.name : typed;
+    const was = orig ? orig.name : null;
+
+    if (state.library.some((x) => x.id !== f.id && x.name.toLowerCase() === name.toLowerCase())) {
+      alert(T("ex.clash", { name: typed }));
+      return;
+    }
+
     /* compound vs isolation was noise nobody filed anything under, so the
        picker is gone; the only thing `type` still decides is whether the
        lift is logged in minutes, and the muscle group already knows that. */
-    const ex = { ...f, name: f.name.trim(), muscle, type: cardioType(muscle) };
-    const exists = state.library.some((x) => x.id === ex.id);
-    ui.exWin = { name: ex.name }; ui.exWinEdit = false; ui.exWinDraft = null;
-    patch({ library: exists ? state.library.map((x) => (x.id === ex.id ? ex : x)) : [...state.library, ex] });
+    const ex = { ...f, name, muscle, type: cardioType(muscle) };
+    const p = { library: orig ? state.library.map((x) => (x.id === ex.id ? ex : x)) : [...state.library, ex] };
+
+    if (was && was !== name) {
+      const swap = (e) => (e.exercise === was ? { ...e, exercise: name } : e);
+      p.log = state.log.map(swap);
+      p.plans = (state.plans || []).map((pl) => ({ ...pl, entries: (pl.entries || []).map(swap) }));
+      p.dayDrafts = (state.dayDrafts || []).map((d) => ({ ...d, entries: (d.entries || []).map(swap) }));
+      p.presets = (state.presets || []).map((pr) => ({ ...pr, exercises: (pr.exercises || []).map(swap) }));
+      if (state.goals && state.goals[was] != null) {
+        const g = { ...state.goals };
+        g[name] = g[was]; delete g[was];
+        p.goals = g;
+      }
+      /* whatever is open right now points at it too, and an unsaved day is
+         not on record yet for the sweep above to have reached */
+      if (ui.workoutSheet) ui.workoutSheet.entries = (ui.workoutSheet.entries || []).map(swap);
+      if (ui.entryForm) ui.entryForm.f = swap(ui.entryForm.f);
+      if (ui.progressSelected === was) ui.progressSelected = name;
+    }
+
+    ui.exWin = { name }; ui.exWinEdit = false; ui.exWinDraft = null;
+    patch(p);
   },
   "exwin-delete": () => {
     if (confirm(T("ex.confirmDelete"))) {

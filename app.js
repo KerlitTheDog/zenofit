@@ -6972,17 +6972,30 @@ const actions = {
     const p = { ...state };
 
     if (f.orig) {
-      /* a rename has to carry everything that points at the old name, or the
-         exercises in it would quietly fall out of their own group */
+      /* A rename has to carry EVERYTHING that points at the old name, or the
+         exercises in it quietly fall out of their own group. Same sweep as
+         the one in actions["exwin-save"], and the same standing rule: a new
+         place that files something under a group name belongs in this list.
+
+         The log's `muscle` is only a fallback (muscleOf reads the library
+         row first), which is why a miss here stayed invisible for so long,
+         and exactly why it is worth keeping true: the fallback is what
+         answers for an exercise that is no longer in the library at all.
+
+         No sweep of the open workout sheet or entry form, unlike the
+         exercise version: the group manager opens from the Library tab
+         only, so there is nothing of the sort on screen to have gone
+         stale. If it ever opens from somewhere else, they go here too. */
       p.groups = groups.map((g) => (g.name === f.orig
         ? (keep ? { name, key: keep, color: f.color } : { name, color: f.color })
         : g));
       if (name !== f.orig) {
-        p.library = state.library.map((ex) => (ex.muscle === f.orig ? { ...ex, muscle: name } : ex));
-        p.log = state.log.map((e) => (e.muscle === f.orig ? { ...e, muscle: name } : e));
-        p.presets = (state.presets || []).map((pr) => ({
-          ...pr, exercises: (pr.exercises || []).map((x) => (x.muscle === f.orig ? { ...x, muscle: name } : x)),
-        }));
+        const swap = (x) => (x.muscle === f.orig ? { ...x, muscle: name } : x);
+        p.library = state.library.map(swap);
+        p.log = state.log.map(swap);
+        p.plans = (state.plans || []).map((pl) => ({ ...pl, entries: (pl.entries || []).map(swap) }));
+        p.dayDrafts = (state.dayDrafts || []).map((d) => ({ ...d, entries: (d.entries || []).map(swap) }));
+        p.presets = (state.presets || []).map((pr) => ({ ...pr, exercises: (pr.exercises || []).map(swap) }));
         if (state.volumeGoals && state.volumeGoals[f.orig] != null) {
           const vg = { ...state.volumeGoals };
           vg[name] = vg[f.orig]; delete vg[f.orig];

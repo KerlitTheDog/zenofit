@@ -603,6 +603,45 @@ function setSuggestion(f, isDraft) {
            base, ...bySmallestStep(options), unit: fu, now, done };
 }
 
+/* ── ONE SESSION OF ONE LIFT, SET BY SET ──────────────────────────────
+   The rows behind every panel that reads a past session back: in the order
+   they were done, and in the unit each was LOGGED in, never converted,
+   which is the rule the rest of the history reads back under.
+
+   Takes one DAY'S entries for the lift, because two entries of the same
+   exercise on one day are one session's work. A legacy top-set row says so
+   (`topOf`) rather than passing one set off as the lot.
+
+   Shared by "Last time" in the entry form and by the history list in the
+   exercise window, since that is one question asked from two places, and
+   two answers to it would sooner or later disagree about what a session
+   was. */
+function outingRows(entries) {
+  const rows = [];
+  let note = "";
+  for (const e of entries || []) {
+    if (!note && e.notes) note = e.notes;
+    if (e.kind === "cardio") {
+      if (+e.minutes > 0 && +e.intensity > 0)
+        rows.push({ minutes: e.minutes, intensity: e.intensity, m: cardioScore(+e.minutes, +e.intensity) });
+      continue;
+    }
+    const u = unitOf(e);
+    if (isDetailed(e)) {
+      for (const st of filledSets(e))
+        rows.push({ reps: st.reps, weight: st.weight, rpe: st.rpe, unit: u, m: est1RM(+st.weight, +st.reps) });
+    } else if (+e.reps > 0 && +e.weight > 0) {
+      /* a top-set row from before per-set logging: one set is all that was
+         ever written down, and saying so beats showing it as if it were the lot */
+      rows.push({ reps: e.reps, weight: e.weight, rpe: e.rpe, unit: u,
+        m: est1RM(+e.weight, +e.reps), topOf: +e.sets > 0 ? +e.sets : null });
+    }
+  }
+  let best = null;
+  for (const r of rows) if (r.m != null && (best == null || r.m > best.m)) best = r;
+  return { rows, note, best };
+}
+
 /* ── LAST TIME, IN FULL ───────────────────────────────────────────────
    The card above names ONE set, the best of last session, because that is
    the bar it is offering two ways over. One set is not the session. Four sets
@@ -623,30 +662,8 @@ function lastOuting(f, isDraft) {
   /* the last DAY you trained it, since two entries of the same lift on one day are
      one session's work, so both are read, in the order they were done */
   const date = earlier[earlier.length - 1].date;
-  const rows = [];
-  let note = "";
-  for (const e of earlier) {
-    if (e.date !== date) continue;
-    if (!note && e.notes) note = e.notes;
-    if (e.kind === "cardio") {
-      if (+e.minutes > 0 && +e.intensity > 0)
-        rows.push({ minutes: e.minutes, intensity: e.intensity, m: cardioScore(+e.minutes, +e.intensity) });
-      continue;
-    }
-    const u = unitOf(e);
-    if (isDetailed(e)) {
-      for (const st of filledSets(e))
-        rows.push({ reps: st.reps, weight: st.weight, rpe: st.rpe, unit: u, m: est1RM(+st.weight, +st.reps) });
-    } else if (+e.reps > 0 && +e.weight > 0) {
-      /* a top-set row from before per-set logging: one set is all that was
-         ever written down, and saying so beats showing it as if it were the lot */
-      rows.push({ reps: e.reps, weight: e.weight, rpe: e.rpe, unit: u,
-        m: est1RM(+e.weight, +e.reps), topOf: +e.sets > 0 ? +e.sets : null });
-    }
-  }
+  const { rows, note, best } = outingRows(earlier.filter((e) => e.date === date));
   if (!rows.length) return null;
-  let best = null;
-  for (const r of rows) if (r.m != null && (best == null || r.m > best.m)) best = r;
   return { date, rows, note, best };
 }
 
@@ -1416,6 +1433,9 @@ const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(
 const ui = {
   tab: "home",
   logSeg: "history",   // history | calendar
+  /* the day the Log tab has been sent to by a jump from somewhere else, held
+     only until the frame that lands on it has scrolled to it, see flashLogDay */
+  logJump: null,
   showProfile: false,
   profileDraft: null,
   profileLangWas: null,   // the saved language, so a previewed one can be backed out of
@@ -1441,6 +1461,7 @@ const ui = {
   exWin: null,          // exercise detail window: {name} for an existing lift, or {isNew:true}
   exWinEdit: false,     // false = read-only view, true = editable
   exWinDraft: null,     // working copy while editing/creating
+  exHistAll: false,     // its history list is showing every session, not just the recent ones
   bodyForm: null,
   bodyFormWasNew: false,
   deloadOpen: false,
@@ -1505,6 +1526,7 @@ function resetTransient() {
   ui.libraryQ = "";
   ui.libraryFilter = "All";
   ui.librarySeg = "exercises";
+  ui.exHistAll = false;
   ui.presetOrder = false;
   ui.pinnedOrder = false;
   ui.timerOrder = false;
@@ -1791,6 +1813,26 @@ if (window.ResizeObserver) new ResizeObserver(applyViewport).observe(document.do
 
 const app = document.getElementById("app");
 
+/* ── LANDING ON A DAY ─────────────────────────────────────────────────
+   Sending someone to a date is not the same as showing it to them. The
+   history is a column of near-identical cards a long way down a scroll,
+   and a tab that merely changed underneath is a jump nobody can see. So
+   the day is scrolled to and lit for a moment on arrival.
+
+   The marker is spent on the frame that uses it: a highlight that survives
+   the next render is a highlight nobody asked for, and the class is put on
+   the node rather than into the HTML for the same reason, since render()
+   rebuilds `#app` wholesale and would replay the flash on every keystroke
+   afterwards. */
+function flashLogDay() {
+  const date = ui.logJump;
+  ui.logJump = null;
+  const card = app.querySelector(`[data-day="${date}"]`);
+  if (!card) return;                       // the day was deleted while we were away
+  card.scrollIntoView({ block: "start" });
+  card.classList.add("pb-flash");
+}
+
 function render() {
   /* re-measure the device first. The engine's own listeners normally have
      this done already and the call costs nothing when nothing has changed,
@@ -1927,6 +1969,10 @@ function render() {
 
   if (window.lucide) lucide.createIcons();
   drawCharts();
+
+  /* after the icons, because they are what settles the final heights this
+     scroll is measured against */
+  if (ui.logJump) flashLogDay();
 
   /* ── play transitions between the old frame and this one ───────────── */
   const root = app.querySelector(".pb-root");
@@ -2333,7 +2379,7 @@ function renderHistory(log, library, badges, settings, unit) {
       </div>`;
     }).join("");
 
-    return `<div class="pb-card" style="margin-bottom:12px;overflow:hidden">
+    return `<div class="pb-card" data-day="${date}" style="margin-bottom:12px;overflow:hidden">
       <button data-action="edit-day" data-date="${date}" title="${T("log.editDay")}" style="width:100%;display:flex;align-items:center;gap:8px;padding:11px 14px;border-bottom:1px solid var(--border-soft);color:var(--text);text-align:left">
         <div class="pb-num" style="font-weight:700;font-size:16.5px;flex:1">${fmtDate(date)}</div>
         ${dayRes ? chip(T("plan.hitOf", { n: dayRes.hit, total: dayRes.total }), dayRes.hit >= dayRes.total ? "var(--green)" : "var(--steel)") : ""}
@@ -4096,11 +4142,17 @@ function renderExerciseWindow(library) {
   `, "exWin");
 }
 
-/* ── one lift's whole history, for the panel at the bottom of its window ──
+/* ── one lift's whole history, for the panels at the bottom of its window ──
    Every entry that produced a number, oldest first, each carrying the entry
    behind it so a tapped dot can still say what the session was. PR flags are
    worked out here from the running best rather than borrowed from
-   computeBadges(), because only this one lift is in question.            */
+   computeBadges(), because only this one lift is in question.
+
+   The same rows come back a second way, grouped into SESSIONS, because a
+   graph and a list answer different questions about one set of facts and
+   must never answer them from different facts. The graph plots entries; the
+   history list below it reads days, since two entries of the same lift on
+   one day are one session's work and nobody remembers them as two.       */
 function exerciseHistory(name, log) {
   const series = chronoSort(log)
     .filter((e) => e.exercise === name)
@@ -4115,8 +4167,27 @@ function exerciseHistory(name, log) {
     return { x: fmtShort(e.date), y: e.m, e, badge };
   });
 
+  /* day by day, newest first, which is the direction a history is read in.
+     The session's headline number and its flag are the FIRST of its points
+     to reach the day's best: taking the last would call a day that opened
+     with a PR and backed off a "match" of itself. */
+  const sessions = [];
+  for (const p of chart) {
+    const open = sessions.length ? sessions[sessions.length - 1] : null;
+    if (open && open.date === p.e.date) open.points.push(p);
+    else sessions.push({ date: p.e.date, points: [p] });
+  }
+  for (const ses of sessions) {
+    const top = ses.points.reduce((a, p) => (p.y > a.y ? p : a), ses.points[0]);
+    ses.entries = ses.points.map((p) => p.e);
+    ses.m = top.y;
+    ses.badge = top.badge;
+    Object.assign(ses, outingRows(ses.entries));   // rows, note, best
+  }
+  sessions.reverse();
+
   const cardio = !!(best && best.kind === "cardio");
-  return { series, chart, best, cardio, unit: cardio ? T("unit.pts") : state.settings.units };
+  return { series, chart, sessions, best, cardio, unit: cardio ? T("unit.pts") : state.settings.units };
 }
 
 function exWindowViewBody(ex, hist) {
@@ -4169,6 +4240,7 @@ function exWindowViewBody(ex, hist) {
     ${detailField(T("ex.alternatives"), exFieldOf(ex, "alternatives"), T("ex.notFilled"))}
 
     ${exWindowProgress(ex, hist)}
+    ${exWindowHistory(hist)}
   `;
 }
 
@@ -4224,6 +4296,69 @@ function exWindowProgress(ex, hist) {
           </div>`}
     </div>
     <div style="height:8px"></div>`;
+}
+
+/* ── the ledger under the graph ───────────────────────────────────────
+   The graph says where the lift has got to; this says what you actually
+   did, session by session, newest first, with the sets written out in the
+   unit each was logged in. It is the same list `renderLastTime` draws for
+   the session before this one, only all the way back.
+
+   A row is A DAY, not an entry, and tapping one lands on that day in the
+   log (`open-log-day`), because "the twentieth of August" is a session you
+   trained, not a row in a table, and the rest of what you did that day is
+   most of what you came to remember. Nothing here is editable: this window
+   is where you look a lift up, and the log is where it is written down.
+
+   Long histories are folded to the recent ones with the rest one tap away.
+   Someone who has benched for two years has a hundred of these, and a
+   hundred cards between the graph and the bottom of the window would make
+   the graph the thing you have to scroll past. */
+const EX_HISTORY_PAGE = 8;
+
+function exWindowHistory(hist) {
+  if (!hist || !hist.sessions.length) return "";
+  const all = ui.exHistAll;
+  const shown = all ? hist.sessions : hist.sessions.slice(0, EX_HISTORY_PAGE);
+  const rest = hist.sessions.length - shown.length;
+
+  const rows = shown.map((ses, i) => {
+    const sets = ses.rows.map((r, n) => {
+      const line = r.minutes != null
+        ? T("sug.cardioSet", { min: esc(r.minutes), rpe: esc(r.intensity) })
+        : `${esc(r.reps)} × ${esc(r.weight)} ${r.unit}`;
+      const tail = [r.rpe ? `@${esc(r.rpe)}` : "", r.topOf ? T("last.topOf", { n: r.topOf }) : ""].filter(Boolean).join(" · ");
+      return chip(`<span style="color:var(--faint)">${n + 1} ·</span> ${line}${tail ? ` · ${tail}` : ""}`);
+    }).join("");
+
+    return `<button data-action="open-log-day" data-date="${esc(ses.date)}" style="width:100%;display:block;text-align:left;padding:11px 12px;color:var(--text);${i ? "border-top:1px solid var(--border-soft)" : ""}">
+      <div style="display:flex;align-items:center;gap:8px">
+        <div class="pb-num" style="font-weight:600;font-size:13.5px;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+          ${fmtDate(ses.date, { weekday: "short", day: "numeric", month: "short", year: "numeric" })}
+        </div>
+        ${BADGE_SHORT[ses.badge] ? chip(BADGE_SHORT[ses.badge], ses.badge === "pr" ? "var(--gold)" : "") : ""}
+        <div class="pb-num" style="font-weight:700;font-size:15px;flex-shrink:0;color:${ses.badge === "pr" ? "var(--gold)" : "var(--text)"}">
+          ${ses.m}<span style="font-size:10px;color:var(--muted);font-weight:600"> ${hist.unit}</span>
+        </div>
+        ${icon("chevron-right", 14, 'style="color:var(--faint);flex-shrink:0"')}
+      </div>
+      ${sets ? `<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:7px">${sets}</div>` : ""}
+      ${ses.note ? `<div style="font-size:11.5px;color:var(--faint);margin-top:7px;line-height:1.45;font-style:italic">“${esc(ses.note)}”</div>` : ""}
+    </button>`;
+  }).join("");
+
+  const more = rest > 0 || all
+    ? `<button data-action="ex-hist-all" style="width:100%;padding:11px 0;border-top:1px solid var(--border-soft);color:var(--muted);font-size:12.5px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:6px">
+        ${icon(all ? "chevron-up" : "chevron-down", 14)} ${all ? T("ex.historyLess") : T("ex.historyMore", { n: rest })}
+      </button>`
+    : "";
+
+  return `
+    ${sectionTitle(T("ex.historyTitle"), `<span style="font-size:11px;color:var(--faint)">${TN("session", hist.sessions.length)}</span>`)}
+    <div class="pb-card" style="overflow:hidden">${rows}${more}</div>
+    <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:8px 2px 0">
+      ${ui.workoutSheet ? T("ex.historyHintOpen") : T("ex.historyHint")}
+    </div>`;
 }
 
 function exWindowEditBody(f, library) {
@@ -6858,9 +6993,38 @@ const actions = {
   "open-exercise-window": (el) => {
     ui.exWin = { name: el.dataset.name };
     /* a different lift is a different graph, so its zoom and its open dot
-       start clean rather than inheriting the last exercise's */
-    ui.chartView.ex = null; ui.chartSel.ex = null;
+       start clean rather than inheriting the last exercise's, and its
+       history list opens folded no matter how far the last one was opened */
+    ui.chartView.ex = null; ui.chartSel.ex = null; ui.exHistAll = false;
     ui.exWinEdit = false; ui.exWinDraft = null; render();
+  },
+  "ex-hist-all": () => { ui.exHistAll = !ui.exHistAll; render(); },
+  /* ── out of a lift's history and into the day it happened ───────────
+     A session in that list is a DATE, and what anyone wants from a date is
+     the day: the rest of what was trained, the notes, and the chance to
+     fix a number. That is the Log tab's history, so this goes there and
+     flashLogDay puts the card on screen.
+
+     A workout window in the way is closed the way its own back arrow
+     closes it, which parks the day rather than losing it. The two
+     alternatives are worse: leaving the sheet up makes the jump invisible,
+     and doing nothing makes a row that looks tappable and isn't. The
+     parked day lands at the top of the very list this arrives on, which is
+     why the hint under the list says so before it is tapped.
+
+     That back-out picks its own landing spot (a plan saved on the way out
+     goes to the calendar), so the destination is set AFTER it and not
+     before, or the jump would be overruled by the thing it was waiting
+     on. */
+  "open-log-day": (el) => {
+    const date = el.dataset.date;
+    ui.exWin = null; ui.exWinEdit = false; ui.exWinDraft = null;
+    if (ui.workoutSheet) closeWorksheet();
+    ui.tab = "log";
+    resetTransient();
+    ui.logSeg = "history";
+    ui.logJump = date;
+    render();
   },
   /* ── straight from the library into the set list ──────────────────
      The long way round to logging one lift is New Workout → Add exercise

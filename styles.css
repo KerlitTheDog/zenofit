@@ -268,10 +268,23 @@ input[type="date"].pb-input::-webkit-date-and-time-value{
   50%    { box-shadow:0 0 0 5px rgba(233,185,73,.16); }
 }
 
+/* a day arrived at from a lift's history is lit for a moment, because a
+   list of near-identical cards gives a jump nothing to land on. Added to
+   the node by flashLogDay() after the frame is built, never in the HTML,
+   so a later render doesn't replay it. */
+.pb-flash{ animation:pbFlash 1.7s ease-out; }
+@keyframes pbFlash{
+  0%,25%{ box-shadow:0 0 0 2px var(--gold); }
+  100%  { box-shadow:0 0 0 2px rgba(233,185,73,0); }
+}
+
 @media (prefers-reduced-motion: reduce){
   .pb-fade-in,.pb-sheet{ animation:none; }
   .pb-acc-body,.pb-acc-inner,.pb-acc-chevron{ transition:none; }
   .pb-timer-done{ animation:none; box-shadow:0 0 0 3px rgba(233,185,73,.18); }
+  /* no pulse, but the card still has to be findable, so the ring simply
+     stays until the next render clears it */
+  .pb-flash{ animation:none; box-shadow:0 0 0 2px rgba(233,185,73,.55); }
 }
 
 /* Portrait-only. This is a phone app; a page can't take an OS-level orientation

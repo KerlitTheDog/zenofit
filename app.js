@@ -282,9 +282,45 @@ function groupLabel(name) {
   return g && g.key && g.name === DEFAULT_GROUP_NAME[g.key] ? T("group." + g.key) : name;
 }
 
+/* ── VARIATIONS: ONE MOVEMENT, SEVERAL WAYS OF DOING IT ───────────────
+   A wide-grip pulldown and a close-grip one are the same movement and not
+   the same lift: the weights are different, and averaging them into one
+   history tells you nothing about either. So a variation is a LIBRARY ROW
+   OF ITS OWN — its own log, its own best set, its own graph, its own PRs —
+   carrying `variantOf` (the row it branched from) and `variantName` ("Wide
+   grip"). Everything downstream already works, because everything
+   downstream only ever knew about library rows.
+
+   What the link buys is the two things separate rows cannot do for
+   themselves: they are shown together (nested in the library, listed in
+   each other's window), and the variation's LABEL is composed from its
+   parent's, live. That last one matters more than it looks. The stored name
+   is identity and must never move under the log; the label is display. So
+   renaming "Lat Pulldown" to "Pulldown" re-labels every variation of it at
+   once, without a single stored name changing, exactly as translating a
+   built-in does.
+
+   A variation of a variation attaches to the root instead of nesting, since
+   nobody has ever wanted a tree of grips. */
+const variantParent = (ex) =>
+  ex && ex.variantOf ? ((state && state.library) || []).find((x) => x.id === ex.variantOf) || null : null;
+
+const variantRootId = (ex) => (ex ? (ex.variantOf || ex.id) : null);
+
+const variantsOf = (id, library) =>
+  ((library || (state && state.library) || [])).filter((x) => x.variantOf === id);
+
 function exLabelOf(ex) {
+  if (!ex) return "";
+  /* a variation reads as its parent plus what makes it one, composed now
+     rather than stored, so the parent can still be renamed */
+  if (ex.variantOf) {
+    const p = variantParent(ex);
+    const own = ex.variantName || ex.name;
+    return p ? `${exLabelOf(p)} · ${own}` : ex.name;
+  }
   const row = exRow(ex);
-  if (!row) return ex ? ex.name : "";
+  if (!row) return ex.name;
   /* A built-in the user RENAMED is theirs now, the same rule exFieldOf
      applies to the prose below. Without it the library went on showing the
      shipped name in a translated UI while the log, the plans and the
@@ -4087,6 +4123,22 @@ const newFlag = (ex) => needsDetails(ex)
   ? `<span style="font-size:10px;color:var(--blue);margin-left:6px;font-weight:700;letter-spacing:.06em">${T("lib.newFlag")}</span>`
   : "";
 
+/* Variations sit under the lift they came from rather than alphabetically
+   somewhere else in the group, since "Lat Pulldown" and its wide grip being
+   ten rows apart is exactly what the link exists to prevent. Anything whose
+   parent is not in this list (filtered out, searched past, or deleted)
+   stays where it was, so nothing can vanish from a filtered view. */
+function nestVariations(rows) {
+  const here = new Set(rows.map((x) => x.id));
+  const out = [];
+  for (const ex of rows) {
+    if (ex.variantOf && here.has(ex.variantOf)) continue;
+    out.push(ex);
+    for (const kid of rows) if (kid.variantOf === ex.id) out.push(kid);
+  }
+  return out;
+}
+
 function renderLibraryList(library) {
   const filter = ui.libraryFilter;
   /* Rearranging reads the whole group, never a search result: dragging row 2
@@ -4111,10 +4163,11 @@ function renderLibraryList(library) {
     return `<div style="margin-bottom:16px">
     ${sectionTitle(`<span style="color:${colorFor(g)}">${esc(groupLabel(g))}</span>`)}
     <div class="pb-card" style="overflow:hidden">
-      ${rows.map((ex, i, arr) => `<button data-action="open-exercise-window" data-name="${esc(ex.name)}" style="width:100%;display:flex;align-items:center;gap:10px;padding:11px 14px;text-align:left;color:var(--text);border-bottom:${i < arr.length - 1 ? "1px solid var(--border-soft)" : "none"}">
+      ${nestVariations(rows).map((ex, i, arr) => `<button data-action="open-exercise-window" data-name="${esc(ex.name)}" style="width:100%;display:flex;align-items:center;gap:10px;padding:11px 14px 11px ${ex.variantOf ? 30 : 14}px;text-align:left;color:var(--text);border-bottom:${i < arr.length - 1 ? "1px solid var(--border-soft)" : "none"}">
+        ${ex.variantOf ? icon("corner-down-right", 13, 'style="color:var(--faint);flex-shrink:0;margin-right:-2px"') : ""}
         ${ex.image ? `<img src="${esc(ex.image)}" alt="" style="width:38px;height:38px;border-radius:8px;object-fit:cover;flex-shrink:0;border:1px solid var(--border)">` : ""}
         <div style="flex:1;min-width:0">
-          <div style="font-weight:600;font-size:14px">${esc(exLabelOf(ex))}${newFlag(ex)}</div>
+          <div style="font-weight:600;font-size:14px">${ex.variantOf ? esc(ex.variantName || ex.name) : esc(exLabelOf(ex))}${newFlag(ex)}</div>
           <div style="font-size:11.5px;color:var(--faint)">${esc(exFieldOf(ex, "equipment"))}</div>
         </div>
         ${ex.video ? icon("youtube", 15, 'style="color:var(--red);flex-shrink:0"') : ""}
@@ -4843,6 +4896,7 @@ function exWindowViewBody(ex, hist) {
     ${detailField(T("ex.equipment"), exFieldOf(ex, "equipment"), T("ex.notFilled"))}
     ${detailField(T("ex.alternatives"), exFieldOf(ex, "alternatives"), T("ex.notFilled"))}
 
+    ${exWindowVariations(ex)}
     ${exWindowProgress(ex, hist)}
     ${exWindowHistory(hist)}
   `;
@@ -4900,6 +4954,50 @@ function exWindowProgress(ex, hist) {
           </div>`}
     </div>
     <div style="height:8px"></div>`;
+}
+
+/* ── THE REST OF THE FAMILY ───────────────────────────────────────────
+   Every way you do this movement, in one place, with the one you are
+   looking at marked. It sits above the graph rather than below it because
+   the question it answers ("wait, which of these am I looking at?") comes
+   before any of the numbers do.
+
+   Shown from the parent AND from every variation, always listing the whole
+   family, so there is no wrong end to come in from. */
+function exWindowVariations(ex) {
+  if (!ex || ex.missing) return "";
+  const rootId = variantRootId(ex);
+  const root = ex.variantOf ? variantParent(ex) : ex;
+  const kids = variantsOf(rootId, state.library);
+  if (!kids.length && !ex.variantOf) {
+    /* nothing to list yet, so this is just the way in */
+    return `<button data-action="ex-add-variation" data-id="${esc(rootId)}" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;font-size:13.5px;margin-bottom:6px;border-style:dashed;color:var(--gold);border-color:rgba(233,185,73,.45)">
+      ${icon("git-branch", 15)} ${T("ex.addVariation")}
+    </button>
+    <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:0 2px 18px">${T("ex.variationHint")}</div>`;
+  }
+
+  const family = [...(root ? [root] : []), ...kids];
+  const row = (x, i, n) => {
+    const on = x.id === ex.id;
+    return `<button ${on ? "" : `data-action="open-exercise-window" data-name="${esc(x.name)}"`} style="width:100%;display:flex;align-items:center;gap:10px;padding:10px 13px;text-align:left;color:var(--text);background:${on ? "rgba(233,185,73,.06)" : "transparent"};border-bottom:${i < n - 1 ? "1px solid var(--border-soft)" : "none"}">
+      <span style="width:7px;height:7px;border-radius:4px;flex-shrink:0;background:${on ? "var(--gold)" : "var(--border)"}"></span>
+      <span style="flex:1;min-width:0;font-size:13.5px;font-weight:${on ? 700 : 600};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+        ${x.variantOf ? esc(x.variantName || x.name) : T("ex.baseVariation")}
+      </span>
+      ${on ? "" : icon("chevron-right", 14, 'style="color:var(--faint);flex-shrink:0"')}
+    </button>`;
+  };
+
+  return `
+    ${sectionTitle(T("ex.variationsTitle"), `<span style="font-size:11px;color:var(--faint)">${TN("variation", kids.length)}</span>`)}
+    <div class="pb-card" style="overflow:hidden;margin-bottom:10px">
+      ${family.map((x, i) => row(x, i, family.length)).join("")}
+    </div>
+    <button data-action="ex-add-variation" data-id="${esc(rootId)}" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;font-size:13.5px;border-style:dashed;color:var(--gold);border-color:rgba(233,185,73,.45)">
+      ${icon("git-branch", 15)} ${T("ex.addVariation")}
+    </button>
+    <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:8px 2px 18px">${T("ex.variationHistoryNote")}</div>`;
 }
 
 /* ── the ledger under the graph ───────────────────────────────────────
@@ -4997,8 +5095,17 @@ function exWindowEditBody(f, library) {
         <input type="file" accept="image/*" data-filebind="exwin.image" style="display:none">
       </label>`;
 
+  /* A variation is named by what makes it one. Its stored name still has to
+     be unique (everything in the app is keyed by it) so exwin-save composes
+     that from the parent, and this field only ever holds the short part. */
+  const parent = variantParent(f);
+  const nameField = f.variantOf
+    ? `${sectionTitle(T("ex.variationOf", { name: esc(exLabelOf(parent) || "—") }))}
+       ${field(T("ex.variationName"), `<input class="pb-input" data-bind="exwin.variantName" value="${esc(f.variantName || "")}" placeholder="${esc(T("ex.variationPlaceholder"))}" data-autofocus>`, T("ex.variationNameHint"))}`
+    : field(T("ex.nameRequired"), `<input class="pb-input" data-bind="exwin.name" value="${esc(exLabelOf(f))}" placeholder="—">`);
+
   return `
-    ${field(T("ex.nameRequired"), `<input class="pb-input" data-bind="exwin.name" value="${esc(exLabelOf(f))}" placeholder="—">`)}
+    ${nameField}
     ${field(T("ex.groupRequired"), musclePicker, T("ex.groupHint"))}
     ${field(T("kind.exLabel"), kindPicker("exwin-kind", exKind(f), f.muscle ? groupKind(f.muscle) : null), T("kind.exHint"))}
 
@@ -7901,6 +8008,21 @@ const actions = {
     patch({ library: state.library.map((x) => (x.name === name ? { ...x, dismissedNew: true } : x)) });
   },
 
+  /* A branch, not a blank: it opens on everything the parent knows (group,
+     equipment, cues, photo, video) because a wide-grip pulldown is a
+     pulldown in every respect but the one you are about to type. The kind
+     is deliberately NOT copied: it follows the group like any other row,
+     and an exception on the parent is the parent's. */
+  "ex-add-variation": (el) => {
+    const root = state.library.find((x) => x.id === el.dataset.id);
+    if (!root) return;
+    ui.exWinDraft = {
+      id: uid(), name: "", variantOf: root.id, variantName: "",
+      muscle: root.muscle, equipment: root.equipment || "", alternatives: root.alternatives || "",
+      note: root.note || "", image: root.image || "", video: root.video || "", custom: true,
+    };
+    ui.exWin = { isNew: true }; ui.exWinEdit = true; render();
+  },
   "add-exercise": () => {
     ui.exWinDraft = { id: uid(), name: "", muscle: "", equipment: "", alternatives: "", note: "", image: "", video: "", custom: true };
     ui.exWin = { isNew: true }; ui.exWinEdit = true; render();
@@ -7999,11 +8121,25 @@ const actions = {
      desync this is here to fix, arrived at from the other end. */
   "exwin-save": () => {
     const f = ui.exWinDraft;
-    if (!f || !(f.name.trim() && f.muscle.trim())) return;
-    const muscle = f.muscle.trim();
+    if (!f) return;
+    const muscle = (f.muscle || "").trim();
+    if (!muscle) return;
     const orig = state.library.find((x) => x.id === f.id);
-    const typed = f.name.trim();
-    const name = orig && typed === exLabelOf(orig) ? orig.name : typed;
+    /* A variation is named by its short part, and its STORED name is
+       composed from the parent's stored name so it stays unique and stays
+       recognisable in a backup file. The label on screen is composed
+       separately and live, see exLabelOf. */
+    let typed;
+    if (f.variantOf) {
+      const short = (f.variantName || "").trim();
+      if (!short) return;
+      const parent = variantParent(f);
+      typed = `${parent ? parent.name : f.name || ""} (${short})`.trim();
+    } else {
+      typed = (f.name || "").trim();
+    }
+    if (!typed) return;
+    const name = orig && !f.variantOf && typed === exLabelOf(orig) ? orig.name : typed;
     const was = orig ? orig.name : null;
 
     if (state.library.some((x) => x.id !== f.id && x.name.toLowerCase() === name.toLowerCase())) {
@@ -8040,12 +8176,19 @@ const actions = {
     patch(p);
   },
   "exwin-delete": () => {
-    if (confirm(T("ex.confirmDelete"))) {
-      const id = ui.exWinDraft && ui.exWinDraft.id;
-      const name = ui.exWin && ui.exWin.name;
-      ui.exWin = null; ui.exWinEdit = false; ui.exWinDraft = null;
-      patch({ library: state.library.filter((x) => (id ? x.id !== id : x.name !== name)) });
-    }
+    const id = ui.exWinDraft && ui.exWinDraft.id;
+    const name = ui.exWin && ui.exWin.name;
+    const kids = id ? variantsOf(id, state.library) : [];
+    /* Its variations are separate lifts with their own history, so they are
+       never taken down with it. They keep their own stored names and simply
+       stop being shown as a family, which the confirm says before it asks. */
+    if (!confirm(kids.length ? T("ex.confirmDeleteParent", { n: TN("variation", kids.length) }) : T("ex.confirmDelete"))) return;
+    ui.exWin = null; ui.exWinEdit = false; ui.exWinDraft = null;
+    patch({
+      library: state.library
+        .filter((x) => (id ? x.id !== id : x.name !== name))
+        .map((x) => (x.variantOf === id ? { ...x, variantOf: undefined, variantName: undefined } : x)),
+    });
   },
   "close-worksheet": closeWorksheet,
   "commit-workout": () => commitWorkout(ui.workoutSheet),

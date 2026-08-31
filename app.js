@@ -1611,12 +1611,81 @@ function hydrate(saved) {
   return migrate(merged);
 }
 
-function loadState() {
+/* \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550 PROFILES \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+   One device, several separate trainings. A second block of a program you
+   want to try without touching the one you are in, or a friend at the same
+   gym with no phone on them. A profile is a WHOLE STATE: log, library,
+   groups, presets, timers, goals, body, plans, settings, everything the
+   backup file carries, because "everything" is the only line that does not
+   need maintaining as the app grows.
+
+   Storage is one small index plus one key per profile:
+
+     powerbuild-tracker:profiles   {active, list:[{id, name}]}
+     powerbuild-tracker:state:<id> that profile's state
+
+   One key each, rather than all of them under one, for a reason worth
+   keeping: every save rewrites its key, and localStorage is a few megabytes
+   with exercise photos already in it. Writing four profiles to disk because
+   one of them gained a set would be three times the work and three times
+   the quota risk on every keystroke's debounce.
+
+   The single-profile key everyone is currently on becomes profile one, and
+   is only let go of once the new key has been read back. */
+const PROFILES_KEY = "powerbuild-tracker:profiles";
+const stateKeyFor = (id) => "powerbuild-tracker:state:" + id;
+
+function loadProfiles() {
   try {
-    const raw = localStorage.getItem(STORE_KEY);
+    const p = JSON.parse(localStorage.getItem(PROFILES_KEY));
+    if (p && Array.isArray(p.list) && p.list.length) {
+      /* an active id pointing at a profile that is gone would leave the app
+         with no state to load at all, so it is coerced back into the list */
+      if (!p.list.some((x) => x.id === p.active)) p.active = p.list[0].id;
+      return { active: p.active, list: p.list.map((x) => ({ id: x.id, name: x.name || "" })) };
+    }
+  } catch { /* no index yet: first run under profiles */ }
+
+  /* not uid(): that lives with the ui block, a long way below this, and
+     this runs while the module is still being evaluated */
+  const id = "p" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  const made = { active: id, list: [{ id, name: "" }] };
+  try {
+    const legacy = localStorage.getItem(STORE_KEY);
+    if (legacy != null) {
+      localStorage.setItem(stateKeyFor(id), legacy);
+      /* only now, and only if it really landed: a half-done move here costs
+         somebody every session they have ever logged */
+      if (localStorage.getItem(stateKeyFor(id)) === legacy) localStorage.removeItem(STORE_KEY);
+    }
+    localStorage.setItem(PROFILES_KEY, JSON.stringify(made));
+  } catch (e) { console.error("profile setup failed", e); }
+  return made;
+}
+
+let profiles = loadProfiles();
+
+const saveProfiles = () => {
+  try { localStorage.setItem(PROFILES_KEY, JSON.stringify(profiles)); }
+  catch (e) { console.error("profile index save failed", e); }
+};
+
+const profileList = () => profiles.list;
+const activeProfileId = () => profiles.active;
+/* an unnamed profile is numbered rather than stored under a made-up name,
+   so the fallback speaks whatever language the app is being read in */
+const profileLabel = (p, i) => (p && p.name) || T("profiles.nth", { n: i + 1 });
+
+function readProfileState(id) {
+  try {
+    const raw = localStorage.getItem(stateKeyFor(id));
     if (raw) return hydrate(JSON.parse(raw));
-  } catch { /* first run, key doesn't exist yet */ }
+  } catch (e) { console.error("profile load failed", e); }
   return defaultState();
+}
+
+function loadState() {
+  return readProfileState(profiles.active);
 }
 
 let state = loadState();
@@ -1643,11 +1712,18 @@ function snapshotDrafts() {
 }
 
 /* write straight through, used when the page is about to go away */
+let quotaWarned = false;
 function writeNow() {
   clearTimeout(saveTimer); saveTimer = null;
   snapshotDrafts();
-  try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
-  catch (e) { console.error("save failed", e); }
+  try { localStorage.setItem(stateKeyFor(profiles.active), JSON.stringify(state)); }
+  catch (e) {
+    console.error("save failed", e);
+    /* A full browser store used to fail in silence, which is the worst way
+       for it to fail: everything keeps working on screen and none of it is
+       being kept. Said once, because a debounced save says it every 400ms. */
+    if (!quotaWarned) { quotaWarned = true; try { alert(T("profiles.quota")); } catch { /* no UI here */ } }
+  }
 }
 
 function persist() {
@@ -1655,6 +1731,125 @@ function persist() {
   saveTimer = setTimeout(writeNow, 400);
 }
 function patch(p) { state = { ...state, ...p }; persist(); render(); }
+
+/* ── SWITCHING, AND THE FOUR THINGS YOU CAN DO TO A PROFILE ──────────
+   Every one of these flushes the profile being left before it touches
+   anything, because `state` is only written on a debounce and the last few
+   hundred milliseconds of it would otherwise be dropped on the floor.
+
+   Switching is a bigger event than it looks: `ui` is full of things that
+   belong to the profile being left — an open workout, a half-typed set, a
+   chart selection, an exercise window — and none of them mean anything in
+   the next one. So the screen is cleared back to Home rather than left
+   pointing at rows that no longer exist. */
+function closeEverything() {
+  ui.workoutSheet = null; ui.entryForm = null; ui.setForm = null; ui.picking = false;
+  ui.pickerQ = ""; ui.pickerQuick = null;
+  ui.exWin = null; ui.exWinEdit = false; ui.exWinDraft = null;
+  ui.showProfile = false; ui.profileDraft = null; ui.profileLangWas = null;
+  ui.showBody = false; ui.bodyForm = null;
+  ui.groupSheet = false; ui.groupForm = null;
+  ui.presetForm = null; ui.presetView = null;
+  ui.timerForm = null; ui.deloadForm = null; ui.planResult = null;
+  ui.stdPick = false; ui.std = null; ui.stdResult = null;
+  ui.profilesWin = false; ui.profileForm = null; ui.profileOrder = false;
+}
+
+function switchProfile(id) {
+  if (id === profiles.active || !profiles.list.some((p) => p.id === id)) return;
+  /* A day half-built when you switch away is PARKED, not merely hidden:
+     closeWorksheet is the same back-out the window's own arrow does, so it
+     is waiting at the top of the Log tab when you come back rather than
+     living on invisibly in the crash snapshot. */
+  if (ui.workoutSheet) closeWorksheet();
+  writeNow();
+  profiles.active = id;
+  saveProfiles();
+  state = loadState();
+  closeEverything();
+  resetTransient();
+  ui.tab = "home";
+  applyTheme(state.settings.theme);
+  render();
+}
+
+/* A new profile starts empty, exactly as the app does on a new phone: the
+   seeded library, the seeded timers, nothing logged. */
+function addProfile(name) {
+  writeNow();
+  const id = uid();
+  try { localStorage.setItem(stateKeyFor(id), JSON.stringify(defaultState())); }
+  catch (e) { console.error("profile create failed", e); alert(T("profiles.quota")); return null; }
+  profiles.list = [...profiles.list, { id, name: (name || "").trim() }];
+  saveProfiles();
+  return id;
+}
+
+/* A copy is the same training carried over, which is the point: a block you
+   want to try a different way without giving up the one you are in. The
+   crash snapshot is left behind (see backupText for why a half-typed set
+   editor is not part of anybody's training). */
+function duplicateProfile(id, name) {
+  if (id === profiles.active) writeNow();
+  const newId = uid();
+  try {
+    const raw = localStorage.getItem(stateKeyFor(id));
+    const data = raw ? JSON.parse(raw) : defaultState();
+    delete data.drafts;
+    localStorage.setItem(stateKeyFor(newId), JSON.stringify(data));
+  } catch (e) { console.error("profile copy failed", e); alert(T("profiles.quota")); return null; }
+  const at = profiles.list.findIndex((p) => p.id === id);
+  const row = { id: newId, name: (name || "").trim() };
+  profiles.list = [...profiles.list.slice(0, at + 1), row, ...profiles.list.slice(at + 1)];
+  saveProfiles();
+  return newId;
+}
+
+/* Deleting the last profile would leave the app with nothing to load at
+   all, so it is refused rather than quietly recreated; deleting the one you
+   are in moves you to a neighbour first. */
+function deleteProfile(id) {
+  if (profiles.list.length < 2) return;
+  const wasActive = id === profiles.active;
+  const rest = profiles.list.filter((p) => p.id !== id);
+  const next = wasActive ? rest[0].id : profiles.active;
+  profiles = { active: next, list: rest };
+  saveProfiles();
+  try { localStorage.removeItem(stateKeyFor(id)); } catch { /* already gone */ }
+  if (wasActive) {
+    state = loadState();
+    closeEverything();
+    resetTransient();
+    ui.tab = "home";
+    applyTheme(state.settings.theme);
+  }
+}
+
+function reorderProfiles(from, to) {
+  const all = [...profiles.list];
+  if (from >= all.length || to >= all.length) return;
+  const [moved] = all.splice(from, 1);
+  all.splice(to, 0, moved);
+  profiles.list = all;
+  saveProfiles();
+  render();
+}
+
+/* What is in each one, for the line under its name. Read once when the
+   window opens rather than on every frame: this parses each profile's whole
+   state, and the active one is re-rendered on every keystroke. */
+function profileStats() {
+  const out = {};
+  for (const p of profiles.list) {
+    let d = null;
+    if (p.id === profiles.active) d = state;
+    else { try { d = JSON.parse(localStorage.getItem(stateKeyFor(p.id))); } catch { d = null; } }
+    out[p.id] = d
+      ? { days: new Set((d.log || []).map((e) => e.date)).size, entries: (d.log || []).length }
+      : { days: 0, entries: 0 };
+  }
+  return out;
+}
 
 /* ── BACKUP: EVERYTHING, OUT AND BACK IN ──────────────────────────────
    The whole point of this app is that it keeps what you did, and the whole
@@ -1771,6 +1966,10 @@ const ui = {
   logJump: null,
   showProfile: false,
   profileDraft: null,
+  profilesWin: false,   // the profiles window (which training is on screen)
+  profileForm: null,    // {id, name, mode:"add"|"rename"|"copy"} name editor
+  profileOrder: false,  // …that list is in drag-to-reorder mode
+  profileStats: null,   // counts per profile, read once when the window opens
   profileLangWas: null,   // the saved language, so a previewed one can be backed out of
   showBody: false,      // Body measurements, a window off the header, not a tab
   groupSheet: false,    // the "muscle groups" manager
@@ -2285,6 +2484,8 @@ function render() {
   if (ui.presetView) html += renderPresetView();
   if (ui.chartFull) html += renderChartFull();
   if (ui.showProfile) html += renderProfile(ui.profileDraft);
+  if (ui.profilesWin) html += renderProfilesWindow();
+  if (ui.profileForm) html += renderProfileForm();
   if (ui.showBody) html += renderBodyWindow(body, unit);
   if (ui.bodyForm) html += renderBodyFormSheet(ui.bodyForm, unit);
   if (ui.groupSheet) html += renderGroupSheet(library);
@@ -4090,6 +4291,7 @@ const DRAG_COMMIT = {
   entry: reorderDraftEntries,
   libExercise: reorderLibraryExercises,
   set: reorderSets,
+  profile: reorderProfiles,
 };
 
 /* The sets inside the open entry. Everywhere else in the app an order is a
@@ -6199,6 +6401,18 @@ function renderProfile(f) {
       <button data-action="save-profile" class="pb-btn pb-gold" style="padding:8px 16px;font-size:13.5px">${T("common.save")}</button>
     </div>
     <div class="pb-scroll" data-scrollkey="profile" style="flex:1;overflow-y:auto;padding:16px 16px calc(40px + var(--pb-sab))">
+      ${(() => {
+        const list = profileList(), i = list.findIndex((p) => p.id === activeProfileId());
+        return `<button data-action="open-profiles" class="pb-card" style="width:100%;display:flex;align-items:center;gap:11px;padding:12px 14px;margin-bottom:16px;text-align:left;color:var(--text)">
+          ${icon("users", 18, 'style="color:var(--gold);flex-shrink:0"')}
+          <span style="flex:1;min-width:0">
+            <span class="pb-label" style="display:block;margin-bottom:2px">${T("profiles.title")}</span>
+            <span style="display:block;font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(profileLabel(list[i], i))}</span>
+          </span>
+          <span style="font-size:11.5px;color:var(--faint);flex-shrink:0">${TN("profile", list.length)}</span>
+          ${icon("chevron-right", 15, 'style="color:var(--faint);flex-shrink:0"')}
+        </button>`;
+      })()}
       ${field(T("profile.name"), `<input class="pb-input" data-bind="profile.name" value="${esc(f.name)}" placeholder="—">`)}
       ${field(T("profile.language"), `<select class="pb-input" data-bind="profileLang" style="font-weight:600">
         ${LANGS.map((l) => `<option value="${l.code}"${resolveLang(f.lang) === l.code ? " selected" : ""}>${esc(l.label)}</option>`).join("")}
@@ -6244,6 +6458,78 @@ function renderProfile(f) {
       </div>
     </div>
   `, "profile");
+}
+
+/* ── WHICH TRAINING IS ON SCREEN ─────────────────────────────────────
+   A profile is a whole separate app: its own log, library, groups, presets,
+   timers, goals, body check-ins, plans and settings. Nothing is shared, on
+   purpose — the point is to try a different block, or log for somebody
+   without their phone, and be certain none of it can touch what you have.
+
+   The list is deliberately blunt about which one you are in: the active row
+   is filled gold and cannot be tapped to switch (you are already there),
+   and every other row is one tap away. Reordering is a mode for the same
+   reason it is everywhere else in this app: a row is what you tap to
+   SWITCH, and a grip handle living on one is a mis-tap into somebody else's
+   training. */
+function renderProfilesWindow() {
+  const list = profileList();
+  const stats = ui.profileStats || {};
+  const active = activeProfileId();
+
+  const rows = ui.profileOrder && list.length > 1
+    ? list.map((p, i) => reorderRow("profile", i, list.length,
+        esc(profileLabel(p, i)),
+        p.id === active ? T("profiles.current") : "")).join("")
+    : list.map((p, i) => {
+      const on = p.id === active;
+      const st = stats[p.id] || { days: 0, entries: 0 };
+      return `<div style="display:flex;align-items:center;border-bottom:${i < list.length - 1 ? "1px solid var(--border-soft)" : "none"};background:${on ? "rgba(233,185,73,.06)" : "transparent"}">
+        <button ${on ? "" : `data-action="profile-switch" data-id="${esc(p.id)}"`} style="flex:1;min-width:0;display:flex;align-items:center;gap:11px;padding:13px 4px 13px 14px;text-align:left;color:var(--text)">
+          <span style="width:9px;height:9px;border-radius:5px;flex-shrink:0;background:${on ? "var(--gold)" : "var(--border)"}"></span>
+          <span style="flex:1;min-width:0">
+            <span style="display:block;font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(profileLabel(p, i))}</span>
+            <span style="display:block;font-size:11.5px;color:var(--faint)">${on ? T("profiles.current") + " · " : ""}${TN("day", st.days)} · ${TN("logEntry", st.entries)}</span>
+          </span>
+        </button>
+        <button data-action="profile-menu" data-id="${esc(p.id)}" title="${T("common.edit")}" style="flex-shrink:0;padding:13px 14px;color:var(--faint);align-self:stretch">${icon("pencil", 16)}</button>
+      </div>`;
+    }).join("");
+
+  return fullScreen(88, `
+    <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px;border-bottom:1px solid var(--border-soft)">
+      <button data-action="close-profiles" style="color:var(--muted);padding:4px">${icon("arrow-left", 21)}</button>
+      <div class="pb-num" style="font-size:19px;font-weight:700;flex:1">${T("profiles.title")}</div>
+      ${orderToggle("profiles-reorder", ui.profileOrder, list.length > 1)}
+    </div>
+    <div class="pb-scroll" data-scrollkey="profilesWin" style="flex:1;overflow-y:auto;padding:16px 16px calc(40px + var(--pb-sab))">
+      <div class="pb-card" style="overflow:hidden;margin-bottom:12px">${rows}</div>
+      <button data-action="profile-add" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:13.5px;color:var(--gold);border-color:rgba(233,185,73,.4)">
+        ${icon("plus", 15)} ${T("profiles.add")}
+      </button>
+      <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin-top:14px">${T("profiles.hint")}</div>
+    </div>
+  `, "profilesWin");
+}
+
+/* Add, rename and copy are the same one field, so they are the same sheet;
+   `mode` only decides the title and what the button does with the name. */
+function renderProfileForm() {
+  const f = ui.profileForm;
+  const ok = f.mode !== "rename" || !!(f.name || "").trim();
+  return sheet(T("profiles." + f.mode + "Title"), "profileForm", `
+    ${field(T("profiles.name"), `<input class="pb-input" data-bind="profileName" value="${esc(f.name)}" placeholder="${esc(T("profiles.namePlaceholder"))}" data-autofocus>`,
+      T("profiles.nameHint"))}
+    <button data-action="profile-form-save" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
+      ${icon("check", 16)} ${T(f.mode === "rename" ? "common.saveChanges" : "profiles." + f.mode + "Btn")}
+    </button>
+    ${f.mode === "rename" ? `<button data-action="profile-duplicate" data-id="${esc(f.id)}" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;margin-top:8px;font-size:13.5px">
+      ${icon("copy", 15)} ${T("profiles.copyBtn")}
+    </button>
+    ${profileList().length > 1 ? `<button data-action="profile-delete" data-id="${esc(f.id)}" class="pb-btn" style="width:100%;padding:12px 0;margin-top:8px;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">
+      ${icon("trash-2", 15)} ${T("profiles.deleteBtn")}
+    </button>` : `<div style="font-size:11.5px;color:var(--faint);margin-top:10px;line-height:1.5">${T("profiles.lastOne")}</div>`}` : ""}
+  `, 118);
 }
 
 /* ────────────────────────── SHEET / SHELL ─────────────────────────── */
@@ -7046,6 +7332,75 @@ const actions = {
     resetTransient();
     render();
   },
+  /* ── profiles ─────────────────────────────────────────────────────── */
+  "open-profiles": () => {
+    /* the counts are read now rather than per frame: each one parses a whole
+       profile's state, and this window re-renders on every rename keystroke */
+    ui.profileStats = profileStats();
+    ui.profileOrder = false;
+    ui.profilesWin = true; render();
+  },
+  "close-profiles": () => { ui.profilesWin = false; ui.profileOrder = false; ui.profileStats = null; render(); },
+  "profiles-reorder": () => { ui.profileOrder = !ui.profileOrder; render(); },
+  /* Switching is not a thing to be half-sure about: it puts a different
+     training on every screen in the app, so it says whose before it goes. */
+  "profile-switch": (el) => {
+    const id = el.dataset.id;
+    const list = profileList();
+    const i = list.findIndex((p) => p.id === id);
+    if (i < 0) return;
+    if (!confirm(T("profiles.confirmSwitch", { name: profileLabel(list[i], i) }))) return;
+    switchProfile(id);
+  },
+  "profile-add": () => { ui.profileForm = { id: null, name: "", mode: "add" }; render(); },
+  "profile-menu": (el) => {
+    const list = profileList();
+    const i = list.findIndex((p) => p.id === el.dataset.id);
+    if (i < 0) return;
+    ui.profileForm = { id: list[i].id, name: list[i].name || "", mode: "rename" };
+    render();
+  },
+  "profile-form-save": () => {
+    const f = ui.profileForm;
+    if (!f) return;
+    const name = (f.name || "").trim();
+    if (f.mode === "add") {
+      const id = addProfile(name);
+      ui.profileForm = null;
+      if (id) { ui.profileStats = profileStats(); render(); }
+      return;
+    }
+    profiles.list = profileList().map((p) => (p.id === f.id ? { ...p, name } : p));
+    saveProfiles();
+    ui.profileForm = null;
+    render();
+  },
+  /* A copy lands next to what it came from, named for it, because the only
+     reason to make one is to tell it apart from the original. */
+  "profile-duplicate": (el) => {
+    const list = profileList();
+    const i = list.findIndex((p) => p.id === el.dataset.id);
+    if (i < 0) return;
+    const id = duplicateProfile(list[i].id, T("profiles.copyOf", { name: profileLabel(list[i], i) }));
+    ui.profileForm = null;
+    if (id) { ui.profileStats = profileStats(); render(); }
+  },
+  /* The one button in here that can lose somebody a training history, so it
+     says how much of one before it asks, and asks with the name in it. */
+  "profile-delete": (el) => {
+    const list = profileList();
+    const i = list.findIndex((p) => p.id === el.dataset.id);
+    if (i < 0 || list.length < 2) return;
+    const st = (ui.profileStats || {})[list[i].id] || { days: 0, entries: 0 };
+    if (!confirm(T("profiles.confirmDelete", {
+      name: profileLabel(list[i], i), days: TN("day", st.days), sets: TN("logEntry", st.entries),
+    }))) return;
+    deleteProfile(list[i].id);
+    ui.profileForm = null;
+    ui.profileStats = profileStats();
+    render();
+  },
+
   "open-profile": () => {
     ui.profileDraft = { ...state.settings };
     ui.profileLangWas = state.settings.lang;   // so a cancelled preview can be undone
@@ -8126,6 +8481,7 @@ const actions = {
     const t = el.dataset.target;
     if (t === "bodyForm") ui.bodyForm = null;
     else if (t === "presetForm") ui.presetForm = null;
+    else if (t === "profileForm") ui.profileForm = null;
     else if (t === "presetView") ui.presetView = null;
     else if (t === "setForm") ui.setForm = null;
     else if (t === "timerForm") ui.timerForm = null;
@@ -8250,6 +8606,10 @@ function handleBind(el) {
       ui.exWinDraft = withKind({ ...ui.exWinDraft, muscle: v }, ui.exWinDraft.kind);
       render();
     }
+  } else if (bind === "profileName") {
+    ui.profileForm.name = v;
+    const btn = document.querySelector('[data-action="profile-form-save"]');
+    if (btn && ui.profileForm.mode === "rename") { const ok = !!v.trim(); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
   } else if (bind === "profileLang") {
     /* Preview the language live, the way the theme buttons do: the whole
        screen is written in it, so picking blind and only finding out on

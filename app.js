@@ -117,8 +117,12 @@ const DEFAULT_LIBRARY = [
   ["Cardio: Incline Walk","Cardio","Cardio","Treadmill","Cycling · Rowing","Conditions your heart and lungs while lightly working the calves. Low-impact and joint-friendly, logged as minutes × intensity, set a steep incline and skip the handrails."],
   ["Cardio: Cycling","Cardio","Cardio","Bike","Incline Walk · Rowing","Conditions your heart and lungs and lightly taxes the quads. Zero impact, ideal on leg-day-adjacent days, keep the resistance honest instead of just spinning."],
   ["Cardio: Rowing","Cardio","Cardio","Rower","Cycling","Full-body conditioning that also hits the mid back. Drive with your legs first and keep your back neutral the whole stroke."],
-].map(([name, muscle, type, equipment, alternatives, note], i) => ({
-  id: "default-" + i, name, muscle, type, equipment, alternatives, note,
+/* The third column is the spreadsheet's compound/isolation/cardio, kept in
+   the data because this list is a verbatim port, and deliberately NOT
+   stored on the row: `kind` is what a lift is logged in now, and the only
+   code left reading `type` is the v13/v14 migration reading old saves. */
+].map(([name, muscle, , equipment, alternatives, note], i) => ({
+  id: "default-" + i, name, muscle, equipment, alternatives, note,
   /* No `kind` on any of them, deliberately: they all sit in a group that
      answers for them, the three cardio machines included. Note the seeded
      pull-ups and plank are therefore strength, not the bodyweight and hold
@@ -244,10 +248,7 @@ const readKind = (name) => {
   const ex = ((state && state.library) || []).find((x) => x.name === name);
   return ex ? exKind(ex) : null;
 };
-const sameKindAs = (name, fallback) => {
-  const k = readKind(name) || fallback || DEFAULT_KIND;
-  return (e) => kindOf(e) === k;
-};
+
 const isSetKind = (k) => !!(KIND[k] && KIND[k].sets);
 
 
@@ -1421,7 +1422,7 @@ const defaultState = () => ({
      standards, whose tables are split male/female. It sits in settings so it
      is remembered and travels in a backup, not because the app wants a
      demographic, which is why Profile doesn't offer it. */
-  settings: { name: "", units: "kg", startDate: todayStr(), daysPerWeek: 4, theme: "dark", lang: "en", weekMode: "program", sex: "" },
+  settings: { name: "", units: "kg", startDate: todayStr(), theme: "dark", lang: "en", weekMode: "program", sex: "" },
   library: DEFAULT_LIBRARY,
   groups: DEFAULT_GROUPS.map((g) => ({ ...g })),   // [{name,key?,color}], user-editable
   log: [],        // {id,date,exercise,muscle,kind,sets,reps,weight,rpe,unit,minutes,intensity,notes,createdAt,setList?}
@@ -2121,7 +2122,6 @@ const esc = (s) => String(s ?? "")
    (est. 1RM, volume, PRs, goals, graphs) reads one canonical form.     */
 
 const NUM = 'type="text" inputmode="decimal" autocomplete="off" data-num';
-const EM_DASH = "—";
 
 /* the stored form of a typed number: 82,5 → 82.5 */
 const decimalize = (v) => String(v ?? "").replace(/,/g, ".");
@@ -2198,7 +2198,6 @@ function setAccordion(card, open) {
   body.addEventListener("transitionend", done);
 }
 
-const B = (t) => `<b style="color:var(--text)">${t}</b>`;
 
 /* Chart data captured during render, drawn after mount. `line` is the
    Progress tab's graph, `exLine` the copy inside the exercise window; they
@@ -4574,8 +4573,6 @@ function presetToEntries(p) {
     newEntry(ex.exercise, ex.muscle, readKind(ex.exercise) || ex.kind, base + i));
 }
 
-const presetCountLabel = (n) => `${n} ${n === 1 ? "move" : "moves"}`;
-
 /* the exercise list shown inside a preset card: color dot + name per row */
 const presetExerciseList = (exs) =>
   (exs || []).map((ex) => `<div style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)">
@@ -6540,7 +6537,6 @@ function renderProfile(f) {
         }).join("")}
       </div>`, T((f.weekMode || "program") === "rolling" ? "profile.weekRollingHint" : "profile.weekProgramHint"))}
       ${field(T("profile.startDate"), `<input type="date" class="pb-input" data-bind="profile.startDate" value="${esc(f.startDate)}">`, T("profile.startDateHint"))}
-      ${field(T("profile.daysPerWeek"), `<input class="pb-input" ${NUM} data-bind="profile.daysPerWeek" value="${esc(f.daysPerWeek)}">`)}
 
       <div class="pb-hairline" style="margin:18px 0"></div>
       ${sectionTitle(T("profile.data"))}

@@ -452,8 +452,10 @@ const calcReps = (pct) => {
   return x > 0 ? Math.floor(-Math.log(x) / RM_K) : Infinity;
 };
 
-/* one decimal, no dangling ".0": 133.3 kg, but 120 kg */
-const trimNum = (n) => String(Math.round(n * 10) / 10);
+/* one decimal by default, no dangling ".0": 133.3 kg, but 120 kg. `dp` is
+   for the places that read a WEIGHT back off the log rather than printing a
+   derived figure: see weightAs for why those need two. */
+const trimNum = (n, dp = 1) => { const p = Math.pow(10, dp); return String(Math.round(n * p) / p); };
 
 /* Cardio "1RM equivalent": session-RPE load (Foster) = minutes × RPE */
 const cardioScore = (minutes, intensity) =>
@@ -485,6 +487,26 @@ const LB_PER_KG = 2.2046226218;
 
 const convertWeight = (w, from, to) =>
   !(w > 0) || from === to ? w : from === "kg" ? w * LB_PER_KG : w / LB_PER_KG;
+
+/* ── A WEIGHT OFF THE LOG, IN TODAY'S UNIT ────────────────────────────
+   Every place that reads a past weight back to sit BESIDE a weight being
+   typed today goes through here: last time's rows, what a new set opens
+   on, and the bar the suggestion card argues from. Two jobs, and the
+   second is the one that bites.
+
+   It converts, because history is stored in the unit it was written in and
+   a kg set held up against an lbs one is not a comparison at all.
+
+   And it rounds, because converting produces float dust that would make a
+   set disagree with itself by a millionth of a kilo. TWO decimals, not
+   one: a gym makes 1.25 kg and 2.5 lb jumps, so 26.25 kg is a weight
+   somebody actually loaded, and rounding it to 26.3 to compare it against
+   itself is precisely how a set that exactly repeated last time came back
+   as "under" — the logged 26.25 really was less than the 26.3 it was being
+   measured against, and the app was right about a number it had invented.
+   Two decimals hold every step a plate tree can make, which is the only
+   precision a weight off the log is ever claiming. */
+const weightAs = (w, from, to) => Math.round(convertWeight(+w, from, to) * 100) / 100;
 
 /* the unit an entry was logged in, older entries fall back to the default */
 const unitOf = (e) => (e && e.unit) || state.settings.units;
@@ -845,7 +867,7 @@ function setSuggestion(f, isDraft) {
      the plates in front of you */
   const eu = unitOf(prev), fu = unitOf(f);
   const reps = Math.round(+prev.reps);
-  const weight = Math.round(convertWeight(+prev.weight, eu, fu) * 100) / 100;
+  const weight = weightAs(prev.weight, eu, fu);
   if (!(reps > 0 && weight > 0)) return { kind: "first" };
 
   const base = metricFor(weight, reps, fu);
@@ -954,8 +976,10 @@ function openingSetFor(f, isDraft, index) {
   if (r) {
     if (k === "bodyweight") return newSet(String(r.reps), "", r.rpe || "");
     if (k === "hold") return newSet("", "", r.rpe || "", String(r.secs));
-    const w = convertWeight(+r.weight, r.unit || eUnit, eUnit);
-    return newSet(String(r.reps), trimNum(w), r.rpe || "");
+    /* weightAs, not a one-decimal trim: this is the number about to be
+       typed into the log, and handing back 26.3 for a 26.25 kg set edits
+       somebody's history on their behalf and then grades them on it */
+    return newSet(String(r.reps), String(weightAs(r.weight, r.unit || eUnit, eUnit)), r.rpe || "");
   }
   /* nothing at this position last time, so the set above is the next best guess */
   const prev = (f.setList || [])[index - 1];
@@ -1283,15 +1307,16 @@ function lastTimeSets(f, isDraft) {
   const last = lastOuting(f, isDraft);
   if (!last) return null;
   const eUnit = unitOf(f);
-  /* into the unit being typed in today, rounded where it will be read, so a
-     kg set and the same set logged in lbs cannot disagree by a float hair */
+  /* into the unit being typed in today, at the precision a plate tree can
+     actually make: see weightAs, and see the "under" verdict a coarser
+     rounding used to invent for a set that repeated last time exactly */
   const k = kindOf(f);
   const rows = last.rows
     .filter((r) => r.kind === k && setHasData(r, k))
     /* reps and seconds are unitless and pass straight through; only a
        weight has to be brought into the unit being typed in today */
     .map((r) => (k === "strength"
-      ? { reps: +r.reps, weight: Math.round(convertWeight(+r.weight, r.unit || eUnit, eUnit) * 10) / 10 }
+      ? { reps: +r.reps, weight: weightAs(r.weight, r.unit || eUnit, eUnit) }
       : { reps: r.reps, secs: r.secs }));
   return rows.length ? { date: last.date, rows } : null;
 }
@@ -5486,7 +5511,10 @@ function renderSetList(f, unit, planning, isDraft) {
     const v = ref ? setVerdict(s, ref, k) : null;
     const refShort = (r) => k === "bodyweight" ? T("unit.nReps", { n: esc(r.reps) })
       : k === "hold" ? T("unit.nSecs", { n: esc(r.secs) })
-      : `${esc(r.reps)} × ${esc(trimNum(r.weight))}`;
+      /* two decimals, the same precision the row itself carries: a line
+         that reads "last time 7 × 26.3" beside a verdict measured on 26.25
+         is naming a weight nobody lifted */
+      : `${esc(r.reps)} × ${esc(trimNum(r.weight, 2))}`;
     const refLine = t ? T("plan.vsTarget", { target: refShort(t) })
       : prev ? T("sets.vsLast", { target: refShort(prev) })
       : "";
@@ -5850,47 +5878,123 @@ function renderEntryFields(form, unit) {
    that you did not want either of them, and until now that left you
    backing out of the editor to go and look the old number up.
 
-   So the est. 1RM says which side of last session it lands on. The bar is
-   the same one the suggestion card argues from, the lift's estimate LAST
-   SESSION, which is its best set: the app already treats that as what the
-   lift is worth on a given day, and a second definition of "last time" on
-   the same screen would be one too many.
+   So the est. 1RM says which side of last session it lands on. TWO
+   references, because they answer two different questions and conflating
+   them was the old bug:
 
-   Read through lastTimeSets, which has already converted that session into
-   the unit being typed in today, because the number this is subtracted
-   from is drawn in the entry's unit and a kg estimate held up against an
-   lbs one is not a comparison at all.
+   THE MAIN ONE IS POSITIONAL: set two is measured against last session's
+   SET TWO, exactly as setVerdict measures it in the list behind this
+   sheet, so the number and the beat/under badge on the row can never
+   disagree. It used to be measured against last session's BEST set, which
+   made the card say "1.2 lower than last time" on a back-off set that had
+   just beaten the back-off set it was actually repeating — the estimate
+   was true and the comparison was answering a question nobody asked. A
+   session is a list of sets, and the bar for a set is the set that stood
+   in its place.
+
+   THE SIDE ONE IS ALL-TIME, the best this lift has ever been worth, over
+   the same strictly-earlier window the PR badge reads (earlierOutings) so
+   the two can never disagree about what "best" was. It is deliberately
+   small and quiet: it is the ceiling, not the target, and on most sets of
+   most sessions the honest answer is that you are nowhere near it. When
+   the set in the boxes clears it, it goes gold and says so, which is the
+   same claim the PR badge will make when the entry is saved.
+
+   Both are read in the unit being typed in today — the positional one
+   through lastTimeSets, the all-time one through weightAs — because the
+   number they are subtracted from is drawn in the entry's unit and a kg
+   estimate held up against an lbs one is not a comparison at all.
 
    It states a fact about a number, it does not propose one, so unlike the
    suggestion card it stays put under a plan: the plan owns "what am I
-   going for", this only ever says what you have typed so far comes to. */
-function lastBestMetric(f, isDraft) {
+   going for", this only ever says what you have typed so far comes to.
+
+   Sets past where last session ran out are UNJUDGED, the same rule
+   entryLastResult follows: a fourth set on a day that had three has
+   nothing in its place to be measured against, and inventing one out of
+   the best set is how this went wrong in the first place. The card says so
+   in a faint line rather than going blank, because a card that silently
+   drops its comparison reads like a bug. */
+function lastSetMetric(f, isDraft, index) {
   const prev = lastTimeSets(f, isDraft);
   if (!prev) return null;
+  const r = prev.rows[index];
+  /* the position existed but the session ended before it: `m` null says
+     "nothing to compare with", `ran` says which of the two reasons it is */
+  if (!r) return { m: null, date: prev.date, index, ran: false };
+  const m = setScore(r, kindOf(f));
+  return m == null ? null : { m, date: prev.date, index, ran: true };
+}
+
+/* The ceiling: the best single set this lift has ever been worth, in the
+   unit being typed in today. Same window as the PR badge, so a set that
+   clears this is a set that will come back wearing one. */
+function bestEverMetric(f, isDraft) {
   const k = kindOf(f);
-  let m = null;
-  for (const r of prev.rows) {
-    const v = setScore(r, k);
-    if (v != null && (m == null || v > m)) m = v;
-  }
-  return m == null ? null : { m, date: prev.date };
+  if (!isSetKind(k)) return null;
+  const fu = unitOf(f);
+  let m = null, date = null;
+  for (const e of earlierOutings(f, isDraft))
+    for (const r of outingRows([e]).rows) {
+      if (r.kind !== k) continue;
+      /* recomputed rather than read off r.m, which is scored in the unit
+         that session was LOGGED in and would put an lbs number next to a
+         kg one with no sign that anything had changed */
+      const v = k === "strength" ? est1RM(weightAs(r.weight, r.unit || fu, fu), +r.reps) : r.m;
+      if (v != null && (m == null || v > m)) { m = v; date = e.date; }
+    }
+  return m == null ? null : { m, date };
 }
 
 /* One line under that number: the verdict, in the colours the set list's
-   own beat/same/under verdicts wear, then the bar it was measured against,
+   own beat/same/under verdicts wear, then the set it was measured against,
    because a comparison that will not name what it compared with is just an
-   opinion. Text and colour only, no icon: this is rewritten in place while
-   you type (see updateSetPreview) and a freshly injected lucide
-   placeholder has nothing to turn it into a glyph. */
+   opinion. It names the POSITION as well as the number ("set 2 last time"),
+   since the number alone would read as the session's, which is exactly the
+   thing this stopped being. Text and colour only, no icon: this is
+   rewritten in place while you type (see updateSetPreview) and a freshly
+   injected lucide placeholder has nothing to turn it into a glyph. */
 function vsLastLine(m, ref) {
   if (!ref) return "";
-  const base = `<span style="color:var(--faint)">${T("vsLast.base", { n: ref.m, date: fmtShort(ref.date) })}</span>`;
+  const i = ref.index + 1;
+  /* last session ended before this position: no verdict, and said out loud
+     rather than left as a gap, or the card looks like it failed to load */
+  if (!ref.ran) return `<span style="color:var(--faint)">${T("vsSet.none", { i, date: fmtShort(ref.date) })}</span>`;
+  const base = `<span style="color:var(--faint)">${T("vsSet.base", { i, n: ref.m, date: fmtShort(ref.date) })}</span>`;
   if (m == null) return base;
   const d = Math.round((m - ref.m) * 10) / 10;
   const v = d > 0 ? "beat" : d < 0 ? "under" : "hit";
-  const word = d === 0 ? T("vsLast.same") : T(d > 0 ? "vsLast.over" : "vsLast.under", { n: Math.abs(d) });
+  const word = d === 0 ? T("vsSet.same", { i }) : T(d > 0 ? "vsSet.over" : "vsSet.under", { n: Math.abs(d), i });
   return `<span style="color:${VERDICT_COLOR[v]};font-weight:700">${word}</span> · ${base}`;
 }
+
+/* The quiet number to the right of it: the ceiling this lift has ever hit,
+   and how far under it you are. Small, muted and second, because on most
+   sets of most sessions the answer is "a long way", and a figure nobody can
+   beat today is context, not a target — the positional line to its left is
+   the one with something to say about the set in the boxes.
+
+   It goes gold and says so the moment the set clears it, which is the same
+   claim the PR badge will make when the entry is saved, from the same
+   window. Patched in place by updateSetPreview, so text and colour only. */
+function bestEverBlock(m, ref, unit) {
+  if (!ref) return "";
+  const k = ui.entryForm ? kindOf(ui.entryForm.f) : DEFAULT_KIND;
+  const pr = m != null && m > ref.m;
+  const sub = pr ? T("best.newPr")
+    : m == null ? fmtShort(ref.date)
+    : m === ref.m ? T("best.matched")
+    : T("best.toGo", { n: trimNum(ref.m - m) });
+  return `<div class="pb-label" style="font-size:9.5px;letter-spacing:.07em">${T("best.label")}</div>
+    <div class="pb-num" style="font-size:17px;font-weight:700;line-height:1.15;color:${pr ? "var(--gold)" : "var(--muted)"}">${ref.m}<span style="font-size:10px;font-weight:600;color:var(--faint)"> ${esc(metricUnit(k, unit))}</span></div>
+    <div style="font-size:10px;line-height:1.35;margin-top:1px;color:${pr ? "var(--gold)" : "var(--faint)"}">${sub}</div>`;
+}
+
+/* What the open set editor is being measured against, worked out by
+   renderSetForm and read back by updateSetPreview. Module-level and
+   transient, like the chart's in-flight gesture state, rather than a field
+   on ui.setForm, which is the form's own data and not a cache of the log. */
+let setRefs = { vs: null, best: null, unit: null };
 
 /* the single-set editor, same idea as the entry form, one level down */
 function renderSetForm(form, unit) {
@@ -5898,7 +6002,16 @@ function renderSetForm(form, unit) {
   const k = ui.entryForm ? kindOf(ui.entryForm.f) : DEFAULT_KIND;
   const m = setScore(s, k);
   const ok = setHasData(s, k);
-  const vsRef = ui.entryForm ? lastBestMetric(ui.entryForm.f, ui.entryForm.isDraft) : null;
+  /* two references, two different questions: the set that stood in this
+     one's place last session, and the best this lift has ever been worth.
+     Both are worked out ONCE, here, and parked in setRefs for the keystroke
+     path to read: neither can move while the sheet is open (typing does not
+     write to the log, and the one control that could change them, the unit
+     select, does a full render), and each one otherwise costs a sort of the
+     whole log on every character typed into the weight box. */
+  const vsRef = ui.entryForm ? lastSetMetric(ui.entryForm.f, ui.entryForm.isDraft, index) : null;
+  const bestRef = ui.entryForm ? bestEverMetric(ui.entryForm.f, ui.entryForm.isDraft) : null;
+  setRefs = { vs: vsRef, best: bestRef, unit };
   /* One box or two, and never a box for a number this kind does not have.
      A hold asked for reps and a weight was the old model showing through. */
   const numField = (label, bind, val, first) =>
@@ -5956,9 +6069,14 @@ function renderSetForm(form, unit) {
     ${field(T("entry.rpe"), `<input class="pb-input" ${NUM} data-bind="set.rpe" value="${esc(s.rpe)}" placeholder="—">`, T("setForm.rpeHint"))}
 
     <div class="pb-card2" style="padding:11px 14px;margin-bottom:14px">
-      <div class="pb-label">${metricLabel(k, unit)}</div>
-      <div id="setMetric" class="pb-num" style="font-size:26px;font-weight:700;color:var(--gold);line-height:1.05">${m ?? "—"}</div>
-      <div id="setVsLast" style="font-size:11.5px;line-height:1.45;margin-top:${vsRef ? 5 : 0}px">${vsLastLine(m, vsRef)}</div>
+      <div style="display:flex;align-items:flex-start;gap:12px">
+        <div style="flex:1;min-width:0">
+          <div class="pb-label">${metricLabel(k, unit)}</div>
+          <div id="setMetric" class="pb-num" style="font-size:26px;font-weight:700;color:var(--gold);line-height:1.05">${m ?? "—"}</div>
+        </div>
+        ${bestRef ? `<div id="setBest" style="flex:0 0 auto;text-align:right;padding-left:12px;border-left:1px solid var(--border-soft)">${bestEverBlock(m, bestRef, unit)}</div>` : ""}
+      </div>
+      <div id="setVsLast" style="font-size:11.5px;line-height:1.45;margin-top:${vsRef ? 6 : 0}px">${vsLastLine(m, vsRef)}</div>
     </div>
 
     <button id="setSaveBtn" data-action="save-set" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:14px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
@@ -5970,19 +6088,27 @@ function renderSetForm(form, unit) {
   `, 100);
 }
 
-/* live 1RM, its verdict against last time, and save-button state while
+/* live 1RM, its verdict against the set in the same place last session,
+   how it stands against the all-time best, and save-button state while
    typing in the set editor. Patched in place rather than re-rendered, so
-   the caret never moves out from under the finger typing into it. */
+   the caret never moves out from under the finger typing into it.
+
+   `#setBest` is absent on a first outing (there is no ceiling yet) and the
+   node cannot appear without a render, which is right: a lift with no
+   history does not grow one while you are typing into it. */
 function updateSetPreview() {
   if (!ui.setForm) return;
   const s = ui.setForm.s;
-  const k = ui.entryForm ? kindOf(ui.entryForm.f) : DEFAULT_KIND;
+  const f = ui.entryForm && ui.entryForm.f;
+  const k = f ? kindOf(f) : DEFAULT_KIND;
   const m = setScore(s, k);
   const el = document.getElementById("setMetric");
   const vs = document.getElementById("setVsLast");
+  const best = document.getElementById("setBest");
   const btn = document.getElementById("setSaveBtn");
   if (el) el.textContent = m ?? "—";
-  if (vs && ui.entryForm) vs.innerHTML = vsLastLine(m, lastBestMetric(ui.entryForm.f, ui.entryForm.isDraft));
+  if (vs) vs.innerHTML = vsLastLine(m, setRefs.vs);
+  if (best) best.innerHTML = bestEverBlock(m, setRefs.best, setRefs.unit);
   if (btn) { const ok = setHasData(s, k); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
 }
 

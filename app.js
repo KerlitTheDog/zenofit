@@ -1230,7 +1230,11 @@ function planMarks(plans) {
    1RM: three reps at a heavier weight scores higher than the eight you
    planned, and calling that "target hit" would be the app deciding it
    knows what you meant. Under is never scolded anywhere it is shown:
-   the plan was a guess made days ago, and the log is what happened.   */
+   the plan was a guess made days ago, and the log is what happened.
+
+   THIS ONE IS FOR PLANS ONLY. "Did you do what you said" and "did this go
+   better than last time" are different questions and they part company on
+   exactly the sets where it matters: see setProgress below.            */
 
 function setVerdict(actual, target, kind = DEFAULT_KIND) {
   if (!actual || !target) return null;
@@ -1245,6 +1249,44 @@ function setVerdict(actual, target, kind = DEFAULT_KIND) {
   const r = +actual.reps, w = +actual.weight, tr = +target.reps, tw = +target.weight;
   if (r < tr || w < tw) return "under";
   return r > tr || w > tw ? "beat" : "hit";
+}
+
+/* ── DID THIS SET GO BETTER THAN LAST TIME ────────────────────────────
+   The same three words, pointed at your own last session instead of at a
+   plan, and judged on the SCORE rather than on both axes at once.
+
+   The rule above cannot answer this question. It calls a set UNDER the
+   moment it is short on either axis, so 14 × 60 kg followed a week later
+   by 11 × 65 kg reads "under": the reps went down, and that is the end of
+   the sentence. But that set is 88.5 kg of estimated max against 87.4, a
+   heavier top-end for the same slot, and it is the whole shape of getting
+   stronger — you trade reps for plates, and the reps come back. Grading
+   it "under" tells somebody who just improved that they went backwards,
+   which is the app arguing with a lifter about their own training. Worse,
+   the est. 1RM card open on that same set said "1.1 higher than set 2" in
+   gold at the same moment the row said under, so the app disagreed with
+   itself on one screen.
+
+   Against a PLAN the two-axis rule is still right, and stays: a plan is a
+   sentence you wrote down, and 11 reps is not the 14 you said. Against
+   LAST TIME there is no sentence to keep, only the question of whether
+   this slot went better, and the app already has one number for how good a
+   set was. It is the number the row prints, the graph plots, the PR badge
+   reads and the suggestion card argues from. Reusing it here is what makes
+   the badge and the estimate beside it stop contradicting each other.
+
+   Compared through setScore, ROUNDED, which is the figure actually on
+   screen: a verdict worked out to more precision than it is shown at is a
+   verdict nobody can check by reading the two numbers.
+
+   The one-axis kinds are unaffected — for reps and for seconds the score
+   IS the axis, so this and setVerdict agree by construction.           */
+function setProgress(actual, prev, kind = DEFAULT_KIND) {
+  if (!actual || !prev) return null;
+  if (!setHasData(actual, kind)) return null;
+  const a = setScore(actual, kind), b = setScore(prev, kind);
+  if (a == null || b == null) return null;
+  return a > b ? "beat" : a < b ? "under" : "hit";
 }
 
 function cardioVerdict(e, t) {
@@ -1278,23 +1320,25 @@ function entryPlanResult(e) {
   };
 }
 
-/* ── THE SAME VERDICT, POINTED AT LAST TIME ───────────────────────────
+/* ── THE VERDICT, POINTED AT LAST TIME ────────────────────────────────
    A plan is one thing you can be measured against. Your own last session
    is the other, and for most days it is the only one there is.
 
    THE HOLE THIS FILLS. Est. 1RM speaks for an exercise through its BEST
    set, which is the right way to answer "what could I lift for a single"
    and the wrong way to answer "did today go better than last time". Match
-   your top set and add a rep to your second and the estimate does not
-   move, because the estimate was never about your second set. The graph
-   goes flat on a session that was strictly better than the one before it.
+   your top set and add a rep to your second and the exercise's headline
+   estimate does not move, because it was never about your second set. The
+   graph goes flat on a session that was strictly better than the one
+   before it.
 
    So this compares SET FOR SET BY POSITION: set two answers last time's
-   set two, exactly as a planned set is answered by the set in its slot,
-   and reusing setVerdict is the point. It refuses to judge on est. 1RM
-   for the same reason the plan version does: more reps at the same weight
-   is a better set, and a rep-max curve that calls it "no change" is the
-   app arguing with someone about their own training.
+   set two, exactly as a planned set is answered by the set in its slot.
+   The per-set estimate is exactly the right tool for that and the
+   whole-exercise one was never in the running, which is why the answer is
+   setProgress rather than setVerdict — the two-axis plan rule called a
+   set that had raised its own estimate "under" on the strength of the
+   reps alone. See setProgress for why that had to go.
 
    Sets past where last time ran out are simply unjudged. There is no
    verdict for a fourth set on a day that had three, and there is no
@@ -1331,7 +1375,7 @@ function entryLastResult(f, isDraft) {
   if (!prev) return null;
   const list = f.setList || [];
   const k = kindOf(f);
-  const verdicts = list.map((s, i) => (prev.rows[i] ? setVerdict(s, prev.rows[i], k) : null));
+  const verdicts = list.map((s, i) => (prev.rows[i] ? setProgress(s, prev.rows[i], k) : null));
   return {
     date: prev.date, rows: prev.rows, verdicts,
     beat: verdicts.filter((v) => v === "beat").length,
@@ -5508,7 +5552,10 @@ function renderSetList(f, unit, planning, isDraft) {
     const t = targets[i];
     const prev = !t && lastRes ? lastRes.rows[i] : null;
     const ref = t || prev;
-    const v = ref ? setVerdict(s, ref, k) : null;
+    /* and it is judged by a different rule, because it is a different
+       question: setVerdict keeps a plan's two axes, setProgress asks the
+       score whether this slot went better than it did last time */
+    const v = t ? setVerdict(s, t, k) : prev ? setProgress(s, prev, k) : null;
     const refShort = (r) => k === "bodyweight" ? T("unit.nReps", { n: esc(r.reps) })
       : k === "hold" ? T("unit.nSecs", { n: esc(r.secs) })
       /* two decimals, the same precision the row itself carries: a line
@@ -5883,8 +5930,8 @@ function renderEntryFields(form, unit) {
    them was the old bug:
 
    THE MAIN ONE IS POSITIONAL: set two is measured against last session's
-   SET TWO, exactly as setVerdict measures it in the list behind this
-   sheet, so the number and the beat/under badge on the row can never
+   SET TWO, on the same number setProgress grades the row behind this
+   sheet with, so this line and the beat/under badge on the row can never
    disagree. It used to be measured against last session's BEST set, which
    made the card say "1.2 lower than last time" on a back-off set that had
    just beaten the back-off set it was actually repeating — the estimate

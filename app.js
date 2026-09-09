@@ -1007,10 +1007,11 @@ function computeBadges(log) {
   }
   return out;
 }
-const BADGE_TEXT = {
-  get first() { return T("badge.first"); }, get pr() { return T("badge.pr"); },
-  get match() { return T("badge.match"); }, get below() { return T("badge.below"); },
-};
+/* The long forms of these ("Beat your best 💪", "Below best, normal, keep
+   going") are gone with the sentence they were written for: the entry
+   card names the two numbers now, and a number does not need a mood. What
+   is left is the SHORT badge, which is a label on a row in a list rather
+   than a verdict delivered to your face mid-set. */
 const BADGE_SHORT = {
   get first() { return T("badge.firstShort"); }, get pr() { return T("badge.prShort"); },
   get match() { return T("badge.matchShort"); }, below: "",
@@ -5207,8 +5208,8 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
   const planning = !!draft.planning;
   const wk = rollingWeeks() ? null : weekOf(draft.date, settings.startDate);
   /* when editing an existing day, its own rows already live in the log, so drop
-     them from the comparison base so the "vs your best" preview isn't counting
-     the very rows being edited. */
+     them from the comparison base, or the PR badges would be measuring the
+     very rows being edited against themselves. */
   const baseLog = draft.editing ? log.filter((e) => !(draft.originalIds || []).includes(e.id)) : log;
   const combined = [...baseLog, ...draft.entries.map((e) => ({ ...e, date: draft.date }))];
   const badges = planning ? {} : computeBadges(combined);
@@ -5433,13 +5434,35 @@ function renderExercisePicker(library) {
 function entryComputed() {
   const { f, isDraft } = ui.entryForm;
   const cardio = f.kind === "cardio";
-  /* metricOf converts the entry's own unit to the default one, so the live
-     "vs your best" below compares like with like */
+  /* metricOf converts the entry's own unit to the default one, so the two
+     bars below are subtracted from it in the same unit */
   const metric = metricOf(f);
 
-  /* live "vs your best" preview against everything chronologically earlier */
-  let preview = null;
-  if (metric != null) {
+  /* ── THE TWO BARS THIS ESTIMATE IS HELD UP AGAINST ──────────────────
+     LAST SESSION and BEST EVER, both as numbers, both in the default unit
+     that metricOf converts into, so they can sit beside the figure above
+     them and be subtracted from it by eye.
+
+     This used to be one word: "Below best, normal, keep going", or "Beat
+     your best 💪". Encouragement is not information. It never said what
+     the best WAS, so the one question it provoked ("by how much?") was the
+     one it could not answer, and it left the only bar in sight an all-time
+     one that most sessions are nowhere near. The bar you can actually act
+     on is last week's, which the word never mentioned at all.
+
+     Filtered by KIND as well as by name, which the word never was. That
+     mattered less when the output was a sentence and matters completely
+     now that it is a number: metricOf answers in kilos for a strength
+     session and in reps for a bodyweight one, so pooling them put a rep
+     count in a kilo column. Same rule as computeBadges, earlierOutings
+     and the graph — a lift is read in the kind it is logged in today.
+
+     The window is otherwise unchanged, and deliberately wider than
+     earlierOutings: it includes the entries in the open day sheet, which
+     are not in state.log yet, so a lift logged twice in one session is
+     measured against its own earlier card.                            */
+  let lastMetric = null, bestMetric = null, lastDate = null;
+  {
     const draft = ui.workoutSheet;
     const editingIds = draft && draft.editing ? new Set(draft.originalIds || []) : null;
     const priorLog = editingIds ? state.log.filter((e) => !editingIds.has(e.id)) : state.log;
@@ -5447,10 +5470,21 @@ function entryComputed() {
       ? [...priorLog, ...(draft ? draft.entries.map((e) => ({ ...e, date: draft.date })) : [])].filter((e) => e.id !== f.id)
       : state.log.filter((e) => e.id !== f.id);
     const date = f.date || (isDraft && draft ? draft.date : null) || todayStr();
-    const earlier = chronoSort(base).filter((e) => e.exercise === f.exercise &&
-      (e.date < date || (e.date === date && e.createdAt < f.createdAt)));
-    const prev = earlier.reduce((m, e) => { const v = metricOf(e); return v == null ? m : Math.max(m, v); }, -Infinity);
-    preview = prev === -Infinity ? "first" : metric > prev ? "pr" : metric === prev ? "match" : "below";
+    const k = kindOf(f);
+    /* scored, not merely earlier: a lift unticked back to not-done is a row
+       with no numbers on it, and letting one BE the last session would hand
+       back a blank date and hide the real one behind it */
+    const scored = chronoSort(base)
+      .filter((e) => e.exercise === f.exercise && kindOf(e) === k &&
+        (e.date < date || (e.date === date && e.createdAt < f.createdAt)))
+      .map((e) => ({ date: e.date, m: metricOf(e) }))
+      .filter((x) => x.m != null);
+    const top = (rows) => rows.reduce((m, x) => (m == null || x.m > m ? x.m : m), null);
+    bestMetric = top(scored);
+    /* two entries of one lift on one day are one session's work, so the last
+       session is the best of that DAY, the same reading lastOuting takes */
+    lastDate = scored.length ? scored[scored.length - 1].date : null;
+    lastMetric = lastDate == null ? null : top(scored.filter((x) => x.date === lastDate));
   }
   /* ── NOTHING IN IT IS A THING YOU CAN SAVE ──────────────────────────
      This used to refuse a brand-new entry with no numbers on it, on the
@@ -5474,7 +5508,38 @@ function entryComputed() {
   const onRecord = entryOnRecord(f, isDraft);
   const lineUp = isDraft && !planning && !onRecord && !entryHasData(f);
   const valid = planning || onRecord || isDraft || entryHasData(f);
-  return { cardio, metric, preview, valid, onRecord, lineUp };
+  return { cardio, metric, lastMetric, bestMetric, lastDate, valid, onRecord, lineUp };
+}
+
+/* Those two bars, drawn: LAST TIME on the left, BEST EVER on the right,
+   in that order because that is the order they are useful in. Last week's
+   number is the one you can do something about tonight; the all-time one
+   is the ceiling you are walking toward, and putting the ceiling first
+   would make every ordinary session look like a failure.
+
+   Each wears the set list's own verdict colours against its own bar —
+   gold when today's figure is past it, green when it is level, muted when
+   it is not there yet — so "did I beat it" is answered by the colour and
+   "by how much" by the two numbers, without a sentence in between. A bar
+   that does not exist yet (a first outing) prints an em dash rather than
+   going missing, so the row does not change shape the moment you have
+   history. No unit on either: they are the same quantity as the figure
+   beside them, whose own label already carries it.
+
+   Text and colour only, no icon: updateEntryPreview rewrites this in
+   place while you type, and a freshly injected lucide placeholder has
+   nothing to turn it into a glyph.                                     */
+function entryRefCols(metric, lastMetric, bestMetric) {
+  const col = (label, ref) => {
+    const v = ref == null || metric == null ? null
+      : metric > ref ? "beat" : metric < ref ? "under" : "hit";
+    return `<div>
+      <div class="pb-label" style="font-size:9.5px;letter-spacing:.07em">${label}</div>
+      <div class="pb-num" style="font-size:17px;font-weight:700;line-height:1.2;color:${
+        ref == null ? "var(--faint)" : v ? VERDICT_COLOR[v] : "var(--muted)"}">${ref ?? "—"}</div>
+    </div>`;
+  };
+  return col(T("best.lastLabel"), lastMetric) + col(T("best.label"), bestMetric);
 }
 
 /* ── the set list inside a Detailed entry ──────────────────────────────
@@ -5809,7 +5874,7 @@ function renderPlanTarget(f, unit) {
 
 function renderEntryFields(form, unit) {
   const { f, isDraft } = form;
-  const { cardio, metric, preview, valid, onRecord, lineUp } = entryComputed();
+  const { cardio, metric, lastMetric, bestMetric, valid, onRecord, lineUp } = entryComputed();
   const detailed = isDetailed(f);
   const eUnit = unitOf(f);
   /* the form doesn't need a flag of its own: an entry being drafted always
@@ -5886,14 +5951,14 @@ function renderEntryFields(form, unit) {
       ${field(T("entry.notes"), `<textarea class="pb-input" rows="2" data-bind="entry.notes" placeholder="—" style="resize:none">${esc(f.notes)}</textarea>`,
         detailed ? T("entry.notesHint") : "")}
 
-      <!-- live computed row: the sheet's Est. 1RM + "vs. Your Best" -->
-      <div class="pb-card2" style="padding:12px 14px;display:flex;align-items:center;gap:12px;margin-top:4px">
-        <div>
+      <!-- live computed row: the sheet's Est. 1RM, against last time and against the best ever -->
+      <div class="pb-card2" style="padding:12px 14px;display:flex;align-items:flex-end;gap:12px;margin-top:4px">
+        <div style="flex:1;min-width:0">
           <div class="pb-label">${detailed && kindOf(f) === "strength" ? T("entry.bestSet1rm", { unit }) : metricLabel(kindOf(f), unit)}</div>
           <div id="entryMetric" class="pb-num" style="font-size:30px;font-weight:700;color:var(--gold);line-height:1.05">${metric ?? "—"}</div>
         </div>
-        <div id="entryBadge" style="flex:1;text-align:right;font-size:13px;font-weight:700;color:${preview === "pr" ? "var(--gold)" : preview === "first" ? "var(--blue)" : "var(--muted)"}">
-          ${preview ? BADGE_TEXT[preview] : cardio ? T("entry.cardioFormula") : ""}
+        <div id="entryBadge" style="flex-shrink:0;display:flex;justify-content:flex-end;gap:15px;text-align:right">
+          ${entryRefCols(metric, lastMetric, bestMetric)}
         </div>
       </div>
       ${kindOf(f) === "strength" && eUnit !== unit ? `<div style="font-size:11.5px;color:var(--faint);margin:8px 2px 0;line-height:1.5">
@@ -6161,15 +6226,15 @@ function updateSetPreview() {
 
 function updateEntryPreview() {
   if (!ui.entryForm) return;
-  const { cardio, metric, preview, valid } = entryComputed();
+  const { metric, lastMetric, bestMetric, valid } = entryComputed();
   const m = document.getElementById("entryMetric");
   const b = document.getElementById("entryBadge");
   const s = document.getElementById("entrySaveBtn");
   if (m) m.textContent = metric ?? "—";
-  if (b) {
-    b.style.color = preview === "pr" ? "var(--gold)" : preview === "first" ? "var(--blue)" : "var(--muted)";
-    b.textContent = preview ? BADGE_TEXT[preview] : cardio ? T("entry.cardioFormula") : "";
-  }
+  /* redrawn whole rather than nudged: the two bars hold still while you
+     type, but which side of them you are on does not, and the colour is
+     the answer this row exists to give */
+  if (b) b.innerHTML = entryRefCols(metric, lastMetric, bestMetric);
   if (s) { s.disabled = !valid; s.style.opacity = valid ? 1 : 0.45; }
 }
 

@@ -2128,7 +2128,7 @@ const ui = {
      calculator it is a question you ask, not a feed: `std` is the form,
      `stdResult` the last answer, and neither is cleared by changing tab.
      See stdForm() for why the form is built once and then left alone. */
-  std: null,            // {slug, sex, bw, bwFrom, lift, liftFromLog}
+  std: null,            // {slug, sex, bw, bwFrom, mode, lift, liftFromLog, setReps, setWeight}
   stdResult: null,      // the last check, see stdCheck()
   stdPick: false,       // the standards' own exercise picker is open
   stdQ: "",             // …and its search box
@@ -3671,7 +3671,23 @@ function renderProgress(log, library, goals, badges, settings, unit) {
      a pre-fill you can type straight over; everything else starts blank.
      Rep-count standards (pull-ups, dips, push-ups) never pre-fill at
      all: the log stores every set as reps × weight, and there is no
-     honest way to read "your best set at bodyweight" back out of that.  */
+     honest way to read "your best set at bodyweight" back out of that.
+
+   TWO WAYS TO SAY WHAT YOU LIFTED, ONE ANSWER. The tables are written in
+   one-rep maxes and nobody trains in them, so the lift field takes either
+   one: a max, or a set you actually did (`f.mode`, stdMode, stdLiftValue).
+   A set is folded into a max by est1RM — the same anchored Wathan curve
+   the log and the 1RM tab run on, reps rounded exactly as that tab rounds
+   them — and that identity is the entire point. The rank you get from
+   5 × 135 is the rank you would have got by working the max out on the
+   1RM tab and typing it back in here, which is the trip this exists to
+   save. No second curve, and nothing new to disagree with the first.
+
+   The two routes keep their own fields, so the switch loses nothing and
+   imposes nothing on a number somebody already typed, and the answer names
+   the route it came from: a card reading "150 kg" when you entered 5 × 135
+   is a verdict you cannot check by hand. Rep-count standards have no max
+   to estimate and never see the switch at all.                           */
 
 /* A tier's colour is `--tier-<level>`, defined per theme in the THEMES block
    of styles.css, a variable rather than a hex, because a tier name has to
@@ -3724,9 +3740,29 @@ function stdRank(thresholds, value) {
 /* a rep count is a whole number of finished reps, so half a rep is no rep */
 const stdValueOf = (ex, raw) => (ex && ex.reps ? Math.floor(+decimalize(raw)) : +decimalize(raw));
 
+/* Which way the lift is being written down. A rep-count standard has no max
+   to estimate, so it is never asked, and a mode left over from the last lift
+   cannot follow you into one. */
+const stdMode = (f, ex) => (ex && ex.reps ? "1rm" : f && f.mode === "set" ? "set" : "1rm");
+
+/* What a set is worth as a max, read off the two boxes exactly as typed:
+   est1RM is the log's own curve and Math.round is the 1RM tab's own rounding,
+   so this cannot drift from either. It asks nothing about WHICH lift, which is
+   why the readout beside the boxes fills in before one has been picked. */
+const stdSetMax = (f) => est1RM(+decimalize(f.setWeight), Math.round(+decimalize(f.setReps)));
+
+/* THE number the tables are then read with, whichever route it arrived by,
+   and null until there is one. */
+function stdLiftValue(f, ex) {
+  if (!ex) return null;
+  if (stdMode(f, ex) === "set") return stdSetMax(f);
+  const v = stdValueOf(ex, f.lift);
+  return v > 0 ? v : null;
+}
+
 const stdReady = (f) => {
   const ex = f && f.slug ? STD_BY_SLUG[f.slug] : null;
-  return !!ex && !!f.sex && +decimalize(f.bw) > 0 && stdValueOf(ex, f.lift) > 0;
+  return !!ex && !!f.sex && +decimalize(f.bw) > 0 && (stdLiftValue(f, ex) || 0) > 0;
 };
 
 /* The answer, worked out once and then held in ui.stdResult: it carries the
@@ -3736,14 +3772,19 @@ function stdCheck(f, unit) {
   if (!stdReady(f)) return null;
   const ex = STD_BY_SLUG[f.slug];
   const bw = +decimalize(f.bw);
-  const value = stdValueOf(ex, f.lift);
+  const value = stdLiftValue(f, ex);
+  /* the set it was worked out FROM, or null when a max was typed straight in.
+     The card names it, so the verdict can always be checked by hand. */
+  const set = stdMode(f, ex) === "set"
+    ? { reps: Math.round(+decimalize(f.setReps)), weight: +decimalize(f.setWeight) }
+    : null;
   const th = stdThresholds(ex, f.sex, convertWeight(bw, unit, "kg"), unit);
   const rank = stdRank(th, value);
   const nextI = rank + 1 < STD_LEVELS.length ? rank + 1 : null;
   const floor = rank >= 0 ? th[rank] : 0;
   const span = nextI == null ? 0 : th[nextI] - floor;
   return {
-    slug: ex.slug, reps: !!ex.reps, sex: f.sex, unit, bw, value, th, rank, nextI,
+    slug: ex.slug, reps: !!ex.reps, sex: f.sex, unit, bw, value, set, th, rank, nextI,
     toGo: nextI == null ? null : Math.round((th[nextI] - value) * 10) / 10,
     progress: nextI == null ? 1 : span > 0 ? Math.min(1, Math.max(0, (value - floor) / span)) : 1,
   };
@@ -3783,6 +3824,9 @@ function stdForm() {
       slug: null, sex: state.settings.sex || "",
       bw: last ? String(last.weight) : "", bwFrom: last ? last.date : null,
       lift: "", liftFromLog: false,
+      /* the set route's own two boxes, kept clear of `lift` so that flipping
+         the switch is never a decision about a number somebody typed */
+      mode: "1rm", setReps: "", setWeight: "",
     };
   }
   return ui.std;
@@ -3799,10 +3843,39 @@ function renderProgStandards(log, library, unit) {
   const ex = f.slug ? STD_BY_SLUG[f.slug] : null;
   const res = ui.stdResult;
   const ready = stdReady(f);
+  const mode = stdMode(f, ex);
 
   const liftHint = ex && ex.reps ? T("std.repsHint")
     : f.liftFromLog ? T("std.liftFromLog")
     : ex ? T("std.liftHint") : "";
+
+  /* THE SET ROUTE'S PAYOFF, and the only reason the switch is worth a row of
+     the form: the max is on screen the moment both boxes are filled in, so
+     the answer to "what is my 1RM" never costs a trip to another tab. Label
+     and number, nothing else; the curve explains itself in Home, once.
+     Patched in place while typing, like the two hints, see handleBind. */
+  const est = mode === "set" ? stdSetMax(f) : null;
+  const estRow = `<div style="display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:10px 12px;margin-bottom:12px;border-radius:10px;background:var(--surface2);border:1px solid var(--border-soft)">
+    <span class="pb-label">${T("entry.est1rm", { unit })}</span>
+    <span id="stdEst" class="pb-num" style="font-size:17px;font-weight:700;color:${est ? "var(--gold)" : "var(--faint)"}">${est ? trimNum(est) : "—"}</span>
+  </div>`;
+
+  /* Reps then weight, the order every other set in the app is typed and read
+     in (setForm, setLine), not the calculator tab's order: what is being
+     written down here is a set somebody did, not a sum. */
+  const liftFields = mode === "set"
+    ? `<div style="display:flex;gap:10px">
+        <div style="flex:1">${field(T("std.setReps"),
+          `<input class="pb-input" ${NUM} data-bind="std.setReps" value="${esc(f.setReps)}" placeholder="—">`)}</div>
+        <div style="flex:1">${field(T("std.setWeight", { unit }),
+          `<input class="pb-input" ${NUM} data-bind="std.setWeight" value="${esc(f.setWeight)}" placeholder="—">`)}</div>
+      </div>
+      ${estRow}`
+    : field(ex && ex.reps ? T("std.bestReps") : T("std.best", { unit }),
+        `<input class="pb-input" ${NUM} data-bind="std.lift" value="${esc(f.lift)}" placeholder="—">`,
+        /* patched in place while typing, like the bodyweight hint above it,
+           see handleBind */
+        `<span id="stdLiftHint">${liftHint}</span>`);
 
   const form = `<div class="pb-card" style="padding:14px;margin-bottom:16px">
     <div class="pb-label" style="margin-bottom:6px">${T("std.lift")}</div>
@@ -3820,17 +3893,15 @@ function renderProgStandards(log, library, unit) {
     ${segControl("std-sex", f.sex, [["male", T("std.male")], ["female", T("std.female")]])}
     ${f.sex ? "" : `<div style="font-size:11.5px;color:var(--faint);margin:-8px 0 12px">${T("std.sexHint")}</div>`}
 
-    <div style="display:flex;gap:10px">
-      <div style="flex:1">${field(T("std.bodyweight", { unit }),
-        `<input class="pb-input" ${NUM} data-bind="std.bw" value="${esc(f.bw)}" placeholder="—">`,
-        `<span id="stdBwHint">${f.bwFrom ? T("std.bwFrom", { date: fmtShort(f.bwFrom) })
-          : f.bw ? "" : T("std.bwNone")}</span>`)}</div>
-      <div style="flex:1">${field(ex && ex.reps ? T("std.bestReps") : T("std.best", { unit }),
-        `<input class="pb-input" ${NUM} data-bind="std.lift" value="${esc(f.lift)}" placeholder="—">`,
-        /* patched in place while typing, like the bodyweight hint beside it,
-           see handleBind */
-        `<span id="stdLiftHint">${liftHint}</span>`)}</div>
-    </div>
+    ${field(T("std.bodyweight", { unit }),
+      `<input class="pb-input" ${NUM} data-bind="std.bw" value="${esc(f.bw)}" placeholder="—">`,
+      `<span id="stdBwHint">${f.bwFrom ? T("std.bwFrom", { date: fmtShort(f.bwFrom) })
+        : f.bw ? "" : T("std.bwNone")}</span>`)}
+
+    ${ex && ex.reps ? "" : `<div class="pb-label" style="margin-bottom:6px">${T("std.mode")}</div>
+      ${segControl("std-mode", mode, [["1rm", T("std.mode1rm")], ["set", T("std.modeSet")]])}`}
+
+    ${liftFields}
 
     <button id="stdCheckBtn" data-action="std-check" ${ready ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:14px 0;font-size:15.5px;margin-top:2px;opacity:${ready ? 1 : 0.45}">
       ${icon("gauge", 17)} ${T("std.check")}
@@ -3879,6 +3950,10 @@ function renderProgStandards(log, library, unit) {
       <div style="font-size:12.5px;color:var(--muted);margin-top:7px">
         ${res.reps
           ? T("std.fromReps", { name: esc(stdName(resEx)), reps: TN("rep", res.value), bw: trimNum(res.bw), unit: res.unit })
+          : res.set
+          /* the set, the max it came to, and the bodyweight it was read at:
+             a rank quoting a number nobody typed cannot be checked by hand */
+          ? T("std.fromSet", { name: esc(stdName(resEx)), reps: res.set.reps, weight: trimNum(res.set.weight, 2), value: trimNum(res.value), unit: res.unit, bw: trimNum(res.bw) })
           : T("std.from", { name: esc(stdName(resEx)), value: trimNum(res.value), unit: res.unit, bw: trimNum(res.bw) })}
       </div>
       <div style="display:flex;align-items:center;gap:9px;margin-top:11px">
@@ -8007,6 +8082,16 @@ const actions = {
        settings.sex in defaultState() for why it isn't in Profile */
     patch({ settings: { ...state.settings, sex } });
   },
+  /* Each route keeps its own boxes, so this carries nothing across and
+     overwrites nothing: flip back and what you typed is still there. The
+     answer goes, because it was worked out from the other one. */
+  "std-mode": (el) => {
+    const f = stdForm();
+    if (f.mode === el.dataset.id) return;
+    f.mode = el.dataset.id;
+    ui.stdResult = null;
+    render();
+  },
   "std-pick-open": () => { ui.stdQ = ""; ui.stdPick = true; render(); },
   "std-pick-close": () => { ui.stdPick = false; render(); },
   "std-pick": (el) => {
@@ -8016,6 +8101,11 @@ const actions = {
     const best = stdBestFromLog(f.slug, state.log, state.library);
     f.lift = best == null ? "" : String(best);
     f.liftFromLog = best != null;
+    /* The number belongs to the lift, which is why the line above resets it to
+       the log's best or to nothing at all. The set route has no per-lift
+       pre-fill to offer, so it resets to nothing: 5 × 135 left over from the
+       bench press is not a claim about the squat you just picked. */
+    f.setReps = ""; f.setWeight = "";
     ui.stdResult = null;
     ui.stdPick = false;
     render();
@@ -8930,6 +9020,16 @@ function handleBind(el) {
       setHint("stdLiftHint", ex && ex.reps ? T("std.repsHint") : T("std.liftHint"));
     }
     if (key === "bw" && f.bwFrom) { f.bwFrom = null; setHint("stdBwHint", ""); }
+    /* the max beside the two set boxes is the whole reason the set route
+       exists, so it answers the keystroke rather than waiting for a render */
+    if (key === "setReps" || key === "setWeight") {
+      const out = document.getElementById("stdEst");
+      if (out) {
+        const est = stdSetMax(f);
+        out.textContent = est ? trimNum(est) : "—";
+        out.style.color = est ? "var(--gold)" : "var(--faint)";
+      }
+    }
     const btn = document.getElementById("stdCheckBtn");
     if (btn) { const ok = stdReady(f); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
   } else if (bind === "goal") {

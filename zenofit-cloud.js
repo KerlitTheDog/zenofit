@@ -235,6 +235,44 @@
     catch { return false; }
   }
 
+  /* ---- sync transport ------------------------------------------------------
+   *
+   * Deliberately dumb. These two move rows and nothing else: no merge policy,
+   * no field knowledge, no retry queue. What a log entry means and which of
+   * two edits wins belongs to app.js, and having a second answer to that here
+   * is how the two halves end up disagreeing.
+   *
+   * Unlike the rest of this file these DO throw, because the caller has to be
+   * able to tell the failures apart. The error carries .status and .code:
+   *   403 read_only   a read grant tried to write
+   *   404 not_found   no access, or the profile is gone
+   *   400 bad_item    message names the collection and item
+   *   413 too_large   too much in one push
+   */
+
+  /* since: pass the cursor from the previous pull. A bare millisecond is the
+     entry point for a first pull only, because rows written in the same
+     millisecond cannot be separated by one. */
+  function pullChanges(profileId, since) {
+    const q = new URLSearchParams();
+    if (typeof since === "string" && since) q.set("cursor", since);
+    else if (Number.isFinite(since) && since > 0) q.set("since", String(since));
+    else if (since && typeof since === "object") {
+      if (since.cursor) q.set("cursor", since.cursor);
+      else if (Number.isFinite(since.since)) q.set("since", String(since.since));
+      if (Number.isFinite(since.limit)) q.set("limit", String(since.limit));
+    }
+    const qs = q.toString();
+    return call("GET", "/v1/profiles/" + profileId + "/changes" + (qs ? "?" + qs : ""));
+  }
+
+  /* items: [{collection, itemId, json, deleted?, clientUpdatedAt?}]
+     The response reports `accepted`, and `staleItems` for anything refused
+     because the stored copy carried a newer clientUpdatedAt. */
+  function pushChanges(profileId, items) {
+    return call("POST", "/v1/profiles/" + profileId + "/items", { items: items });
+  }
+
   /* ---- profiles and seeds -------------------------------------------------- */
 
   const listProfiles   = () => call("GET", "/v1/profiles");
@@ -255,6 +293,7 @@
     isStandalone, isIOS, pushBlockedReason,
     enablePush, disablePush, pushEnabled, testPush,
     scheduleTimer, cancelTimer, clockDrift,
+    pullChanges, pushChanges,
     listProfiles, createProfile, renameProfile, deleteProfile,
     listSeeds, createSeed, rotateSeeds, revokeSeed, joinWithSeed,
     listGrants, revokeGrant,

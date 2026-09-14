@@ -18,6 +18,11 @@
 import { newSeed, normalizeSeed } from "./seeds.js";
 import { accessFor, canRead, canWrite, canAdmin } from "./access.js";
 import { sendToUser } from "./push.js";
+import {
+  validateItem, encodeCursor, decodeCursor,
+  MAX_ITEMS_PER_PUSH, MAX_PUSH_BODY_BYTES,
+  PAGE_DEFAULT, PAGE_MAX, PAGE_BYTE_BUDGET, BATCH_CHUNK,
+} from "./sync.js";
 export { TimerAlarm } from "./timer.js";
 
 const JOIN_WINDOW_MS = 60_000;
@@ -125,6 +130,13 @@ async function joinRateLimited(env, userId) {
   await env.DB.prepare("UPDATE join_attempts SET count = count + 1 WHERE user_id = ?")
     .bind(userId).run();
   return false;
+}
+
+/* A row whose json will not parse is a row we wrote wrong. Returning null
+   keeps the feed moving instead of failing a whole page over one bad item. */
+function safeParse(text) {
+  if (text == null) return null;
+  try { return JSON.parse(text); } catch { return null; }
 }
 
 /* ---- routes --------------------------------------------------------------- */
@@ -508,6 +520,190 @@ async function route(request, env, url) {
 
     await env.DB.prepare("UPDATE timers SET status = 'cancelled' WHERE id = ?").bind(timerId).run();
     return json({ timerId, cancelled: true });
+  }
+
+  /* ---- sync ---------------------------------------------------------------
+   *
+   * Two routes, and between them they are the whole transport. They carry no
+   * merge policy: what a log entry means, and which of two edits wins, is the
+   * app's decision. A server holding a second opinion about that is how two
+   * systems end up disagreeing.
+   *
+   * What the server does insist on:
+   *   - items.updated_at is the SERVER's clock. A phone here was 2.8 seconds
+   *     off, and client-stamped ordering hands the win to whichever device is
+   *     most wrong.
+   *   - a delete is a row with deleted = 1, never a missing row. The app
+   *     deletes by filtering an array, so an entry that vanished locally but
+   *     still exists on the other phone would otherwise be pushed back.
+   *   - the allowlist is closed, so "sync the profile" can never quietly grow
+   *     into "sync the half-typed form and the device's theme".
+   */
+
+  if (seg[0] === "v1" && seg[1] === "profiles" && seg[2] && seg[3] === "changes" &&
+      seg.length === 4 && method === "GET") {
+    const { level, profile } = await accessFor(env, user.id, seg[2]);
+    if (!canRead(level)) return gone();
+
+    const limit = Math.min(PAGE_MAX, Math.max(1, Number(url.searchParams.get("limit")) || PAGE_DEFAULT));
+    const cursorParam = url.searchParams.get("cursor");
+    const cursor = cursorParam ? decodeCursor(cursorParam) : null;
+    if (cursorParam && !cursor) return fail(400, "bad_cursor", "That cursor is not readable.");
+
+    /* A cursor resumes at an exact row. `since` is the cruder entry point for
+       a first pull: a bare millisecond cannot separate rows that share it, so
+       a since-pull may repeat the rows on its boundary. Repeats are harmless,
+       because the client upserts, and losses are not, so the comparison leans
+       that way deliberately. Carry the cursor back for every later pull. */
+    const sinceMs = cursor ? cursor.updatedAt
+                           : Math.max(0, Number(url.searchParams.get("since")) || 0);
+    const afterCol = cursor ? cursor.collection : "";
+    const afterId = cursor ? cursor.itemId : "";
+
+    const res = await env.DB.prepare(
+      "SELECT collection, item_id, json, updated_at, deleted, client_updated_at FROM items " +
+      "WHERE profile_id = ? AND (" +
+      "  updated_at > ? OR (updated_at = ? AND (collection > ? OR (collection = ? AND item_id > ?)))" +
+      ") ORDER BY updated_at, collection, item_id LIMIT ?"
+    ).bind(profile.id, sinceMs, sinceMs, afterCol, afterCol, afterId, limit + 1).all();
+
+    const rows = res.results || [];
+    const moreByCount = rows.length > limit;
+    const page = moreByCount ? rows.slice(0, limit) : rows;
+
+    /* Capped by bytes as well as by count. Two hundred library rows with
+       photos in them is not a response anyone wants on mobile data. */
+    const items = [];
+    let bytes = 0;
+    let truncated = false;
+    for (const r of page) {
+      const size = (r.json ? r.json.length : 0) + 64;
+      if (items.length && bytes + size > PAGE_BYTE_BUDGET) { truncated = true; break; }
+      bytes += size;
+      items.push({
+        collection: r.collection,
+        itemId: r.item_id,
+        json: r.deleted ? null : safeParse(r.json),
+        updatedAt: r.updated_at,
+        clientUpdatedAt: r.client_updated_at,
+        deleted: !!r.deleted,
+      });
+    }
+
+    const last = page[items.length - 1];
+    return json({
+      items,
+      cursor: last ? encodeCursor(last) : (cursorParam || null),
+      hasMore: truncated || moreByCount,
+      serverNow: Date.now(),
+      level,
+    });
+  }
+
+  if (seg[0] === "v1" && seg[1] === "profiles" && seg[2] && seg[3] === "items" &&
+      seg.length === 4 && method === "POST") {
+    const { level, profile } = await accessFor(env, user.id, seg[2]);
+
+    /* A read grant gets 403, not 404 and not a silent success. The holder is
+       not a stranger probing for ids, they are someone who was let in to look,
+       and saying so plainly is the point. A client-side check is a suggestion;
+       this is the thing that enforces it. */
+    if (!canRead(level)) return gone();
+    if (!canWrite(level)) {
+      return fail(403, "read_only", "You have read access to this profile, not write access.");
+    }
+
+    let body;
+    try { body = await readJson(request, MAX_PUSH_BODY_BYTES); }
+    catch { return fail(413, "too_large", "That push is too big. Send fewer items."); }
+
+    const incoming = Array.isArray(body.items) ? body.items : null;
+    if (!incoming) return fail(400, "bad_request", "Send { items: [...] }.");
+    if (incoming.length > MAX_ITEMS_PER_PUSH) {
+      return fail(400, "too_many", "At most " + MAX_ITEMS_PER_PUSH + " items per push.");
+    }
+    if (!incoming.length) {
+      return json({ accepted: 0, skipped: 0, staleItems: [], serverNow: Date.now() });
+    }
+
+    /* Validate everything before writing anything. A push that half-lands
+       leaves the client unable to say what it still owes. */
+    for (const item of incoming) {
+      const problem = validateItem(item);
+      if (problem) return fail(400, "bad_item", problem);
+    }
+
+    const now = Date.now();
+    const keyOf = (c, i) => JSON.stringify([c, i]);
+
+    /* The stale-push guard. Armed only for items that carry clientUpdatedAt,
+       so it does nothing until the app starts stamping its writes. It is not
+       a merge policy: it never combines anything, it only refuses to let the
+       stored row go backwards, which would otherwise strand a newer edit on
+       the device that made it until that device happened to write again. */
+    const stored = new Map();
+    const stamped = incoming.filter((i) => Number.isFinite(i.clientUpdatedAt));
+    for (let i = 0; i < stamped.length; i += BATCH_CHUNK) {
+      const chunk = stamped.slice(i, i + BATCH_CHUNK);
+      const found = await env.DB.batch(chunk.map((item) =>
+        env.DB.prepare(
+          "SELECT collection, item_id, client_updated_at FROM items " +
+          "WHERE profile_id = ? AND collection = ? AND item_id = ?"
+        ).bind(profile.id, item.collection, item.itemId)
+      ));
+      for (const r of found) {
+        const row = (r.results || [])[0];
+        if (row && row.client_updated_at != null) {
+          stored.set(keyOf(row.collection, row.item_id), row.client_updated_at);
+        }
+      }
+    }
+
+    const toWrite = [];
+    const stale = [];
+    for (const item of incoming) {
+      const ours = stored.get(keyOf(item.collection, item.itemId));
+      if (Number.isFinite(item.clientUpdatedAt) && ours != null && ours > item.clientUpdatedAt) {
+        stale.push({ collection: item.collection, itemId: item.itemId, storedClientUpdatedAt: ours });
+        continue;
+      }
+      toWrite.push(item);
+    }
+
+    /* D1 allows 100 bound parameters per query, so this cannot be one large
+       INSERT with a values list. One statement per item through batch() stays
+       inside that limit and is a single round trip per chunk. */
+    for (let i = 0; i < toWrite.length; i += BATCH_CHUNK) {
+      const chunk = toWrite.slice(i, i + BATCH_CHUNK);
+      await env.DB.batch(chunk.map((item) =>
+        env.DB.prepare(
+          "INSERT INTO items (profile_id, collection, item_id, json, updated_at, deleted, client_updated_at) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?) " +
+          "ON CONFLICT(profile_id, collection, item_id) DO UPDATE SET " +
+          "  json = excluded.json, updated_at = excluded.updated_at, " +
+          "  deleted = excluded.deleted, client_updated_at = excluded.client_updated_at"
+        ).bind(
+          profile.id, item.collection, item.itemId,
+          item.deleted ? null : JSON.stringify(item.json),
+          now,
+          item.deleted ? 1 : 0,
+          Number.isFinite(item.clientUpdatedAt) ? item.clientUpdatedAt : null
+        )
+      ));
+    }
+
+    if (toWrite.length) {
+      await env.DB.prepare("UPDATE profiles SET updated_at = ? WHERE id = ?")
+        .bind(now, profile.id).run().catch(() => {});
+    }
+
+    return json({
+      accepted: toWrite.length,
+      skipped: stale.length,
+      staleItems: stale,
+      updatedAt: now,
+      serverNow: now,
+    });
   }
 
   return fail(404, "not_found", "No route for " + method + " " + p);

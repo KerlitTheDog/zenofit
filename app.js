@@ -1915,7 +1915,7 @@ function closeEverything() {
   ui.profilesWin = false; ui.profileForm = null; ui.profileOrder = false;
   /* the sync sheets name a profile by id, so leaving one open across a
      switch would point them at somebody else's */
-  ui.syncSheet = null; ui.joinSheet = null; ui.syncError = null;
+  ui.syncSheet = null; ui.joinSheet = null; ui.syncError = null; ui.accountSheet = null;
 }
 
 function switchProfile(id) {
@@ -2268,6 +2268,29 @@ async function syncPush(localId) {
     syncSet(localId, { marks, lastPushedAt: Date.now() });
   }
   return { ok: true, sent, stale };
+}
+
+/* What the account has up there, for the list in the account sheet. Async
+   and fire-and-forget, like refreshGrants: a list that will not load leaves
+   a row saying so, never an error on top of a form somebody is still
+   filling in. Guarded on the sheet still being open and still being the
+   same one, because a round trip outlives a close. */
+function refreshCloudProfiles() {
+  const C = window.ZenofitCloud;
+  if (!ui.accountSheet || !C || !C.signedIn || !C.signedIn()) return;
+  ui.accountSheet = { ...ui.accountSheet, loading: true };
+  render();
+  C.listProfiles()
+    .then((res) => {
+      if (!ui.accountSheet) return;
+      ui.accountSheet = { ...ui.accountSheet, loading: false, cloud: (res && res.profiles) || [] };
+      render();
+    })
+    .catch(() => {
+      if (!ui.accountSheet) return;
+      ui.accountSheet = { ...ui.accountSheet, loading: false };
+      render();
+    });
 }
 
 /* Who is in, for the list in the share sheet. Its own function because it
@@ -2651,6 +2674,7 @@ const ui = {
   profileDraft: null,
   profilesWin: false,   // the profiles window (which training is on screen)
   profileForm: null,    // {id, name, mode:"add"|"rename"|"copy"} name editor
+  accountSheet: null,   // {username, password, free, cloud} sign in / sign up
   syncSheet: null,      // {localId, grants, code, copied} the share sheet
   joinSheet: null,      // {code, busy, error} redeeming somebody's code
   syncBusy: false,      // a pull or push is in flight
@@ -3184,6 +3208,7 @@ function render() {
   if (ui.showStorage) html += renderStorage();
   if (ui.profilesWin) html += renderProfilesWindow();
   if (ui.profileForm) html += renderProfileForm();
+  if (ui.accountSheet) html += renderAccountSheet();
   if (ui.syncSheet) html += renderSyncSheet();
   if (ui.joinSheet) html += renderJoinSheet();
   if (ui.showBody) html += renderBodyWindow(body, unit);
@@ -6876,6 +6901,11 @@ function bestEverBlock(m, ref, unit) {
     <div style="font-size:10px;line-height:1.35;margin-top:1px;color:${pr ? "var(--gold)" : "var(--faint)"}">${sub}</div>`;
 }
 
+/* Debounce for the is-this-name-free lookup, so a name is not asked about
+   once per keystroke. Module-level like the chart's gesture state: it belongs
+   to a field that is being typed in, not to anything persisted. */
+let acctNameTimer = null;
+
 /* What the open set editor is being measured against, worked out by
    renderSetForm and read back by updateSetPreview. Module-level and
    transient, like the chart's in-flight gesture state, rather than a field
@@ -7602,6 +7632,21 @@ function renderProfile(f) {
       <button data-action="save-profile" class="pb-btn pb-gold" style="padding:8px 16px;font-size:13.5px">${T("common.save")}</button>
     </div>
     <div class="pb-scroll" data-scrollkey="profile" style="flex:1;overflow-y:auto;padding:16px 16px calc(40px + var(--pb-sab))">
+      ${/* Above the profiles, because the account is what they hang off:
+            sign in and the ones you own are waiting on the other side. */
+        (() => {
+          const C = window.ZenofitCloud;
+          const who = C && C.account ? C.account() : null;
+          const name = who && who.username;
+          return `<button data-action="open-account" class="pb-card" style="width:100%;display:flex;align-items:center;gap:11px;padding:12px 14px;margin-bottom:10px;text-align:left;color:var(--text)">
+            ${icon(name ? "user-check" : "user", 18, `style="color:${name ? "var(--gold)" : "var(--faint)"};flex-shrink:0"`)}
+            <span style="flex:1;min-width:0">
+              <span class="pb-label" style="display:block;margin-bottom:2px">${T("acct.title")}</span>
+              <span style="display:block;font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:${name ? "var(--text)" : "var(--faint)"}">${name ? esc(name) : T("acct.notSignedIn")}</span>
+            </span>
+            ${icon("chevron-right", 15, 'style="color:var(--faint);flex-shrink:0"')}
+          </button>`;
+        })()}
       ${(() => {
         const list = profileList(), i = list.findIndex((p) => p.id === activeProfileId());
         return `<button data-action="open-profiles" class="pb-card" style="width:100%;display:flex;align-items:center;gap:11px;padding:12px 14px;margin-bottom:16px;text-align:left;color:var(--text)">
@@ -7865,15 +7910,100 @@ function renderSyncSheet() {
   return sheet(T("sync.title", { name: esc(profileLabel(list[i], i)) }), "syncSheet", body, 122);
 }
 
+/* ── THE ACCOUNT, AND THE PROFILES UNDER IT ──────────────────────────
+   One sheet doing two jobs, because signing in and signing up are the
+   same two fields and making somebody choose a tab first is a decision
+   about our database, not about them. The button says which it will be,
+   and it says so from what the name currently is: a name nobody has taken
+   offers to make it, a name that exists offers to sign in to it.
+
+   Signing in does NOT drag anybody's training onto this phone. It tells
+   you what is up there and lets you pick, one profile at a time, because
+   a phone that suddenly holds four people's logs because somebody logged
+   in is a phone nobody asked for. */
+function renderAccountSheet() {
+  const f = ui.accountSheet;
+  const C = window.ZenofitCloud;
+  const acct = C && C.account ? C.account() : null;
+  const me = acct && acct.username;
+
+  if (!C) {
+    return sheet(T("acct.title"), "accountSheet",
+      `<div style="font-size:12.5px;color:var(--faint);line-height:1.6">${T("sync.noClient")}</div>`, 124);
+  }
+
+  /* ── signed in: who you are, and what is waiting ── */
+  if (me) {
+    const list = f.cloud || [];
+    const linked = new Set(Object.values(syncAll()).map((r) => r && r.remoteId).filter(Boolean));
+    const rows = list.length
+      ? list.map((p, i) => {
+          const here = linked.has(p.profileId);
+          return `<div style="display:flex;align-items:center;gap:10px;padding:11px 12px;border-bottom:${i < list.length - 1 ? "1px solid var(--border-soft)" : "none"}">
+            <span style="flex:1;min-width:0">
+              <span style="display:block;font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p.name || T("sync.joinedName"))}</span>
+              <span style="display:block;font-size:11px;color:var(--faint)">${T(p.isOwner ? "acct.owned" : p.level === "read" ? "sync.levelRead" : "sync.levelWrite")}</span>
+            </span>
+            ${here
+              ? `<span style="flex-shrink:0;font-size:11.5px;color:var(--green);font-weight:600">${T("acct.onThisPhone")}</span>`
+              : `<button data-action="acct-pull" data-p="${esc(p.profileId)}" data-n="${esc(p.name || "")}" class="pb-btn pb-ghost" style="flex-shrink:0;padding:7px 12px;font-size:12px;color:var(--gold);border-color:rgba(233,185,73,.4)">${icon("cloud-download", 13)} ${T("acct.getIt")}</button>`}
+          </div>`;
+        }).join("")
+      : `<div style="padding:14px;font-size:12px;color:var(--faint);line-height:1.5">${T(f.loading ? "acct.looking" : "acct.noneUp")}</div>`;
+
+    return sheet(T("acct.title"), "accountSheet", `
+      <div class="pb-card2" style="padding:12px 14px;margin-bottom:16px">
+        <div class="pb-label">${T("acct.signedInAs")}</div>
+        <div class="pb-num" style="font-size:19px;font-weight:700;color:var(--gold);line-height:1.2;word-break:break-all">${esc(me)}</div>
+      </div>
+      ${sectionTitle(T("acct.yourProfiles"), f.loading ? `<span style="font-size:11px;color:var(--faint)">${T("sync.working")}</span>` : "")}
+      <div class="pb-card" style="overflow:hidden;margin-bottom:10px">${rows}</div>
+      <div style="font-size:11.5px;color:var(--faint);margin-bottom:16px;line-height:1.55">${T("acct.pullHint")}</div>
+      <div class="pb-hairline" style="margin:16px 0"></div>
+      <button data-action="acct-signout" class="pb-btn" style="width:100%;padding:12px 0;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">
+        ${icon("log-out", 15)} ${T("acct.signOut")}
+      </button>
+      <div style="font-size:11.5px;color:var(--faint);margin-top:10px;line-height:1.55">${T("acct.signOutHint")}</div>
+    `, 124);
+  }
+
+  /* ── signed out: name, password, one button ── */
+  const name = (f.username || "").trim();
+  const pw = f.password || "";
+  const nameOk = /^[a-zA-Z0-9][a-zA-Z0-9._-]{2,23}$/.test(name);
+  const ok = nameOk && pw.length >= 8 && !f.busy;
+  /* `free` is null until the server has answered, so the button does not
+     flicker between "sign in" and "create" while somebody is still typing */
+  const free = f.free;
+  const label = f.busy ? "acct.working" : free === true ? "acct.createBtn" : free === false ? "acct.signInBtn" : "acct.continueBtn";
+
+  return sheet(T("acct.title"), "accountSheet", `
+    <div style="font-size:12.5px;color:var(--faint);line-height:1.6;margin-bottom:16px">${T("acct.intro")}</div>
+    ${field(T("acct.username"),
+      `<input class="pb-input" data-bind="acctName" value="${esc(f.username)}" placeholder="${esc(T("acct.usernamePh"))}" autocapitalize="none" autocorrect="off" autocomplete="username" spellcheck="false" maxlength="24" data-autofocus>`,
+      name && !nameOk ? T("acct.nameRules") : free === false ? T("acct.nameTaken") : free === true ? T("acct.nameFree") : T("acct.nameHint"))}
+    ${field(T("acct.password"),
+      `<input class="pb-input" type="password" data-bind="acctPass" value="${esc(pw)}" autocapitalize="none" autocorrect="off" autocomplete="current-password" spellcheck="false">`,
+      T("acct.passwordHint"))}
+    ${f.error ? `<div style="font-size:12.5px;color:var(--red);margin:-4px 0 12px;line-height:1.5">${esc(f.error)}</div>` : ""}
+    <button data-action="acct-go" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
+      ${icon("log-in", 16)} ${T(label)}
+    </button>
+    <div style="font-size:11.5px;color:var(--faint);margin-top:12px;line-height:1.55">${T("acct.warning")}</div>
+  `, 124);
+}
+
 /* The other end of the same code. A joined profile is a NEW local profile,
    never a merge into one you already have: her training arriving on top of
    yours, silently interleaved, is the one outcome nobody could undo. */
 function renderJoinSheet() {
   const f = ui.joinSheet;
-  const ok = (f.code || "").trim().length >= 4 && !f.busy;
+  /* a seed is exactly ten characters, so anything shorter is half-typed
+     rather than wrong, and the button simply waits rather than scolding */
+  const ok = (f.code || "").replace(/-/g, "").length === 10 && !f.busy;
   return sheet(T("sync.joinTitle"), "joinSheet", `
     ${field(T("sync.joinLabel"),
-      `<input class="pb-input pb-num" data-bind="joinCode" value="${esc(f.code)}" placeholder="XXXX-XXXX-XX" autocapitalize="characters" autocomplete="off" spellcheck="false" style="letter-spacing:.1em;font-weight:700" data-autofocus>`,
+      `<input class="pb-input pb-num" data-bind="joinCode" value="${esc(f.code)}" placeholder="XXXX-XXXX-XX" maxlength="12" inputmode="text" autocapitalize="characters" autocorrect="off" autocomplete="off" spellcheck="false" style="letter-spacing:.14em;font-weight:700;text-transform:uppercase" data-autofocus>`,
       T("sync.joinHint"))}
     ${f.error ? `<div style="font-size:12.5px;color:var(--red);margin:-4px 0 12px;line-height:1.5">${esc(f.error)}</div>` : ""}
     <button data-action="join-go" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
@@ -8835,6 +8965,72 @@ const actions = {
   "export-data": () => exportBackup(),
   "share-data": () => shareBackup(),
   "open-storage": () => { ui.showStorage = true; render(); },
+  /* ── the account ─────────────────────────────────────────────────── */
+  "open-account": () => {
+    ui.profileForm = null;
+    ui.accountSheet = { username: "", password: "", free: null, busy: false, error: null, cloud: [], loading: false };
+    render();
+    refreshCloudProfiles();
+  },
+
+  /* One button, because "sign in" and "sign up" are the same two fields and
+     the server already knows which this is. A name nobody has taken is a
+     registration; anything else is a login, and a login that is wrong says
+     so rather than quietly creating a second account beside the first. */
+  "acct-go": async () => {
+    const f = ui.accountSheet;
+    const C = window.ZenofitCloud;
+    if (!f || f.busy || !C) return;
+    const username = (f.username || "").trim();
+    const password = f.password || "";
+    ui.accountSheet = { ...f, busy: true, error: null }; render();
+    try {
+      /* asked fresh rather than trusting what the field last saw: somebody
+         else may have taken the name in the seconds since */
+      let free = f.free;
+      try { free = (await C.nameAvailable(username)).available; } catch { /* decide from the attempt instead */ }
+      if (free) await C.register(username, password);
+      else await C.signIn(username, password);
+      ui.accountSheet = { ...ui.accountSheet, busy: false, password: "", free: null, error: null };
+      render();
+      refreshCloudProfiles();
+    } catch (e) {
+      const code = e && e.code;
+      ui.accountSheet = { ...ui.accountSheet, busy: false, error: T(
+        code === "bad_login" ? "acct.errWrong"
+        : code === "name_taken" ? "acct.errTaken"
+        : code === "bad_username" ? "acct.nameRules"
+        : code === "already_claimed" ? "acct.errClaimed"
+        : "acct.errFailed") };
+      render();
+    }
+  },
+
+  /* Signing out forgets the credential and nothing else. Every profile on
+     this phone stays exactly where it is, including synced ones — they
+     simply stop syncing until somebody signs in again. Deleting training
+     because a session ended is not a thing this app will ever do. */
+  "acct-signout": () => {
+    const C = window.ZenofitCloud;
+    if (!C || !confirm(T("acct.confirmSignOut"))) return;
+    C.signOut();
+    ui.accountSheet = { username: "", password: "", free: null, busy: false, error: null, cloud: [], loading: false };
+    render();
+  },
+
+  /* Bring one down as a NEW local profile, the same rule joining follows:
+     never merged into one that already holds somebody's training. */
+  "acct-pull": async (el) => {
+    const f = ui.accountSheet;
+    if (!f || f.busy) return;
+    const remoteId = el.dataset.p;
+    const localId = addProfile(el.dataset.n || T("sync.joinedName"));
+    if (!localId) { ui.accountSheet = { ...f, error: T("profiles.quota") }; render(); return; }
+    syncSet(localId, { remoteId, level: "write", marks: {}, cursor: null });
+    ui.accountSheet = null;
+    switchProfile(localId);
+    await syncNow(localId);
+  },
   /* ── sharing a profile ───────────────────────────────────────────────
      Every one of these talks to a network, so every one of them can fail
      with the app still on screen and still usable. They report and stop;
@@ -10229,6 +10425,7 @@ const READ_OK = new Set([
   "profile-menu", "profile-add", "profile-duplicate", "profile-delete", "profile-form-save",
   "profiles-reorder",
   "open-sync", "sync-now", "sync-disable", "sync-copy-code",
+  "open-account", "acct-go", "acct-signout", "acct-pull",
   "open-join", "join-go", "open-push-test",
   "chart-zoom-in", "chart-zoom-out", "chart-reset", "chart-full", "chart-exit-full", "chart-pick",
   "select-progress", "ex-hist-all", "open-preset", "plan-open", "plan-result-close",
@@ -10316,12 +10513,77 @@ function handleBind(el) {
     }
     const btn = document.getElementById("stdCheckBtn");
     if (btn) { const ok = stdReady(f); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
+  } else if (bind === "acctName") {
+    /* Lower-cased as it is typed, because that is what it will be compared
+       as anyway (username_lc), and a name that reads back differently from
+       what you signed up with is a name you will mistrust. */
+    const clean = v.toLowerCase().replace(/[^a-z0-9._-]/g, "").slice(0, 24);
+    if (el.value !== clean) {
+      const pos = Math.max(0, (el.selectionStart || 0) - (v.length - clean.length));
+      el.value = clean;
+      try { el.setSelectionRange(pos, pos); } catch { /* not a text field */ }
+    }
+    ui.accountSheet = { ...ui.accountSheet, username: clean, free: null, error: null };
+    /* Asked while typing, and only once it could possibly be valid. The
+       answer decides whether the button offers to sign in or to create, so
+       it has to arrive before the button is pressed, not after. */
+    clearTimeout(acctNameTimer);
+    if (/^[a-z0-9][a-z0-9._-]{2,23}$/.test(clean)) {
+      const asked = clean;
+      acctNameTimer = setTimeout(() => {
+        const C = window.ZenofitCloud;
+        if (!C || !C.nameAvailable) return;
+        C.nameAvailable(asked).then((r) => {
+          /* the field has moved on: this answer is about a name nobody is
+             looking at any more */
+          if (!ui.accountSheet || ui.accountSheet.username !== asked) return;
+          ui.accountSheet = { ...ui.accountSheet, free: !!r.available };
+          render();
+        }).catch(() => { /* the attempt itself will say */ });
+      }, 450);
+    } else render();
+  } else if (bind === "acctPass") {
+    ui.accountSheet = { ...ui.accountSheet, password: v, error: null };
+    const btn = document.querySelector('[data-action="acct-go"]');
+    const ok = /^[a-z0-9][a-z0-9._-]{2,23}$/.test(ui.accountSheet.username || "") && v.length >= 8;
+    if (btn) { btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
   } else if (bind === "joinCode") {
-    /* typed in upper case whatever the keyboard did, since that is how the
-       code is printed on the other phone and a seed is case-sensitive */
-    ui.joinSheet = { ...ui.joinSheet, code: v.toUpperCase(), error: null };
+    /* ── TYPING A CODE SOMEBODY READ OUT TO YOU ────────────────────────
+       The seed is printed XXXX-XXXX-XX and it is usually being copied off
+       another phone held next to yours, a character at a time, often by
+       somebody reading it aloud. So the field does the shape: upper case
+       whatever the keyboard felt like, dashes appearing on their own after
+       the fourth and eighth character, and nothing accepted past the tenth.
+
+       The server is already forgiving about all of this (normalizeSeed
+       takes lower case, missing dashes, and even the letters the alphabet
+       excludes), so none of this is required to make a code work. It is
+       here so the thing you are typing LOOKS like the thing you are
+       reading, which is what stops you losing your place halfway through.
+
+       The caret is put back deliberately rather than left to the browser:
+       rewriting `value` sends it to the end, which on a phone means the
+       cursor jumping past a dash the field just inserted, and then a
+       backspace deletes the wrong character. */
+    const raw = v.toUpperCase().replace(/[^0-9A-Z]/g, "").slice(0, 10);
+    const pretty = raw.length > 8 ? raw.slice(0, 4) + "-" + raw.slice(4, 8) + "-" + raw.slice(8)
+      : raw.length > 4 ? raw.slice(0, 4) + "-" + raw.slice(4)
+      : raw;
+    if (el.value !== pretty) {
+      /* how many real characters sat before the caret, counted without the
+         dashes, so it lands in the same place in the new string */
+      const before = el.value.slice(0, el.selectionStart || 0).replace(/[^0-9A-Z]/gi, "").length;
+      el.value = pretty;
+      let at = 0, seen = 0;
+      while (at < pretty.length && seen < before) { if (pretty[at] !== "-") seen++; at++; }
+      /* and never in front of a dash the field just added, or the next
+         keystroke types on the wrong side of it */
+      while (pretty[at] === "-") at++;
+      try { el.setSelectionRange(at, at); } catch { /* not a text field */ }
+    }
+    ui.joinSheet = { ...ui.joinSheet, code: pretty, error: null };
     const btn = document.querySelector('[data-action="join-go"]');
-    if (btn) { const ok = ui.joinSheet.code.trim().length >= 4; btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
+    if (btn) { const ok = raw.length === 10; btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
   } else if (bind === "goal") {
     ui.goalVal = v;
   } else if (bind === "volGoal") {

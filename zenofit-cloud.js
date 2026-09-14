@@ -18,7 +18,12 @@
 (function () {
   "use strict";
 
-  const API = "https://zenofit-api.kerlit.workers.dev";
+  /* The deployed worker, unless somebody deliberately pointed this build at
+     a local one first (window.ZENOFIT_API = "http://127.0.0.1:8787" before
+     this script loads). That override exists so a change to the API can be
+     driven from a real browser against `wrangler dev` before it is anywhere
+     near the live database; nothing in the app ever sets it. */
+  const API = (typeof window !== "undefined" && window.ZENOFIT_API) || "https://zenofit-api.kerlit.workers.dev";
   const DEVICE_KEY = "zenofit:device";
   const PUSH_KEY = "zenofit:push";
 
@@ -78,6 +83,82 @@
   }
 
   const hasDevice = () => !!(read(DEVICE_KEY) || {}).token;
+
+  /* ---- accounts -----------------------------------------------------------
+   * A username and a password, and the password never leaves this file.
+   *
+   * WHY THE BROWSER DOES THE EXPENSIVE PART. A password has to be slow to
+   * check or a leaked table is a list of passwords, and the Worker running
+   * the other end of this gets TEN MILLISECONDS of CPU per request on the
+   * free plan — less than PBKDF2 needs at any honest iteration count. So the
+   * stretching happens here, where the CPU is the user's and free, and what
+   * goes over the wire is 256 bits of derived key. The server salts and
+   * hashes that once more before storing it, which is cheap and sound
+   * because the thing it is hashing is no longer guessable.
+   *
+   * THE SALT IS THE USERNAME, lower-cased. A random salt would have to be
+   * fetched before a login could be attempted, which is a second round trip
+   * and an endpoint that answers "does this account exist" to anybody who
+   * asks. Deriving it from the username costs the ability to tell two
+   * identical passwords apart across accounts, which is not a property worth
+   * a round trip here, and usernames are unique so no two people share one.
+   *
+   * 210,000 iterations is OWASP's PBKDF2-SHA256 figure. It costs a phone
+   * something like a third of a second, once, at sign-in. If this number
+   * ever changes, test/smoke_auth.py has to change with it or every login
+   * will fail while every test passes.                                     */
+
+  const PBKDF2_ITERS = 210000;
+
+  async function deriveKey(username, password) {
+    const enc = new TextEncoder();
+    const base = await crypto.subtle.importKey("raw", enc.encode(String(password)), "PBKDF2", false, ["deriveBits"]);
+    const bits = await crypto.subtle.deriveBits(
+      { name: "PBKDF2", salt: enc.encode("zenofit:" + String(username).toLowerCase()), iterations: PBKDF2_ITERS, hash: "SHA-256" },
+      base, 256
+    );
+    return [...new Uint8Array(bits)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  /* Whoever this browser currently is. `username` is null for a device that
+     has never been claimed, which is every install before it signs up. */
+  const account = () => {
+    const d = read(DEVICE_KEY) || {};
+    return d.token ? { userId: d.userId || null, username: d.username || null } : null;
+  };
+  const signedIn = () => !!(read(DEVICE_KEY) || {}).username;
+
+  /* Claim THIS device if it already has one, otherwise make a new account.
+     The difference matters: claiming keeps every profile already synced from
+     this phone, and the server decides which happened from the token it is
+     sent, so the app does not have to. */
+  async function register(username, password) {
+    const key = await deriveKey(username, password);
+    const res = await call("POST", "/v1/auth/register", { username, key });
+    /* a claim returns no token, because the one already stored still works */
+    const now = read(DEVICE_KEY) || {};
+    write(DEVICE_KEY, { userId: res.userId, token: res.token || now.token, username: res.username });
+    return res;
+  }
+
+  async function signIn(username, password) {
+    const key = await deriveKey(username, password);
+    /* noAuth: signing in as somebody else must not be coloured by whoever
+       this browser is at the moment */
+    const res = await call("POST", "/v1/auth/login", { username, key }, { noAuth: true });
+    write(DEVICE_KEY, { userId: res.userId, token: res.token, username: res.username });
+    return res;
+  }
+
+  /* Forgets this browser's credential and nothing else. The account and
+     everything in it stay exactly where they are, on the server; signing in
+     again brings it all back. The app clears its own local copies. */
+  function signOut() {
+    try { localStorage.removeItem(DEVICE_KEY); } catch { /* already gone */ }
+  }
+
+  const nameAvailable = (username) =>
+    call("GET", "/v1/auth/available?username=" + encodeURIComponent(username), undefined, { noAuth: true });
 
   /* ---- environment checks ------------------------------------------------- */
 
@@ -290,6 +371,7 @@
   window.ZenofitCloud = {
     API,
     ensureDevice, hasDevice,
+    deriveKey, register, signIn, signOut, account, signedIn, nameAvailable,
     isStandalone, isIOS, pushBlockedReason,
     enablePush, disablePush, pushEnabled, testPush,
     scheduleTimer, cancelTimer, clockDrift,

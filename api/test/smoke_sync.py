@@ -6,9 +6,12 @@ a read grant writing anyway, a page boundary inside a millisecond, a delete
 that comes back as an absence instead of a tombstone, and a stale push
 overwriting a newer row.
 """
+import os
 import json, urllib.request, urllib.error, sys, time
 
-API = "https://zenofit-api.kerlit.workers.dev"
+# Override to run against a local `wrangler dev`:
+#   ZENOFIT_API=http://127.0.0.1:8787 python3 test/smoke_sync.py
+API = os.environ.get("ZENOFIT_API", "https://zenofit-api.kerlit.workers.dev")
 PASS, FAIL = [], []
 
 def call(method, path, token=None, body=None):

@@ -15,6 +15,7 @@
  * Phase 4 adds /v1/profiles/:id/changes, Phase 5 adds push and timers.
  */
 
+import { cleanUsername, cleanKey, newSalt, hashKey, sameHash } from "./auth.js";
 import { newSeed, normalizeSeed } from "./seeds.js";
 import { accessFor, canRead, canWrite, canAdmin } from "./access.js";
 import { sendToUser } from "./push.js";
@@ -80,14 +81,21 @@ async function authenticate(request, env) {
   const m = h.match(/^Bearer\s+(.+)$/i);
   if (!m) return null;
 
+  /* Through `tokens`, not users.token_hash: an account can be signed in on
+     more than one phone and each one carries its own. See migration 0004,
+     which back-fills every existing device's token into a row of its own so
+     this change signs nobody out. */
+  const hash = await sha256Hex(m[1].trim());
   const user = await env.DB.prepare(
-    "SELECT id, display_name, created_at FROM users WHERE token_hash = ?"
-  ).bind(await sha256Hex(m[1].trim())).first();
+    "SELECT u.id, u.display_name, u.created_at, u.username FROM tokens t " +
+    "JOIN users u ON u.id = t.user_id WHERE t.token_hash = ?"
+  ).bind(hash).first();
   if (!user) return null;
 
   /* Fire and forget. A failed heartbeat must never fail the request. */
-  env.DB.prepare("UPDATE users SET last_seen_at = ? WHERE id = ?")
-    .bind(Date.now(), user.id).run().catch(() => {});
+  const now = Date.now();
+  env.DB.prepare("UPDATE tokens SET last_seen_at = ? WHERE token_hash = ?").bind(now, hash).run().catch(() => {});
+  env.DB.prepare("UPDATE users SET last_seen_at = ? WHERE id = ?").bind(now, user.id).run().catch(() => {});
 
   return user;
 }
@@ -162,9 +170,16 @@ async function route(request, env, url) {
     const id = newId();
     const token = newToken();
     const name = cleanName(body.displayName);
+    const now = Date.now();
+    const hash = await sha256Hex(token);
     await env.DB.prepare(
       "INSERT INTO users (id, display_name, token_hash, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?)"
-    ).bind(id, name, await sha256Hex(token), Date.now(), Date.now()).run();
+    ).bind(id, name, hash, now, now).run();
+    /* and the same token as a row of its own, because that is what
+       authenticate reads now */
+    await env.DB.prepare(
+      "INSERT INTO tokens (token_hash, user_id, label, created_at, last_seen_at) VALUES (?, ?, 'device', ?, ?)"
+    ).bind(hash, id, now, now).run();
 
     /* The only time the token is ever readable. */
     return json({ userId: id, token, displayName: name }, 201);
@@ -175,6 +190,95 @@ async function route(request, env, url) {
      public by design and the app needs it before it has anything else. */
   if (p === "/v1/config" && method === "GET") {
     return json({ vapidPublicKey: env.VAPID_PUBLIC_KEY || null });
+  }
+
+  /* ---- accounts ----------------------------------------------------------
+   * Sign in and you get a token like any device gets one, and every profile
+   * you own comes with you, because an account IS the user row a device was
+   * already using. See migration 0004 and api/src/auth.js.
+   *
+   * Both of these sit ABOVE the authenticate() line on purpose: signing in is
+   * the one thing you must be able to do without already being somebody. But
+   * register reads the Authorization header itself, because there is a real
+   * difference between "claim the device I am already using" and "make me a
+   * new account", and only the first keeps the training already synced.     */
+
+  if (p === "/v1/auth/register" && method === "POST") {
+    const body = await readJson(request).catch(() => ({}));
+    const username = cleanUsername(body.username);
+    const key = cleanKey(body.key);
+    if (!username) return fail(400, "bad_username", "3 to 24 characters: letters, digits, dot, dash or underscore, starting with a letter or digit.");
+    if (!key) return fail(400, "bad_request", "Missing or malformed key. The app derives this from the password.");
+
+    const lc = username.toLowerCase();
+    const taken = await env.DB.prepare("SELECT id FROM users WHERE username_lc = ?").bind(lc).first();
+    if (taken) return fail(409, "name_taken", "That username is already in use.");
+
+    const salt = newSalt();
+    const hash = await hashKey(salt, key);
+    const now = Date.now();
+
+    /* Already a device? Then this is a claim, not a signup, and the row it
+       claims is the one that owns whatever has already been synced. Turning
+       up with no token instead makes a fresh account, which is what a second
+       person on a shared phone actually wants. */
+    const existing = await authenticate(request, env);
+    if (existing) {
+      if (existing.username) return fail(409, "already_claimed", "This device is already signed in to an account.");
+      await env.DB.prepare(
+        "UPDATE users SET username = ?, username_lc = ?, pw_hash = ?, pw_salt = ?, claimed_at = ? WHERE id = ?"
+      ).bind(username, lc, hash, salt, now, existing.id).run();
+      return json({ userId: existing.id, username, claimed: true });
+    }
+
+    const id = newId();
+    const token = newToken();
+    const th = await sha256Hex(token);
+    await env.DB.prepare(
+      "INSERT INTO users (id, display_name, token_hash, created_at, last_seen_at, username, username_lc, pw_hash, pw_salt, claimed_at) " +
+      "VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).bind(id, th, now, now, username, lc, hash, salt, now).run();
+    await env.DB.prepare(
+      "INSERT INTO tokens (token_hash, user_id, label, created_at, last_seen_at) VALUES (?, ?, 'signin', ?, ?)"
+    ).bind(th, id, now, now).run();
+    return json({ userId: id, username, token, claimed: false }, 201);
+  }
+
+  if (p === "/v1/auth/login" && method === "POST") {
+    const body = await readJson(request).catch(() => ({}));
+    const username = cleanUsername(body.username);
+    const key = cleanKey(body.key);
+
+    /* One reply for every way this can fail, and the same amount of work
+       done either way: a wrong username and a wrong password have to be
+       indistinguishable, or the endpoint is a list of who has an account. */
+    const row = username && key
+      ? await env.DB.prepare("SELECT id, username, pw_hash, pw_salt FROM users WHERE username_lc = ?").bind(username.toLowerCase()).first()
+      : null;
+    const salt = (row && row.pw_salt) || "00000000000000000000000000000000";
+    const attempt = await hashKey(salt, key || "0".repeat(64));
+    if (!row || !row.pw_hash || !sameHash(attempt, row.pw_hash)) {
+      return fail(401, "bad_login", "That username and password do not match an account.");
+    }
+
+    /* A token per device, so signing in here does not sign out the phone in
+       the gym bag. */
+    const token = newToken();
+    const now = Date.now();
+    await env.DB.prepare(
+      "INSERT INTO tokens (token_hash, user_id, label, created_at, last_seen_at) VALUES (?, ?, 'signin', ?, ?)"
+    ).bind(await sha256Hex(token), row.id, now, now).run();
+    return json({ userId: row.id, username: row.username, token });
+  }
+
+  /* Is this name free? Asked while somebody is still typing it, so it is
+     cheap and says nothing a registration attempt would not say a second
+     later anyway. */
+  if (p === "/v1/auth/available" && method === "GET") {
+    const username = cleanUsername(url.searchParams.get("username") || "");
+    if (!username) return json({ username: null, available: false, reason: "bad_username" });
+    const taken = await env.DB.prepare("SELECT id FROM users WHERE username_lc = ?").bind(username.toLowerCase()).first();
+    return json({ username, available: !taken });
   }
 
   /* Everything past here needs a token. */

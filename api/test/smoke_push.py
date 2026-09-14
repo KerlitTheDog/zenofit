@@ -8,7 +8,9 @@ accepted, bad times are refused, and cancelling works.
 """
 import json, urllib.request, urllib.error, sys, time, base64, os
 
-API = "https://zenofit-api.kerlit.workers.dev"
+# Override to run against a local `wrangler dev`:
+#   ZENOFIT_API=http://127.0.0.1:8787 python3 test/smoke_push.py
+API = os.environ.get("ZENOFIT_API", "https://zenofit-api.kerlit.workers.dev")
 PASS, FAIL = [], []
 
 def call(method, path, token=None, body=None):

@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Black-box test of the Zenofit API, Phase 2 + 3."""
+import os
 import json, urllib.request, urllib.error, sys
 
-API = "https://zenofit-api.kerlit.workers.dev"
+# Override to run against a local `wrangler dev`:
+#   ZENOFIT_API=http://127.0.0.1:8787 python3 test/smoke.py
+API = os.environ.get("ZENOFIT_API", "https://zenofit-api.kerlit.workers.dev")
 PASS, FAIL = [], []
 
 def call(method, path, token=None, body=None, origin=None):

@@ -1784,13 +1784,56 @@ const activeProfileId = () => profiles.active;
    so the fallback speaks whatever language the app is being read in */
 const profileLabel = (p, i) => (p && p.name) || T("profiles.nth", { n: i + 1 });
 
+/* ── A SAVE THAT WILL NOT OPEN IS NOT A SAVE THAT SHOULD BE REPLACED ──
+   This used to be the one way the app could lose somebody's training all
+   by itself, and it needed no bug anywhere else to do it: a save that
+   would not parse (a write cut off by a dying battery, a browser that
+   truncated under quota, anything) came back as defaultState(), the app
+   came up blank and entirely happy, and the very next autosave wrote that
+   blank over the only copy. One bad read, permanent loss, no warning.
+
+   So a save that is THERE but will not open now poisons the write instead
+   of the read: `unreadable` holds that profile's id, writeNow refuses to
+   touch its key, and the bytes stay exactly where they are, for Storage
+   check to hand back out (it lists one as DAMAGED and exports it raw).
+   The app still runs, because refusing to open at all would strand the
+   person with no way to reach the screen that can rescue them.
+
+   A MISSING key is not this. A new profile and a first run have no key
+   and must not be flagged, or nothing could ever be saved at all.
+
+   The lock is deliberate rather than absolute: importing a backup and
+   Reset all data both lift it (allowOverwrite), because both are the
+   user saying "replace what is there", out loud, behind a confirm. What
+   is forbidden is the app deciding that quietly on their behalf. */
+let unreadable = null;            // profile id whose stored save will not parse
+
 function readProfileState(id) {
-  try {
-    const raw = localStorage.getItem(stateKeyFor(id));
-    if (raw) return hydrate(JSON.parse(raw));
-  } catch (e) { console.error("profile load failed", e); }
+  let raw = null;
+  try { raw = localStorage.getItem(stateKeyFor(id)); }
+  catch (e) { console.error("profile load failed", e); }
+  if (raw) {
+    try {
+      const loaded = hydrate(JSON.parse(raw));
+      if (unreadable === id) unreadable = null;
+      return loaded;
+    } catch (e) {
+      console.error("profile unreadable, holding writes", e);
+      unreadable = id;
+      return defaultState();
+    }
+  }
+  if (unreadable === id) unreadable = null;   // nothing there to protect
   return defaultState();
 }
+
+/* Said once, the way the quota warning is: a refused write happens on the
+   same debounce as every other one. */
+let unreadableWarned = false;
+
+/* The user saying "replace it" in as many words. Only importBackup and
+   reset-all call this, and both have already asked. */
+function allowOverwrite() { unreadable = null; unreadableWarned = false; }
 
 function loadState() {
   return readProfileState(profiles.active);
@@ -1824,6 +1867,15 @@ let quotaWarned = false;
 function writeNow() {
   clearTimeout(saveTimer); saveTimer = null;
   snapshotDrafts();
+  /* the whole point of the block above: what is on screen is a blank the
+     app invented, and the key still holds the real thing */
+  if (unreadable === profiles.active) {
+    if (!unreadableWarned) {
+      unreadableWarned = true;
+      try { alert(T("profiles.unreadable")); } catch { /* no UI here */ }
+    }
+    return;
+  }
   try { localStorage.setItem(stateKeyFor(profiles.active), JSON.stringify(state)); }
   catch (e) {
     console.error("save failed", e);
@@ -2105,6 +2157,8 @@ function importBackup(text) {
   const next = hydrate(data);
   next.drafts = {};              // someone else's open form is not yours
   state = next;
+  /* a restore IS the replacement, asked for and confirmed a line above */
+  allowOverwrite();
 
   /* every open form points at records that no longer exist */
   ui.workoutSheet = null; ui.entryForm = null; ui.setForm = null;
@@ -2211,7 +2265,10 @@ function storageScan() {
 function storageFileFor(key) {
   const row = storageScan().rows.find((r) => r.key === key);
   if (!row || row.index) return null;
-  if (row.active) return { name: backupName(), text: backupText() };
+  /* row.ok as well as row.active: when the active save is the damaged one,
+     what is in memory is the blank default and the bytes are the only thing
+     worth handing over */
+  if (row.active && row.ok) return { name: backupName(), text: backupText() };
   let raw = "";
   try { raw = localStorage.getItem(key) || ""; } catch { return null; }
   if (!raw) return null;
@@ -5643,15 +5700,20 @@ function renderStorage() {
 
   /* The headline is the question they came here with, answered before any
      of the detail: is anything of mine in this browser at all? */
-  const verdict = !scan.readable ? { c: "var(--red)", t: T("stor.noAccess") }
+  const verdict = unreadable === activeProfileId() ? { c: "var(--red)", t: T("stor.held") }
+    : !scan.readable ? { c: "var(--red)", t: T("stor.noAccess") }
     : !saves.length ? { c: "var(--red)", t: T("stor.nothing") }
     : orphans.some((r) => r.entries > 0) ? { c: "var(--gold)", t: T("stor.foundLost") }
     : withData.length ? { c: "var(--green)", t: T("stor.foundOk") }
     : { c: "var(--muted)", t: T("stor.foundEmpty") };
 
   const rows = saves.map((r) => {
-    const state = r.active ? { c: "var(--green)", t: T("stor.thisOne") }
-      : !r.ok ? { c: "var(--red)", t: T("stor.unreadable") }
+    /* damaged is checked FIRST, including on the save the app is currently
+       sitting on: "in use" there would be describing the blank the app
+       invented rather than the bytes on the disk, which are the thing this
+       screen exists to tell the truth about */
+    const state = !r.ok ? { c: "var(--red)", t: T("stor.unreadable") }
+      : r.active ? { c: "var(--green)", t: T("stor.thisOne") }
       : !r.listed ? { c: "var(--gold)", t: T("stor.lost") }
       : { c: "var(--steel)", t: T("stor.otherProfile") };
     return `<div class="pb-card" style="padding:13px 14px;margin-bottom:8px;border-color:${r.ok && !r.listed && !r.active ? "var(--gold)" : "var(--border)"}">
@@ -8254,6 +8316,8 @@ const actions = {
   "reset-all": () => {
     if (confirm(T("profile.confirmReset"))) {
       ui.showProfile = false; ui.profileDraft = null;
+      /* the one button whose entire job is to replace what is there */
+      allowOverwrite();
       const fresh = defaultState();
       applyTheme(fresh.settings.theme);
       patch(fresh);

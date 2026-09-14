@@ -2037,6 +2037,14 @@ const BACKUP_FORMAT = 1;
 
 function backupText() {
   const { drafts, ...data } = state;   // eslint-disable-line no-unused-vars
+  /* ...and every timer's cloudId, for the same reason zenofit:device and
+     zenofit:push live outside state entirely. It is sync state: a handle on
+     an alarm booked for THIS device, on a server that will only cancel it
+     for the device that booked it. A backup is a file people share and
+     restore onto a second phone, where the handle is meaningless at best,
+     and at worst has that phone trying to cancel somebody else's rest. The
+     timer travels, because a timer is yours; the handle does not. */
+  data.timers = (data.timers || []).map(({ cloudId, ...t }) => t);   // eslint-disable-line no-unused-vars
   return JSON.stringify({
     app: BACKUP_APP, format: BACKUP_FORMAT, version: state.version,
     exportedAt: new Date().toISOString(), state: data,
@@ -6906,6 +6914,10 @@ function notifyDone(t) {
 }
 
 function fireTimer(t) {
+  /* We got here, so the page was alive to do it: the server's copy has
+     nothing left to say and is handed back before it can say it. This is
+     what PUSH_GRACE_MS buys the time for. */
+  cloudTimerCancel(t);
   t.endsAt = null; t.remaining = null; t.doneAt = Date.now();
   try { if (navigator.vibrate) navigator.vibrate([250, 120, 250, 120, 400]); } catch { /* ignore */ }
   playSound(soundOf(t), volumeOf(t));
@@ -6954,14 +6966,95 @@ function startTimerEngine() {
 document.addEventListener("visibilitychange", () => { if (!document.hidden && sweepTimers()) render(); });
 window.addEventListener("focus", () => { if (sweepTimers()) render(); });
 
+/* ── THE SAME COUNTDOWN, HELD BY THE SERVER ──────────────────────────
+   Everything above this line runs in the page, and the page is the
+   problem. startTimerEngine ticks every 250ms and fireTimer does the
+   chime, the buzz and the notification, all of which need a living tab.
+   Lock the phone mid-rest and that tab is throttled to a crawl and then
+   discarded, and the alert that was the entire point of the timer never
+   happens. Ninety seconds later you are still waiting for a chime from a
+   process the OS killed.
+
+   So every start also books the same deadline with the server, which
+   pushes a notification when it comes round whether this app is alive or
+   not. Two alarms for one rest, and three rules keep them from both
+   going off in your ear.
+
+   THE LOCAL ONE WINS WHEREVER IT CAN. The server's copy is booked
+   PUSH_GRACE_MS late and fireTimer cancels it on the way past, so the
+   push only ever speaks when the page was not there to. The gap is
+   already in our favour — the server starts counting when the request
+   lands and we started when we sent it, so its deadline trails ours by a
+   round trip — but leaning on network latency for correctness is not a
+   plan, and two deliberate seconds is nothing on a rest timer.
+
+   IT IS A SECOND CHANCE, NEVER A PREREQUISITE. Nothing here is awaited
+   and every failure is silent. A rest timer starts the instant it is
+   tapped, in a basement gym with no signal, on a device that never
+   enabled push at all. The local timer IS the timer; this is the copy
+   that survives the screen going off.
+
+   THE DEADLINE IS SENT AS A DURATION, never as a wall-clock moment. A
+   real phone here was 2.8 seconds off the server. inMs makes the server
+   resolve "90 seconds from now" against its own clock, so the phone's
+   idea of the time never enters the arithmetic. See scheduleTimer in
+   zenofit-cloud.js, which puts it on the wire as durationMs.          */
+
+const PUSH_GRACE_MS = 2000;                  // the local chime goes first
+const PUSH_MAX_MS = 24 * 60 * 60 * 1000;     // the API refuses more than a day
+
+/* Book it. `secs` is the countdown the page just started, not the timer's
+   full length, so a resume asks for what is actually left. */
+async function cloudTimerStart(t, secs) {
+  const C = window.ZenofitCloud;
+  if (!C || typeof C.scheduleTimer !== "function") return;   // old cached shell, or file://
+  const inMs = Math.round(secs * 1000) + PUSH_GRACE_MS;
+  /* checked here rather than spending a request to be told no */
+  if (!(inMs > 1000) || inMs > PUSH_MAX_MS) return;
+  try {
+    if (C.pushBlockedReason() || !(await C.pushEnabled())) return;
+    /* what the run was when we asked, so we can tell whether it is still
+       the same one when the round trip comes back */
+    const run = t.endsAt;
+    const name = timerLabel(t) || T("timers.listTitle");
+    const res = await C.scheduleTimer({
+      inMs, label: name, title: name,
+      body: T("timers.notifBody", { time: fmtClock(t.duration) }),
+    });
+    if (!res || !res.timerId) return;
+    /* A rest can be stopped inside a round trip, and a timer object can be
+       replaced wholesale by timer-save while we wait. Re-read it from state
+       and check it is still on the same run: if it is not, the alarm we
+       just booked is orphaned and goes straight back. */
+    const live = (state.timers || []).find((x) => x.id === t.id);
+    if (!live || live.endsAt !== run) { try { C.cancelTimer(res.timerId); } catch { /* fire and forget */ } return; }
+    live.cloudId = res.timerId;
+    writeNow();
+  } catch { /* the local timer is unaffected, and it is the one that matters */ }
+}
+
+/* Hand it back. Clears the handle synchronously so the caller's own
+   writeNow persists that, and lets the request itself go unwatched. */
+function cloudTimerCancel(t) {
+  const id = t && t.cloudId;
+  if (!id) return;
+  t.cloudId = null;
+  const C = window.ZenofitCloud;
+  if (C && typeof C.cancelTimer === "function") { try { C.cancelTimer(id); } catch { /* fire and forget */ } }
+}
+
 function startTimer(t) {
   unlockAudio();          // both need the user gesture that got us here
   askNotifyPermission();
   const secs = t.remaining != null ? t.remaining : t.duration;
+  cloudTimerCancel(t);    // a resume books a fresh deadline, never a second one
   t.endsAt = Date.now() + Math.max(1, secs) * 1000;
   t.remaining = null; t.doneAt = null;
   if (ui.timerToast && ui.timerToast.id === t.id) ui.timerToast = null;
   writeNow(); render();
+  /* after the render, because the page must not wait on the network to
+     show a countdown the user has already started */
+  cloudTimerStart(t, Math.max(1, secs));
 }
 
 /* ── the tab ───────────────────────────────────────────────────────── */
@@ -9382,8 +9475,12 @@ const actions = {
     /* editing the length of a running timer restarts it cleanly rather than
        leaving a countdown that no longer matches its own dial */
     const alert = { sound: soundOf(form.t), volume: volumeOf(form.t) };
+    /* that restart stops the countdown, so the server's copy of the OLD
+       length goes back too — otherwise editing 90s to 120s leaves a push
+       booked for a rest that no longer exists */
+    if (existing) cloudTimerCancel(existing);
     const row = existing
-      ? { ...existing, name, key: keepKey, duration, pinned: !!form.t.pinned, ...alert, endsAt: null, remaining: null, doneAt: null }
+      ? { ...existing, cloudId: null, name, key: keepKey, duration, pinned: !!form.t.pinned, ...alert, endsAt: null, remaining: null, doneAt: null }
       : { id: form.t.id, name, duration, pinned: !!form.t.pinned, ...alert, endsAt: null, remaining: null, doneAt: null, createdAt: Date.now() };
     ui.timerForm = null;
     patch({ timers: existing ? state.timers.map((x) => (x.id === row.id ? row : x)) : [...(state.timers || []), row] });
@@ -9392,6 +9489,10 @@ const actions = {
     const form = ui.timerForm;
     if (!form || !confirm(T("timers.confirmDelete"))) return;
     const id = form.t.id;
+    /* before it leaves state, while there is still something holding the
+       handle: a deleted timer that still pushes is a notification with
+       nothing behind it to tap */
+    cloudTimerCancel((state.timers || []).find((x) => x.id === id));
     ui.timerForm = null;
     if (ui.timerToast && ui.timerToast.id === id) ui.timerToast = null;
     patch({ timers: (state.timers || []).filter((x) => x.id !== id) });
@@ -9405,12 +9506,14 @@ const actions = {
     if (!t || !t.endsAt) return;
     t.remaining = Math.ceil(timerRemaining(t));
     t.endsAt = null;
+    cloudTimerCancel(t);     // paused is not counting down, here or there
     writeNow(); render();
   },
   "timer-reset": (el) => {
     const t = (state.timers || []).find((x) => x.id === el.dataset.id);
     if (!t) return;
     t.endsAt = null; t.remaining = null; t.doneAt = null;
+    cloudTimerCancel(t);
     if (ui.timerToast && ui.timerToast.id === t.id) ui.timerToast = null;
     writeNow(); render();
   },

@@ -1502,6 +1502,7 @@ const defaultState = () => ({
   presets: [],    // [{id,name,description,pinned,exercises:[{exercise,muscle,kind}],createdAt}]
   timers: seedTimers(), // [{id,name,duration,endsAt,remaining,doneAt,pinned,createdAt}]
   dayDrafts: [],  // [{id,date,entries,savedAt}], workout days you backed out of, see closeWorksheet()
+  unlogged: [],   // [{date,entries,savedAt}], lifts left unlogged on a day you DID save, see commitWorkout()
   plans: [],      // [{id,date,name,entries,createdAt}], days you intend to train, see planTargetOf()
   deloads: [],    // [{id,start,end}], planned easy weeks, inclusive ISO dates
   drafts: {},     // half-finished forms, restored after a crash/lock, see snapshotDrafts()
@@ -5568,6 +5569,13 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
         ${icon("pencil", 14, 'style="color:var(--faint);flex-shrink:0"')}
       </button>
       <button data-action="open-exercise-window" data-name="${esc(e.exercise)}" title="${T("log.exerciseDetails")}" style="flex-shrink:0;padding:12px 14px;color:var(--faint);align-self:stretch;border-left:1px solid var(--border-soft)">${icon("info", 16)}</button>
+      ${/* Only on a lift with nothing in it, because this is the one row the
+            save no longer decides about: a blank is kept now, so saying "I
+            skipped that one" has to be something a finger does. A filled-in
+            entry holds numbers and is deleted the long way, from its own form,
+            where opening it is already the second thought. Never in a plan: a
+            plan is ALL blanks by design, and none of them is waiting. */
+        planning || !empty ? "" : `<button data-action="scrap-draft-entry" data-id="${e.id}" title="${T("wo.scrap")}" style="flex-shrink:0;padding:12px 13px;color:var(--faint);align-self:stretch;border-left:1px solid var(--border-soft)">${icon("trash-2", 15)}</button>`}
     </div>`;
   }).join("");
 
@@ -8003,12 +8011,48 @@ const planResultOf = (draft, sum) => ({
   })),
 });
 
+/* ── A SAVED DAY KEEPS WHAT YOU DIDN'T LOG ────────────────────────────
+   Saving used to settle the question for a blank entry: the filled-in ones
+   became log rows and everything still empty was dropped on the floor. That
+   read one gesture as two different decisions and only the app knew which.
+   Saving part-way through is normal (wo.draftNote says so, and prunePlans
+   exists because of it), and *forgetting to write a lift down* is not the
+   same as *deciding not to do it* — yet dropping the row made them
+   identical, and the one you actually did was the one you lost.
+
+   So blanks are KEPT, in state.unlogged, one row per date. It is not the
+   log and it is not history: nothing in here is a set, nothing is counted
+   toward volume, PRs, weeks or a chart, and nothing of it is drawn in the
+   Log tab. That is the same promise state.plans and state.dayDrafts make,
+   for the same reason. Reopening the day (edit-day) hydrates them straight
+   back into the sheet, still blank, ready to be filled in.
+
+   THROWING ONE AWAY IS NOW A DELIBERATE ACT, and it has to be, because the
+   save no longer decides it for you: scrap-draft-entry, the bin on a
+   waiting card. Taking a lift out of the sheet is the decision not to have
+   done it — exactly what it already means for a lift that came from a
+   plan — and the next save writes the shorter list.
+
+   Plan-linked blanks are deliberately NOT in here. prunePlans already
+   leaves those on the plan and edit-day hydrates them from there, so
+   storing them twice would deal the same lift into the sheet twice. */
+const unloggedOn = (date) =>
+  ((state.unlogged || []).find((u) => u.date === date) || {}).entries || [];
+
+/* The whole list with one date's waiting lifts replaced, or that date dropped
+   out of it entirely when nothing is left waiting. `alsoDrop` is the date a
+   day has just been MOVED off: its rows have to go with it, or they are left
+   under a date with no day to reopen them from. */
+const unloggedWith = (date, entries, alsoDrop = null) => {
+  const rest = (state.unlogged || []).filter((u) => u.date !== date && u.date !== alsoDrop);
+  return entries.length ? [...rest, { date, entries: clone(entries), savedAt: Date.now() }] : rest;
+};
+
 function commitWorkout(draft) {
   if (draft && draft.planning) return commitPlan(draft);
-  /* only real, filled-in entries get logged, and blank preset placeholders are
-     dropped so they never pollute the history with empty rows. A blank one
-     that came from a plan is not lost with them: prunePlans leaves it on the
-     plan, where it was already waiting. */
+  /* Only real, filled-in entries get LOGGED. A blank never becomes a row, so
+     it can never turn up in the history, the volume or a PR — and it is not
+     thrown away for it either: see the unlogged block above. */
   /* Blanks dropping out can leave a superset link on what is now the first
      lift of the day, pointing at nothing. Marks on a first item are ignored
      everywhere they are read, so this only tidies what gets written down. */
@@ -8024,6 +8068,25 @@ function commitWorkout(draft) {
   }
   const planIds = draft.planIds || [];
   const { plans, open } = prunePlans(draft);
+  /* What was never filled in waits on the day instead of being dropped. The
+     plan-linked ones are already riding on the plan, so only the rest come
+     here, and they come without a link to a plan that is not carrying them. */
+  const waiting = draft.entries
+    .filter((e) => !entryHasData(e) && !(e.planFrom != null && planIds.includes(e.planFrom)))
+    .map(stripPlanLink);
+  /* A sheet saved onto a date that ALREADY had lifts waiting keeps them: it
+     was never handed them, so it cannot be the thing that decides they are
+     gone. An EDITING sheet is the opposite — edit-day dealt them into it on
+     the way in, so what it holds now is the whole answer, scraps included. */
+  const already = draft.editing ? [] : unloggedOn(draft.date);
+  const named = new Set(waiting.map((e) => e.exercise));
+  const stillWaiting = [...waiting, ...already.filter((e) => !named.has(e.exercise))];
+  /* …unless the day has just been emptied out, which is its owner saying it
+     did not happen after all: with no row left in the log there is no day to
+     reopen, and so nothing for these to be waiting on. */
+  const moved = draft.editing && draft.originalDate && draft.originalDate !== draft.date
+    ? draft.originalDate : null;
+  const unlogged = unloggedWith(draft.date, filled.length ? stillWaiting : [], moved);
   /* Scoring a session you are still in the middle of would be the app calling
      a day finished that its user hasn't, so the result waits for the plan to
      actually run out. */
@@ -8041,7 +8104,7 @@ function commitWorkout(draft) {
     const stamped = filled.map((e, i) => ({ ...e, date: draft.date, createdAt: now + i }));
     ui.workoutSheet = null;
     if (sum) ui.planResult = planResultOf(draft, sum);
-    patch({ log: [...kept, ...stamped], plans });
+    patch({ log: [...kept, ...stamped], plans, unlogged });
     return;
   }
   const stamped = filled.map((e, i) => ({ ...e, date: draft.date, createdAt: Date.now() + i }));
@@ -8055,6 +8118,7 @@ function commitWorkout(draft) {
     log: [...state.log, ...stamped],
     dayDrafts: draftId ? (state.dayDrafts || []).filter((d) => d.id !== draftId) : state.dayDrafts,
     plans,
+    unlogged,
   });
 }
 
@@ -8600,6 +8664,7 @@ const actions = {
         p.log = state.log.map(swap);
         p.plans = (state.plans || []).map((pl) => ({ ...pl, entries: (pl.entries || []).map(swap) }));
         p.dayDrafts = (state.dayDrafts || []).map((d) => ({ ...d, entries: (d.entries || []).map(swap) }));
+        p.unlogged = (state.unlogged || []).map((u) => ({ ...u, entries: (u.entries || []).map(swap) }));
         p.presets = (state.presets || []).map((pr) => ({ ...pr, exercises: (pr.exercises || []).map(swap) }));
         if (state.volumeGoals && state.volumeGoals[f.orig] != null) {
           const vg = { ...state.volumeGoals };
@@ -8660,6 +8725,7 @@ const actions = {
     p.log = state.log.map(swap);
     p.plans = (state.plans || []).map((pl) => ({ ...pl, entries: (pl.entries || []).map(swap) }));
     p.dayDrafts = (state.dayDrafts || []).map((d) => ({ ...d, entries: (d.entries || []).map(swap) }));
+    p.unlogged = (state.unlogged || []).map((u) => ({ ...u, entries: (u.entries || []).map(swap) }));
     p.presets = (state.presets || []).map((pr) => ({ ...pr, exercises: (pr.exercises || []).map(swap) }));
     if (state.volumeGoals && state.volumeGoals[name] != null) {
       const vg = { ...state.volumeGoals };
@@ -8828,6 +8894,7 @@ const actions = {
       p.log = state.log.map(swap);
       p.plans = (state.plans || []).map((pl) => ({ ...pl, entries: (pl.entries || []).map(swap) }));
       p.dayDrafts = (state.dayDrafts || []).map((d) => ({ ...d, entries: (d.entries || []).map(swap) }));
+      p.unlogged = (state.unlogged || []).map((u) => ({ ...u, entries: (u.entries || []).map(swap) }));
       p.presets = (state.presets || []).map((pr) => ({ ...pr, exercises: (pr.exercises || []).map(swap) }));
       if (state.goals && state.goals[was] != null) {
         const g = { ...state.goals };
@@ -8893,8 +8960,15 @@ const actions = {
     for (const pl of carry)
       for (let i = 0; i < (pl.entries || []).length; i++)
         ghosts.push(planEntryToDraftEntry(pl.entries[i], pl.id, i));
+    /* and the lifts this day was saved WITHOUT logging, back exactly as they
+       were left: blank, counting for nothing, one bin-tap from gone. They come
+       after what was logged because that is what they are — the part of the
+       session still outstanding. */
+    const waiting = clone(unloggedOn(date)) || [];
     ui.workoutSheet = {
-      date, entries: [...entries, ...ghosts],
+      /* the date this day came from, kept because the sheet's own date field
+         can move it somewhere else before it is saved, see commitWorkout */
+      date, originalDate: date, entries: [...entries, ...ghosts, ...waiting],
       editing: true, originalIds: entries.map((e) => e.id),
       planIds: carry.map((pl) => pl.id),
       planName: (carry.find((pl) => pl.name) || {}).name || "",
@@ -8907,8 +8981,14 @@ const actions = {
     if (!draft || !draft.editing) return;
     if (confirm(T("wo.confirmDeleteDay"))) {
       const ids = new Set(draft.originalIds || []);
+      const date = draft.date;
       ui.workoutSheet = null;
-      patch({ log: state.log.filter((e) => !ids.has(e.id)) });
+      /* the day is gone, so there is nothing left for its waiting lifts to
+         wait on, and nowhere they could ever be reopened from */
+      patch({
+        log: state.log.filter((e) => !ids.has(e.id)),
+        unlogged: (state.unlogged || []).filter((u) => u.date !== date),
+      });
     }
   },
 
@@ -9237,6 +9317,18 @@ const actions = {
     writeNow(); render();
   },
   "toast-open": () => { ui.timerToast = null; ui.tab = "timer"; resetTransient(); render(); },
+  /* Scrapping a lift that is waiting to be logged. No confirm: it holds no
+     numbers, so there is nothing to lose and nothing to undo, which is exactly
+     the rule the entry form's own bin follows for a draft entry (this is the
+     short way round to the same thing). On a lift that came from a plan it
+     also gives up that plan's claim on it, which is what deleting one from
+     the sheet has always meant. Nothing is written until the day is saved. */
+  "scrap-draft-entry": (el) => {
+    const draft = ui.workoutSheet;
+    if (!draft) return;
+    draft.entries = draft.entries.filter((x) => x.id !== el.dataset.id);
+    render();
+  },
   "delete-entry-form": () => {
     const { f, isDraft } = ui.entryForm;
     if (isDraft) {

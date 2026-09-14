@@ -1979,6 +1979,11 @@ function deleteProfile(id) {
   profiles = { active: next, list: rest };
   saveProfiles();
   try { localStorage.removeItem(stateKeyFor(id)); } catch { /* already gone */ }
+  /* and its sync link, or zenofit:profiles keeps a remoteId under a local id
+     that no longer exists — which a later profile could never be given,
+     since ids are minted fresh, but which sits there naming somebody's
+     cloud profile forever */
+  syncForget(id);
   if (wasActive) {
     state = loadState();
     closeEverything();
@@ -10181,24 +10186,51 @@ const actions = {
    What is on the list is navigation and looking: tabs, sheets opening and
    closing, filters, the chart, the calculator, the accordion, the storage
    check, and the sync sheet itself, because Leave has to stay reachable
-   from inside a profile you cannot write to. The timers are on it too:
-   they belong to the phone rather than to the training, and a rest timer
-   is the one thing you might genuinely want while reading somebody's
-   session back.                                                        */
+   from inside a profile you cannot write to.
+
+   Three groups are on it that look like writes and are not, and each one
+   was a bug the first time this list was drawn up:
+
+   THE TIMERS, all of them, including making and editing one. They are
+   deliberately NOT in SYNC_COLLECTIONS — they belong to the phone rather
+   than to the training — so nothing about them can be overwritten by a
+   pull or pushed to anybody. Allowing Start while refusing Edit was this
+   list disagreeing with its own reasoning.
+
+   THE PROFILE LIST: add, rename, copy, delete, reorder. Those write the
+   profile INDEX, not the training inside a profile, and refusing them
+   meant you could not make a profile of your own, or delete the shared
+   one you had finished with, without first switching away from it. Note
+   Copy is a feature here rather than a hole: a local copy of something
+   somebody shared with you is yours to write in, which is exactly what
+   somebody wanting to fork a program off a friend is after.
+
+   STORAGE ADOPT, because it is the repair tool, and a rescue you can only
+   reach from a profile that is not the broken one is not a rescue.
+
+   Left blocked deliberately: everything in Settings that writes
+   `settings` (units, week mode, start date, and Save), because those ARE
+   synced and a local change to one would be quietly reverted by the next
+   pull — the one outcome this whole list exists to prevent.           */
 const READ_OK = new Set([
   "nav", "fab", "log-seg", "library-seg", "prog-seg", "picker-seg", "lib-filter",
   "cal-day", "cal-next", "cal-prev", "vol-next", "vol-prev", "toggle-accordion",
   "open-exercise-window", "exwin-close", "exwin-cancel", "open-log-day", "log-day",
   "open-picker", "close-picker", "overlay-close", "close-worksheet", "close-entry",
   "close-body", "open-body", "close-storage", "open-storage", "storage-export", "storage-share",
+  "storage-adopt", "open-groups",
   "open-profile", "close-profile", "open-profiles", "close-profiles", "profile-switch",
-  "profile-menu", "open-sync", "close-sync", "sync-now", "sync-disable", "sync-copy-code",
+  "profile-menu", "profile-add", "profile-duplicate", "profile-delete", "profile-form-save",
+  "profiles-reorder",
+  "open-sync", "close-sync", "sync-now", "sync-disable", "sync-copy-code",
   "open-join", "close-join", "join-go", "open-push-test",
   "chart-zoom-in", "chart-zoom-out", "chart-reset", "chart-full", "chart-exit-full", "chart-pick",
   "select-progress", "ex-hist-all", "open-preset", "plan-open", "plan-result-close",
   "calc-run", "std-check", "std-mode", "std-pick", "std-pick-open", "std-pick-close", "std-sex",
   "export-data", "share-data", "dismiss-new", "toast-dismiss", "toast-open",
-  "timer-start", "timer-pause", "timer-reset", "timer-sound-test",
+  "timer-start", "timer-pause", "timer-reset", "timer-sound-test", "timer-add", "timer-edit",
+  "timer-save", "timer-delete", "timer-pin", "timer-form-pin", "timer-reorder", "timer-preset",
+  "timer-sound",
 ]);
 
 function toastReadOnly() {

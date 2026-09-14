@@ -49,6 +49,12 @@
 </head>
 <body>
 
+<!-- Settings → Notifications → Push test navigates here in the SAME window, because
+     a new tab inside an installed app on iOS opens in Safari, where there is no
+     standalone context and so no push to test. Same window means no browser
+     chrome to go back with, hence this link. "./" is the app's start_url. -->
+<a href="./" style="display:inline-block;margin-bottom:10px;color:#4f7cff;text-decoration:none;font-size:14px">&larr; Zenofit</a>
+
 <h1>Push test</h1>
 <p class="sub">Isolated from the app. Nothing here touches your training data.</p>
 
@@ -140,14 +146,21 @@
   };
 
   document.getElementById("timer").onclick = async function () {
-    var fireAt = Date.now() + 60000;
-    log("scheduling for " + new Date(fireAt).toTimeString().slice(0, 8) + " ...");
+    var started = Date.now();
+    log("scheduling 60s from now (server clock)...");
+
+    /* inMs, not fireAt: the server resolves the deadline against its own clock,
+       so a phone that is seconds off still gets its alarm 60 seconds later. */
     var t = await window.ZenofitCloud.scheduleTimer({
-      fireAt: fireAt, label: "Test", title: "60 second test", body: "Fired from the server."
+      inMs: 60000, label: "Test", title: "60 second test", body: "Fired from the server."
     });
     if (!t) { log("scheduling failed"); return; }
+
+    var drift = window.ZenofitCloud.clockDrift();
     log("scheduled. LOCK YOUR PHONE AND PUT IT DOWN.");
-    log("drift between your clock and the server: " + Math.abs(t.serverNow - Date.now()) + " ms");
+    log("your clock is " + Math.abs(drift) + " ms " + (drift > 0 ? "behind" : "ahead of") + " the server");
+    log("expect it at about " + new Date(started + 60000).toTimeString().slice(0, 8) +
+        " by this phone's clock, give or take that much");
   };
 
   /* The main app registers this in index.html. This page has to do it itself,

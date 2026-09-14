@@ -7223,6 +7223,20 @@ function renderProfile(f) {
       ${field(T("profile.startDate"), `<input type="date" class="pb-input" data-bind="profile.startDate" value="${esc(f.startDate)}">`, T("profile.startDateHint"))}
 
       <div class="pb-hairline" style="margin:18px 0"></div>
+      ${sectionTitle(T("push.section"))}
+      ${/* The diagnostic page is a separate document, so this is a link in
+            button's clothing rather than another ui flag: see open-push-test
+            for why it is a real navigation and not a new tab. */""}
+      <button data-action="open-push-test" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:13.5px;margin-bottom:9px;justify-content:flex-start;padding-left:14px;gap:9px">
+        ${icon("bell", 15)} ${T("push.diag")}
+        <span style="flex:1"></span>
+        ${icon("chevron-right", 15, 'style="color:var(--faint)"')}
+      </button>
+      <div style="font-size:11.5px;color:var(--faint);margin-bottom:16px;line-height:1.5">
+        ${T("push.diagHint")}
+      </div>
+
+      <div class="pb-hairline" style="margin:18px 0"></div>
       ${sectionTitle(T("profile.data"))}
       ${/* Only where the OS will actually take the file, see shareFileType. It
             sits above the pair and full width because on a phone it is the one
@@ -8289,6 +8303,33 @@ const actions = {
   "export-data": () => exportBackup(),
   "share-data": () => shareBackup(),
   "open-storage": () => { ui.showStorage = true; render(); },
+
+  /* ── OUT TO THE PUSH DIAGNOSTIC AND BACK ─────────────────────────────
+     The one place in the app that deliberately navigates the document
+     away from itself, so it is worth saying why it is shaped like this.
+
+     A REAL NAVIGATION, NOT window.open. Inside an installed app on iOS a
+     new tab does not open beside you, it opens in Safari: a different
+     browsing context, outside the installed scope, with no service worker
+     and no standalone flag. iOS only delivers a push to an installed app,
+     so the page would sit there diagnosing a context that can never pass,
+     which is the one thing it exists to test. Same-window keeps it inside
+     the scope on every platform, and push-test.html carries a link back.
+
+     RELATIVE, NEVER THE github.io URL. The whole document resolves it
+     against wherever the app is actually being served from, so a move to
+     another host, or a local file:// copy, or a preview server, all keep
+     working. Hard-coding the deploy URL would send a developer testing a
+     local build to the live site to look at the live build.
+
+     The state write is belt and braces: writeNow is already bound to
+     pagehide and beforeunload, and both fire on a navigation like this.
+     Doing it here too costs one localStorage write and means a half-typed
+     set survives even on a browser that drops those events. */
+  "open-push-test": () => {
+    writeNow();
+    location.href = "push-test.html";
+  },
   /* Read-only, both of them, so they still work on a device too full to
      save anything. Nothing is awaited before the share, see shareFile. */
   "storage-export": (el) => {

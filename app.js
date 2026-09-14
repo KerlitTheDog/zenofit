@@ -1913,6 +1913,9 @@ function closeEverything() {
   ui.timerForm = null; ui.deloadForm = null; ui.planResult = null;
   ui.stdPick = false; ui.std = null; ui.stdResult = null;
   ui.profilesWin = false; ui.profileForm = null; ui.profileOrder = false;
+  /* the sync sheets name a profile by id, so leaving one open across a
+     switch would point them at somebody else's */
+  ui.syncSheet = null; ui.joinSheet = null; ui.syncError = null;
 }
 
 function switchProfile(id) {
@@ -2009,6 +2012,301 @@ function profileStats() {
       : { days: 0, entries: 0 };
   }
   return out;
+}
+
+/* ── SYNC: ONE PROFILE, MORE THAN ONE PHONE ───────────────────────────
+   Everything above here is local-first and stays that way. The log on
+   this device is the log; nothing waits on a network to be counted, and
+   the app works exactly as well in a basement with no signal. Sync is a
+   COPY kept somewhere else, never the store.
+
+   It is also OFF until somebody turns it on, per profile, out loud. A
+   training log is the most personal thing in here and it does not start
+   leaving the phone because an update landed.
+
+   WHAT A PROFILE IS ON EITHER SIDE. Locally a profile is a whole state
+   object under its own key (see stateKeyFor). On the server it is a row
+   plus a pile of items, each one {collection, itemId, json}. The bridge
+   between them is a remoteId, and it lives OUTSIDE state in SYNC_KEY,
+   for the same reason zenofit:device does: backupText serialises state,
+   a backup is a file people share, and a handle on somebody's cloud
+   profile is not training data. Restoring a backup onto a second phone
+   must not quietly hand it the keys to the original.
+
+   WHAT TRAVELS is SYNC_COLLECTIONS and nothing else. The server enforces
+   the same list and refuses an unknown collection BY NAME rather than
+   dropping it quietly, so the two lists disagreeing is loud. Deliberately
+   absent: `drafts`, which is a photograph of a half-typed set editor, and
+   `timers`, which carry a cloudId naming a push alarm booked for ONE
+   device. Of `settings` only the training half travels — units, start
+   date, week mode, sex, name — because theme and language are properties
+   of a phone rather than of a person's training, and having her dark mode
+   follow his device around is nobody's idea of a feature.
+
+   HOW A CHANGE IS FOUND. Nothing in this app stamps an edit: a log entry
+   has createdAt and has never had an updatedAt, and adding one would mean
+   touching every one of the hundreds of places that write. So `marks`
+   holds a short hash per item from the last time it went up, and a push is
+   whatever no longer matches, plus a tombstone for anything whose mark
+   outlived its item. That is change detection with no cooperation required
+   from the rest of the file, and it cannot miss an edit made by code that
+   has never heard of sync.
+
+   The clientUpdatedAt stamped alongside is the moment the change was
+   DETECTED, which is the first sync after the edit rather than the edit
+   itself. That is honest for the one thing the server uses it for, which
+   is refusing to go backwards. It is NOT a merge policy: two people
+   editing the same set between two syncs is not a case this resolves, and
+   dressing it up as one would be worse than saying so plainly.          */
+
+const SYNC_KEY = "zenofit:profiles";
+const SYNC_PAGE = 200;            // the server's own per-push ceiling
+
+const syncAll = () => { try { return JSON.parse(localStorage.getItem(SYNC_KEY)) || {}; } catch { return {}; } };
+const syncFor = (localId) => syncAll()[localId] || null;
+const syncedActive = () => syncFor(activeProfileId());
+/* a read grant: all of it visible, none of it ours to change */
+const syncReadOnly = () => { const r = syncedActive(); return !!(r && r.level === "read"); };
+
+function syncSet(localId, patch) {
+  const all = syncAll();
+  all[localId] = { ...(all[localId] || {}), ...patch };
+  try { localStorage.setItem(SYNC_KEY, JSON.stringify(all)); }
+  catch (e) { console.error("sync index save failed", e); }
+  return all[localId];
+}
+
+function syncForget(localId) {
+  const all = syncAll();
+  delete all[localId];
+  try { localStorage.setItem(SYNC_KEY, JSON.stringify(all)); } catch { /* nothing to forget */ }
+}
+
+/* `order: true` marks a list whose ORDER the user set and can see: the
+   muscle groups, the presets, the library. An item store has no order, so
+   those carry their index and are sorted back into it on the way in.
+   Everything else is drawn sorted by date or by name wherever it appears,
+   so its array position means nothing and is not worth a field. */
+const SYNC_COLLECTIONS = {
+  log:         { id: (x) => x.id },
+  body:        { id: (x) => x.id },
+  plans:       { id: (x) => x.id },
+  deloads:     { id: (x) => x.id },
+  dayDrafts:   { id: (x) => x.id },
+  unlogged:    { id: (x) => x.date },
+  presets:     { id: (x) => x.id, order: true },
+  library:     { id: (x) => x.id, order: true },
+  groups:      { id: (x) => x.name, order: true },
+  goals:       { map: true },
+  volumeGoals: { map: true },
+  settings:    { map: true, keys: ["units", "startDate", "weekMode", "sex", "name"] },
+};
+
+/* djb2, base36. Short, fast, and only ever compared with itself: this
+   answers "did this item change", never "are these two items equal". */
+function syncHash(s) {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+
+/* The active profile as the wire sees it. */
+function syncLocalItems() {
+  const out = [];
+  for (const collection of Object.keys(SYNC_COLLECTIONS)) {
+    const def = SYNC_COLLECTIONS[collection];
+    const src = state[collection];
+    if (def.map) {
+      if (!src || typeof src !== "object") continue;
+      for (const k of Object.keys(src)) {
+        if (def.keys && def.keys.indexOf(k) < 0) continue;
+        if (src[k] === undefined) continue;
+        /* wrapped, because an item's json has to be an object and a goal
+           is a bare number */
+        out.push({ collection, itemId: k, json: { v: src[k] } });
+      }
+    } else {
+      if (!Array.isArray(src)) continue;
+      src.forEach((item, i) => {
+        const itemId = def.id(item);
+        if (itemId == null || itemId === "") return;
+        out.push({ collection, itemId: String(itemId), json: def.order ? { ...item, __i: i } : item });
+      });
+    }
+  }
+  return out;
+}
+
+/* One pulled page, folded into the state in memory. Returns how many items
+   actually landed, so a caller can tell a real change from a page of
+   things this device already had. */
+function syncApply(items) {
+  let n = 0;
+  const touched = new Set();
+  for (const it of items || []) {
+    const def = SYNC_COLLECTIONS[it.collection];
+    if (!def) continue;                    // a collection this build has never heard of
+    touched.add(it.collection);
+    if (def.map) {
+      if (def.keys && def.keys.indexOf(it.itemId) < 0) continue;
+      const bag = { ...(state[it.collection] || {}) };
+      if (it.deleted) delete bag[it.itemId];
+      else if (it.json && "v" in it.json) bag[it.itemId] = it.json.v;
+      else continue;
+      state[it.collection] = bag;
+      n++;
+    } else {
+      const list = Array.isArray(state[it.collection]) ? [...state[it.collection]] : [];
+      const at = list.findIndex((x) => String(def.id(x)) === String(it.itemId));
+      if (it.deleted) { if (at >= 0) { list.splice(at, 1); n++; } }
+      else if (it.json) {
+        const row = { ...it.json };
+        delete row.__i;
+        if (at >= 0) list[at] = row; else list.push(row);
+        n++;
+      } else continue;
+      state[it.collection] = list;
+    }
+  }
+  /* an item store has no order, so an ordered list is put back into the one
+     its own items remember */
+  for (const c of touched) {
+    const def = SYNC_COLLECTIONS[c];
+    if (!def.order || !Array.isArray(state[c])) continue;
+    const ix = new Map();
+    for (const it of items)
+      if (it.collection === c && it.json && typeof it.json.__i === "number") ix.set(String(it.itemId), it.json.__i);
+    const pos = (x) => (ix.has(String(def.id(x))) ? ix.get(String(def.id(x))) : Number.MAX_SAFE_INTEGER);
+    state[c] = [...state[c]].sort((a, b) => pos(a) - pos(b));
+  }
+  return n;
+}
+
+/* ── THE TWO HALVES ──────────────────────────────────────────────────
+   Both take a LOCAL profile id and both assume it is the active one,
+   because `state` IS the active profile and syncing one you are not
+   looking at would mean holding a second profile in memory beside it.
+   You sync what is in front of you. */
+
+async function syncPull(localId) {
+  const rec = syncFor(localId);
+  if (!rec || !rec.remoteId) return { ok: false, reason: "not-linked" };
+  const C = window.ZenofitCloud;
+  if (!C || typeof C.pullChanges !== "function") return { ok: false, reason: "no-client" };
+
+  let cursor = rec.cursor || null, applied = 0, level = rec.level, guard = 0;
+  /* a cursor, never a bare timestamp, once we have one: saving a workout
+     stamps every set in it with the same millisecond, and `since` cannot
+     separate rows that share one */
+  while (guard++ < 500) {
+    const res = await C.pullChanges(rec.remoteId, cursor || { since: 0, limit: SYNC_PAGE });
+    if (res.level) level = res.level;
+    applied += syncApply(res.items);
+    /* marks follow what just landed, or the very next push hands the server
+       its own rows straight back */
+    const marks = { ...((syncFor(localId) || {}).marks || {}) };
+    for (const it of res.items || []) {
+      const key = it.collection + "/" + it.itemId;
+      if (it.deleted) delete marks[key];
+      else marks[key] = [syncHash(JSON.stringify(it.json)), it.clientUpdatedAt || it.updatedAt || Date.now()];
+    }
+    cursor = res.cursor || cursor;
+    syncSet(localId, { marks, cursor, level, lastPulledAt: Date.now() });
+    if (!res.hasMore) break;
+  }
+  if (applied) writeNow();
+  return { ok: true, applied, level };
+}
+
+async function syncPush(localId) {
+  const rec = syncFor(localId);
+  if (!rec || !rec.remoteId) return { ok: false, reason: "not-linked" };
+  if (rec.level === "read") return { ok: false, reason: "read-only" };
+  const C = window.ZenofitCloud;
+  if (!C || typeof C.pushChanges !== "function") return { ok: false, reason: "no-client" };
+
+  const marks = { ...(rec.marks || {}) };
+  const now = Date.now();
+  const queue = [];
+  const seen = new Set();
+
+  for (const it of syncLocalItems()) {
+    const key = it.collection + "/" + it.itemId;
+    seen.add(key);
+    const h = syncHash(JSON.stringify(it.json));
+    if (marks[key] && marks[key][0] === h) continue;          // unchanged since last time
+    marks[key] = [h, now];
+    queue.push({ collection: it.collection, itemId: it.itemId, json: it.json, clientUpdatedAt: now });
+  }
+  /* a mark with no item behind it is something deleted on this device */
+  for (const key of Object.keys(marks)) {
+    if (seen.has(key)) continue;
+    const cut = key.indexOf("/");
+    queue.push({ collection: key.slice(0, cut), itemId: key.slice(cut + 1), json: null, deleted: true, clientUpdatedAt: now });
+  }
+  if (!queue.length) { syncSet(localId, { lastPushedAt: Date.now() }); return { ok: true, sent: 0, stale: 0 }; }
+
+  let sent = 0, stale = 0;
+  for (let i = 0; i < queue.length; i += SYNC_PAGE) {
+    const batch = queue.slice(i, i + SYNC_PAGE);
+    const res = await C.pushChanges(rec.remoteId, batch);
+    sent += res.accepted || 0;
+    const staleKeys = new Set((res.staleItems || []).map((s) => s.collection + "/" + s.itemId));
+    stale += staleKeys.size;
+    for (const b of batch) {
+      const key = b.collection + "/" + b.itemId;
+      /* a stale row loses its mark so the next sync offers it again, after
+         a pull has shown us what the other device had to say */
+      if (staleKeys.has(key)) { delete marks[key]; continue; }
+      if (b.deleted) delete marks[key];
+    }
+    syncSet(localId, { marks, lastPushedAt: Date.now() });
+  }
+  return { ok: true, sent, stale };
+}
+
+/* Who is in, for the list in the share sheet. Its own function because it
+   is wanted after joining, after revoking and after opening the sheet, and
+   it must never be the reason any of those three fail: a grants list that
+   would not load is a row that says nothing, not an error over the top of
+   a code somebody is still copying. */
+function refreshGrants() {
+  const f = ui.syncSheet;
+  const rec = f && syncFor(f.localId);
+  if (!rec || !rec.remoteId || rec.level === "read") return;
+  const C = window.ZenofitCloud;
+  if (!C || typeof C.listGrants !== "function") return;
+  C.listGrants(rec.remoteId)
+    .then((res) => {
+      if (!ui.syncSheet || ui.syncSheet.localId !== f.localId) return;   // sheet moved on
+      ui.syncSheet = { ...ui.syncSheet, grants: (res && res.grants) || res || [] };
+      render();
+    })
+    .catch(() => { /* the sheet is still useful without it */ });
+}
+
+/* Pull first, then push. The server's copy is the one another device may
+   have moved on, and writing over it before reading it is exactly how an
+   edit made somewhere else disappears with nobody watching. */
+async function syncNow(localId = activeProfileId()) {
+  const rec = syncFor(localId);
+  if (!rec || !rec.remoteId) return { ok: false, reason: "not-linked" };
+  if (ui.syncBusy) return { ok: false, reason: "busy" };
+  ui.syncBusy = true; ui.syncError = null; render();
+  try {
+    const pulled = await syncPull(localId);
+    const pushed = rec.level === "read" ? { ok: true, sent: 0 } : await syncPush(localId);
+    syncSet(localId, { lastOkAt: Date.now() });
+    return { ok: true, pulled, pushed };
+  } catch (e) {
+    /* pullChanges and pushChanges THROW, unlike the rest of the client, so
+       a revoked grant arrives as a 403 rather than as an empty profile */
+    ui.syncError = (e && (e.code || e.message)) || "failed";
+    console.warn("sync failed", e);
+    return { ok: false, error: e };
+  } finally {
+    ui.syncBusy = false; render();
+  }
 }
 
 /* ── BACKUP: EVERYTHING, OUT AND BACK IN ──────────────────────────────
@@ -2799,6 +3097,17 @@ function render() {
     </div>`;
   }
 
+  /* Somebody else's training, on your phone. A strip rather than a dialog:
+     every screen still works, so the only thing that needs saying is whose
+     it is and why the buttons refuse — said once, at the top, on every tab,
+     including Home, where there is no header to hang it under. */
+  if (syncReadOnly()) {
+    html += `<div style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:rgba(93,138,168,.14);border-bottom:1px solid var(--border-soft)${tab === "home" ? ";padding-top:calc(8px + var(--pb-sat))" : ""}">
+      ${icon("eye", 14, 'style="color:var(--steel);flex-shrink:0"')}
+      <span style="font-size:11.5px;color:var(--steel);line-height:1.4">${T("sync.roBanner")}</span>
+    </div>`;
+  }
+
   /* content */
   html += `<div class="pb-scroll" data-scrollkey="main-${tab}" style="flex:1;min-height:0;overflow-y:auto;padding-bottom:var(--pb-content-pb)">`;
   if (tab === "home") html += renderHome(settings, currentWeek, unit);
@@ -2866,6 +3175,8 @@ function render() {
   if (ui.showStorage) html += renderStorage();
   if (ui.profilesWin) html += renderProfilesWindow();
   if (ui.profileForm) html += renderProfileForm();
+  if (ui.syncSheet) html += renderSyncSheet();
+  if (ui.joinSheet) html += renderJoinSheet();
   if (ui.showBody) html += renderBodyWindow(body, unit);
   if (ui.bodyForm) html += renderBodyFormSheet(ui.bodyForm, unit);
   if (ui.groupSheet) html += renderGroupSheet(library);
@@ -7419,6 +7730,11 @@ function renderProfilesWindow() {
       <button data-action="profile-add" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:13.5px;color:var(--gold);border-color:rgba(233,185,73,.4)">
         ${icon("plus", 15)} ${T("profiles.add")}
       </button>
+      ${/* Joining is next to adding because it IS adding: what arrives is a
+            new profile of its own, never a merge into one already here. */""}
+      <button data-action="open-join" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;margin-top:8px;font-size:13.5px">
+        ${icon("cloud-download", 15)} ${T("sync.joinBtn")}
+      </button>
       <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin-top:14px">${T("profiles.hint")}</div>
     </div>
   `, "profilesWin");
@@ -7435,13 +7751,127 @@ function renderProfileForm() {
     <button data-action="profile-form-save" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
       ${icon("check", 16)} ${T(f.mode === "rename" ? "common.saveChanges" : "profiles." + f.mode + "Btn")}
     </button>
-    ${f.mode === "rename" ? `<button data-action="profile-duplicate" data-id="${esc(f.id)}" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;margin-top:8px;font-size:13.5px">
+    ${f.mode === "rename" ? `<button data-action="open-sync" data-id="${esc(f.id)}" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;margin-top:8px;font-size:13.5px;justify-content:flex-start;padding-left:14px;gap:9px">
+      ${icon(syncFor(f.id) ? "cloud" : "cloud-off", 15, `style="color:${syncFor(f.id) ? "var(--gold)" : "var(--faint)"}"`)} ${T("sync.entry")}
+      <span style="flex:1"></span>
+      <span style="font-size:11.5px;color:var(--faint)">${T(syncFor(f.id) ? (syncFor(f.id).level === "read" ? "sync.stateRead" : "sync.stateOn") : "sync.stateOff")}</span>
+      ${icon("chevron-right", 15, 'style="color:var(--faint)"')}
+    </button>
+    <button data-action="profile-duplicate" data-id="${esc(f.id)}" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;margin-top:8px;font-size:13.5px">
       ${icon("copy", 15)} ${T("profiles.copyBtn")}
     </button>
     ${profileList().length > 1 ? `<button data-action="profile-delete" data-id="${esc(f.id)}" class="pb-btn" style="width:100%;padding:12px 0;margin-top:8px;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">
       ${icon("trash-2", 15)} ${T("profiles.deleteBtn")}
     </button>` : `<div style="font-size:11.5px;color:var(--faint);margin-top:10px;line-height:1.5">${T("profiles.lastOne")}</div>`}` : ""}
   `, 118);
+}
+
+/* ── SHARING A PROFILE, AND JOINING ONE ──────────────────────────────
+   Two sheets and one rule: nothing here is on until it is switched on,
+   and the screen says what leaving the phone means before it leaves.
+
+   The code itself is the whole handover. It is shown once, large, in a
+   font where 0 and O cannot be confused, with a Copy button, because the
+   realistic way it travels is a message to the person standing next to
+   you. Rotating mints a new one and retires the old WITHOUT evicting
+   anybody already in, which is the difference between "I lost the paper"
+   and "I want her out", and those are two different buttons. */
+function renderSyncSheet() {
+  const f = ui.syncSheet;
+  const list = profileList();
+  const i = list.findIndex((p) => p.id === f.localId);
+  const rec = syncFor(f.localId);
+  const on = !!(rec && rec.remoteId);
+  const mine = !rec || rec.level !== "read";
+  const cloud = window.ZenofitCloud;
+
+  const when = (t) => (t ? T("sync.lastAt", { when: fmtDate(new Date(t).toISOString().slice(0, 10)) }) : T("sync.never"));
+
+  const status = on
+    ? `<div class="pb-card2" style="padding:12px 14px;margin-bottom:14px">
+        <div style="display:flex;align-items:center;gap:9px">
+          <span style="width:9px;height:9px;border-radius:5px;background:${ui.syncError ? "var(--red)" : "var(--green)"};flex-shrink:0"></span>
+          <span style="flex:1;font-weight:600;font-size:14px">${T(mine ? "sync.onTitle" : "sync.readTitle")}</span>
+          ${ui.syncBusy ? `<span style="font-size:11.5px;color:var(--faint)">${T("sync.working")}</span>` : ""}
+        </div>
+        <div style="font-size:11.5px;color:${ui.syncError ? "var(--red)" : "var(--faint)"};margin-top:5px;line-height:1.5">
+          ${ui.syncError ? T("sync.failed", { why: esc(String(ui.syncError)) }) : when(rec.lastOkAt || rec.lastPulledAt || rec.lastPushedAt)}
+        </div>
+      </div>`
+    : `<div style="font-size:12.5px;color:var(--faint);line-height:1.6;margin-bottom:14px">${T("sync.offBody")}</div>`;
+
+  /* the code, only ever drawn when there is one to draw: a box that says
+     "your code will appear here" is a box that looks broken */
+  const code = f.code
+    ? `<div class="pb-card2" style="padding:14px;margin-bottom:10px;text-align:center">
+        <div class="pb-label" style="margin-bottom:6px">${T("sync.codeLabel", { level: T(f.codeLevel === "write" ? "sync.levelWrite" : "sync.levelRead") })}</div>
+        <div class="pb-num" style="font-size:25px;font-weight:700;letter-spacing:.12em;color:var(--gold);word-break:break-all;line-height:1.25">${esc(f.code)}</div>
+        <button data-action="sync-copy-code" class="pb-btn pb-ghost" style="width:100%;padding:10px 0;margin-top:11px;font-size:13px">
+          ${icon(f.copied ? "check" : "copy", 14)} ${T(f.copied ? "sync.copied" : "sync.copy")}
+        </button>
+        <div style="font-size:11px;color:var(--faint);margin-top:9px;line-height:1.5">${T("sync.codeHint")}</div>
+      </div>`
+    : "";
+
+  const grants = (f.grants || []).length
+    ? `<div class="pb-card" style="overflow:hidden;margin-bottom:10px">${f.grants.map((g, n) => `
+        <div style="display:flex;align-items:center;gap:10px;padding:11px 12px;border-bottom:${n < f.grants.length - 1 ? "1px solid var(--border-soft)" : "none"}">
+          <span style="flex:1;min-width:0">
+            <span style="display:block;font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(g.displayName || T("sync.someone"))}</span>
+            <span style="display:block;font-size:11px;color:var(--faint)">${T(g.level === "write" ? "sync.levelWrite" : "sync.levelRead")}</span>
+          </span>
+          <button data-action="sync-revoke" data-g="${esc(g.userId)}" class="pb-btn" style="flex-shrink:0;padding:7px 12px;font-size:12px;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">${T("sync.revoke")}</button>
+        </div>`).join("")}</div>`
+    : `<div style="font-size:11.5px;color:var(--faint);margin-bottom:10px;line-height:1.5">${T("sync.nobody")}</div>`;
+
+  const body = !cloud
+    ? `<div style="font-size:12.5px;color:var(--faint);line-height:1.6">${T("sync.noClient")}</div>`
+    : !on
+    ? `${status}
+       <button data-action="sync-enable" ${ui.syncBusy ? "disabled" : ""} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${ui.syncBusy ? 0.45 : 1}">
+         ${icon("cloud-upload", 16)} ${T("sync.turnOn")}
+       </button>`
+    : `${status}
+       <button data-action="sync-now" ${ui.syncBusy ? "disabled" : ""} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;margin-bottom:16px;opacity:${ui.syncBusy ? 0.45 : 1}">
+         ${icon("refresh-cw", 16)} ${T("sync.syncNow")}
+       </button>
+       ${mine ? `
+         <div class="pb-hairline" style="margin:4px 0 16px"></div>
+         ${sectionTitle(T("sync.shareTitle"))}
+         ${code}
+         <div style="display:flex;gap:8px;margin-bottom:10px">
+           <button data-action="sync-make-code" data-level="read" class="pb-btn pb-ghost" style="flex:1;padding:11px 0;font-size:13px">${icon("eye", 14)} ${T("sync.makeRead")}</button>
+           <button data-action="sync-make-code" data-level="write" class="pb-btn pb-ghost" style="flex:1;padding:11px 0;font-size:13px">${icon("pencil", 14)} ${T("sync.makeWrite")}</button>
+         </div>
+         <div style="font-size:11.5px;color:var(--faint);margin-bottom:16px;line-height:1.55">${T("sync.makeHint")}</div>
+         ${sectionTitle(T("sync.peopleTitle"))}
+         ${grants}
+       ` : `<div style="font-size:12.5px;color:var(--faint);line-height:1.6;margin-bottom:16px">${T("sync.readBody")}</div>`}
+       <div class="pb-hairline" style="margin:16px 0"></div>
+       <button data-action="sync-disable" class="pb-btn" style="width:100%;padding:12px 0;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">
+         ${icon("cloud-off", 15)} ${T(mine ? "sync.turnOff" : "sync.leave")}
+       </button>
+       <div style="font-size:11.5px;color:var(--faint);margin-top:10px;line-height:1.55">${T(mine ? "sync.turnOffHint" : "sync.leaveHint")}</div>`;
+
+  return sheet(T("sync.title", { name: esc(profileLabel(list[i], i)) }), "syncSheet", body, 122);
+}
+
+/* The other end of the same code. A joined profile is a NEW local profile,
+   never a merge into one you already have: her training arriving on top of
+   yours, silently interleaved, is the one outcome nobody could undo. */
+function renderJoinSheet() {
+  const f = ui.joinSheet;
+  const ok = (f.code || "").trim().length >= 4 && !f.busy;
+  return sheet(T("sync.joinTitle"), "joinSheet", `
+    ${field(T("sync.joinLabel"),
+      `<input class="pb-input pb-num" data-bind="joinCode" value="${esc(f.code)}" placeholder="XXXX-XXXX-XX" autocapitalize="characters" autocomplete="off" spellcheck="false" style="letter-spacing:.1em;font-weight:700" data-autofocus>`,
+      T("sync.joinHint"))}
+    ${f.error ? `<div style="font-size:12.5px;color:var(--red);margin:-4px 0 12px;line-height:1.5">${esc(f.error)}</div>` : ""}
+    <button data-action="join-go" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
+      ${icon("cloud-download", 16)} ${T(f.busy ? "sync.joining" : "sync.joinBtn")}
+    </button>
+    <div style="font-size:11.5px;color:var(--faint);margin-top:12px;line-height:1.55">${T("sync.joinBody")}</div>
+  `, 122);
 }
 
 /* ────────────────────────── SHEET / SHELL ─────────────────────────── */
@@ -8396,6 +8826,139 @@ const actions = {
   "export-data": () => exportBackup(),
   "share-data": () => shareBackup(),
   "open-storage": () => { ui.showStorage = true; render(); },
+  /* ── sharing a profile ───────────────────────────────────────────────
+     Every one of these talks to a network, so every one of them can fail
+     with the app still on screen and still usable. They report and stop;
+     nothing here ever leaves the local profile half-changed. */
+  "open-sync": (el) => {
+    ui.profileForm = null;
+    ui.syncSheet = { localId: el.dataset.id, grants: [], code: null, copied: false };
+    ui.syncError = null;
+    render();
+    refreshGrants();
+  },
+  "close-sync": () => { ui.syncSheet = null; render(); },
+
+  /* Turning it on is the moment the training starts leaving the phone, so
+     it asks, in as many words, once. */
+  "sync-enable": async () => {
+    const f = ui.syncSheet;
+    if (!f || ui.syncBusy) return;
+    if (f.localId !== activeProfileId()) { alert(T("sync.switchFirst")); return; }
+    if (!confirm(T("sync.confirmOn"))) return;
+    const C = window.ZenofitCloud;
+    if (!C) return;
+    ui.syncBusy = true; ui.syncError = null; render();
+    try {
+      await C.ensureDevice();
+      const list = profileList();
+      const i = list.findIndex((p) => p.id === f.localId);
+      const made = await C.createProfile(profileLabel(list[i], i));
+      /* linked BEFORE the first push, so a push that dies half way leaves a
+         profile that knows where it lives and can simply be synced again,
+         rather than an orphan on the server nothing points at */
+      syncSet(f.localId, { remoteId: made.id || made.profileId, level: "write", marks: {}, cursor: null });
+      ui.syncBusy = false;
+      await syncNow(f.localId);
+    } catch (e) {
+      ui.syncBusy = false;
+      ui.syncError = (e && (e.code || e.message)) || "failed";
+      render();
+    }
+  },
+
+  "sync-now": async () => {
+    const f = ui.syncSheet;
+    if (!f || ui.syncBusy) return;
+    if (f.localId !== activeProfileId()) { alert(T("sync.switchFirst")); return; }
+    await syncNow(f.localId);
+    refreshGrants();
+  },
+
+  /* Off, never out: the local profile keeps every set it has. What goes is
+     the link and the marks, so turning it back on is a fresh full push
+     rather than a diff against a server this device has stopped following. */
+  "sync-disable": () => {
+    const f = ui.syncSheet;
+    if (!f) return;
+    const rec = syncFor(f.localId);
+    const mine = !rec || rec.level !== "read";
+    if (!confirm(T(mine ? "sync.confirmOff" : "sync.confirmLeave"))) return;
+    syncForget(f.localId);
+    ui.syncSheet = { ...f, grants: [], code: null };
+    ui.syncError = null;
+    render();
+  },
+
+  "sync-make-code": async (el) => {
+    const f = ui.syncSheet;
+    const rec = f && syncFor(f.localId);
+    if (!rec || !rec.remoteId || ui.syncBusy) return;
+    const level = el.dataset.level === "write" ? "write" : "read";
+    ui.syncBusy = true; ui.syncError = null; render();
+    try {
+      const made = await window.ZenofitCloud.createSeed(rec.remoteId, level);
+      ui.syncSheet = { ...ui.syncSheet, code: made.seed, codeLevel: level, copied: false };
+    } catch (e) {
+      ui.syncError = (e && (e.code || e.message)) || "failed";
+    }
+    ui.syncBusy = false; render();
+  },
+
+  "sync-copy-code": async () => {
+    const f = ui.syncSheet;
+    if (!f || !f.code) return;
+    try { await navigator.clipboard.writeText(f.code); ui.syncSheet = { ...f, copied: true }; }
+    catch { /* no clipboard permission: the code is on screen to be read */ }
+    render();
+  },
+
+  "sync-revoke": async (el) => {
+    const f = ui.syncSheet;
+    const rec = f && syncFor(f.localId);
+    if (!rec || !rec.remoteId || !confirm(T("sync.confirmRevoke"))) return;
+    ui.syncBusy = true; render();
+    try { await window.ZenofitCloud.revokeGrant(rec.remoteId, el.dataset.g); }
+    catch (e) { ui.syncError = (e && (e.code || e.message)) || "failed"; }
+    ui.syncBusy = false; render();
+    refreshGrants();
+  },
+
+  /* ── joining one ─────────────────────────────────────────────────── */
+  "open-join": () => { ui.joinSheet = { code: "", busy: false, error: null }; render(); },
+  "close-join": () => { ui.joinSheet = null; render(); },
+
+  "join-go": async () => {
+    const f = ui.joinSheet;
+    if (!f || f.busy) return;
+    const C = window.ZenofitCloud;
+    if (!C) { ui.joinSheet = { ...f, error: T("sync.noClient") }; render(); return; }
+    ui.joinSheet = { ...f, busy: true, error: null }; render();
+    let joined;
+    try {
+      await C.ensureDevice();
+      joined = await C.joinWithSeed((f.code || "").trim());
+    } catch (e) {
+      const code = e && e.code;
+      ui.joinSheet = { ...ui.joinSheet, busy: false,
+        error: T(code === "not_found" || e.status === 404 ? "sync.joinBadCode"
+          : code === "rate_limited" || e.status === 429 ? "sync.joinTooMany"
+          : "sync.joinFailed") };
+      render();
+      return;
+    }
+    const remoteId = joined.profileId || joined.id;
+    const level = joined.level === "write" ? "write" : "read";
+    /* A NEW local profile, always. Folding somebody else's training into a
+       profile that already has yours in it is the one move here that cannot
+       be undone afterwards. */
+    const localId = addProfile(joined.name || T("sync.joinedName"));
+    if (!localId) { ui.joinSheet = { ...ui.joinSheet, busy: false, error: T("profiles.quota") }; render(); return; }
+    syncSet(localId, { remoteId, level, marks: {}, cursor: null });
+    ui.joinSheet = null;
+    switchProfile(localId);
+    await syncNow(localId);
+  },
 
   /* ── OUT TO THE PUSH DIAGNOSTIC AND BACK ─────────────────────────────
      The one place in the app that deliberately navigates the document
@@ -9605,6 +10168,43 @@ const actions = {
   },
 };
 
+/* ── A READ GRANT IS A CONSTRAINT, NOT A LABEL ────────────────────────
+   Somebody else's profile, shared for reading. Every screen works and
+   nothing can be written, and the enforcement is an ALLOWLIST rather than
+   a list of things to block, so it fails the safe way: an action added
+   next year is refused here until somebody decides it is safe, instead of
+   quietly becoming a hole. The server refuses the write as well — a check
+   on this side is a courtesy, not a lock — but it is the courtesy that
+   stops somebody logging a session into a profile that will throw it away
+   on the next pull.
+
+   What is on the list is navigation and looking: tabs, sheets opening and
+   closing, filters, the chart, the calculator, the accordion, the storage
+   check, and the sync sheet itself, because Leave has to stay reachable
+   from inside a profile you cannot write to. The timers are on it too:
+   they belong to the phone rather than to the training, and a rest timer
+   is the one thing you might genuinely want while reading somebody's
+   session back.                                                        */
+const READ_OK = new Set([
+  "nav", "fab", "log-seg", "library-seg", "prog-seg", "picker-seg", "lib-filter",
+  "cal-day", "cal-next", "cal-prev", "vol-next", "vol-prev", "toggle-accordion",
+  "open-exercise-window", "exwin-close", "exwin-cancel", "open-log-day", "log-day",
+  "open-picker", "close-picker", "overlay-close", "close-worksheet", "close-entry",
+  "close-body", "open-body", "close-storage", "open-storage", "storage-export", "storage-share",
+  "open-profile", "close-profile", "open-profiles", "close-profiles", "profile-switch",
+  "profile-menu", "open-sync", "close-sync", "sync-now", "sync-disable", "sync-copy-code",
+  "open-join", "close-join", "join-go", "open-push-test",
+  "chart-zoom-in", "chart-zoom-out", "chart-reset", "chart-full", "chart-exit-full", "chart-pick",
+  "select-progress", "ex-hist-all", "open-preset", "plan-open", "plan-result-close",
+  "calc-run", "std-check", "std-mode", "std-pick", "std-pick-open", "std-pick-close", "std-sex",
+  "export-data", "share-data", "dismiss-new", "toast-dismiss", "toast-open",
+  "timer-start", "timer-pause", "timer-reset", "timer-sound-test",
+]);
+
+function toastReadOnly() {
+  try { alert(T("sync.roBlocked")); } catch { /* no UI to say it in */ }
+}
+
 document.addEventListener("click", (e) => {
   const el = e.target.closest("[data-action]");
   if (!el) return;
@@ -9613,6 +10213,7 @@ document.addEventListener("click", (e) => {
      the outer action must not fire (sheet backdrops, goal editor row). */
   const stop = e.target.closest("[data-stopprop]");
   if (stop && el !== stop && el.contains(stop)) return;
+  if (syncReadOnly() && !READ_OK.has(el.dataset.action)) { toastReadOnly(); return; }
   const fn = actions[el.dataset.action];
   if (fn) fn(el, e);
 });
@@ -9677,6 +10278,12 @@ function handleBind(el) {
     }
     const btn = document.getElementById("stdCheckBtn");
     if (btn) { const ok = stdReady(f); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
+  } else if (bind === "joinCode") {
+    /* typed in upper case whatever the keyboard did, since that is how the
+       code is printed on the other phone and a seed is case-sensitive */
+    ui.joinSheet = { ...ui.joinSheet, code: v.toUpperCase(), error: null };
+    const btn = document.querySelector('[data-action="join-go"]');
+    if (btn) { const ok = ui.joinSheet.code.trim().length >= 4; btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
   } else if (bind === "goal") {
     ui.goalVal = v;
   } else if (bind === "volGoal") {

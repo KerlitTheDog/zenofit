@@ -2651,6 +2651,10 @@ const ui = {
   profileDraft: null,
   profilesWin: false,   // the profiles window (which training is on screen)
   profileForm: null,    // {id, name, mode:"add"|"rename"|"copy"} name editor
+  syncSheet: null,      // {localId, grants, code, copied} the share sheet
+  joinSheet: null,      // {code, busy, error} redeeming somebody's code
+  syncBusy: false,      // a pull or push is in flight
+  syncError: null,      // what the last one failed with, cleared by the next
   profileOrder: false,  // …that list is in drag-to-reorder mode
   profileStats: null,   // counts per profile, read once when the window opens
   profileLangWas: null,   // the saved language, so a previewed one can be backed out of
@@ -8842,7 +8846,6 @@ const actions = {
     render();
     refreshGrants();
   },
-  "close-sync": () => { ui.syncSheet = null; render(); },
 
   /* Turning it on is the moment the training starts leaving the phone, so
      it asks, in as many words, once. */
@@ -8931,7 +8934,6 @@ const actions = {
 
   /* ── joining one ─────────────────────────────────────────────────── */
   "open-join": () => { ui.joinSheet = { code: "", busy: false, error: null }; render(); },
-  "close-join": () => { ui.joinSheet = null; render(); },
 
   "join-go": async () => {
     const f = ui.joinSheet;
@@ -10157,18 +10159,22 @@ const actions = {
       patch({ body: state.body.filter((b) => b.id !== id) });
     }
   },
+  /* ── CLOSING A SHEET, WITHOUT A LIST TO FORGET ────────────────────────
+     Every sheet() names its own `ui` field as its target, so closing one
+     is clearing that field and nothing else. This used to be an if/else
+     ladder with one line per sheet, which meant every new sheet had to
+     remember to add itself — and the Join sheet shipped without its line.
+     Its X and its backdrop both fell through every branch, did nothing,
+     and the only way out of a code box you had opened by mistake was to
+     kill the app.
+
+     A lookup cannot forget. The `ui` guard keeps it to fields that are
+     really there, so a stale `data-target` clears nothing rather than
+     inventing a key; null rather than false throughout is safe because
+     every one of these is only ever read for truthiness. */
   "overlay-close": (el) => {
     const t = el.dataset.target;
-    if (t === "bodyForm") ui.bodyForm = null;
-    else if (t === "presetForm") ui.presetForm = null;
-    else if (t === "profileForm") ui.profileForm = null;
-    else if (t === "presetView") ui.presetView = null;
-    else if (t === "setForm") ui.setForm = null;
-    else if (t === "timerForm") ui.timerForm = null;
-    else if (t === "groupSheet") ui.groupSheet = false;
-    else if (t === "groupForm") ui.groupForm = null;
-    else if (t === "deloadForm") ui.deloadForm = null;
-    else if (t === "planResult") ui.planResult = null;
+    if (t && Object.prototype.hasOwnProperty.call(ui, t)) ui[t] = null;
     render();
   },
 };
@@ -10222,8 +10228,8 @@ const READ_OK = new Set([
   "open-profile", "close-profile", "open-profiles", "close-profiles", "profile-switch",
   "profile-menu", "profile-add", "profile-duplicate", "profile-delete", "profile-form-save",
   "profiles-reorder",
-  "open-sync", "close-sync", "sync-now", "sync-disable", "sync-copy-code",
-  "open-join", "close-join", "join-go", "open-push-test",
+  "open-sync", "sync-now", "sync-disable", "sync-copy-code",
+  "open-join", "join-go", "open-push-test",
   "chart-zoom-in", "chart-zoom-out", "chart-reset", "chart-full", "chart-exit-full", "chart-pick",
   "select-progress", "ex-hist-all", "open-preset", "plan-open", "plan-result-close",
   "calc-run", "std-check", "std-mode", "std-pick", "std-pick-open", "std-pick-close", "std-sex",

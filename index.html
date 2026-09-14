@@ -57,19 +57,93 @@
        builds a frame too. -->
   <script src="i18n.js"></script>
   <script src="standards.js"></script>
+  <!-- Cloud client. Loaded BEFORE app.js so window.ZenofitCloud exists on the
+       first frame. It never touches `state` and fails softly when the API is
+       unreachable, so the app runs unchanged without it. -->
+  <script src="zenofit-cloud.js"></script>
   <script src="app.js"></script>
 
   <!-- Service worker. Two reasons it exists: the app opens offline, and
        web push (the only way a timer can ring while the app is closed)
-       is delivered to a service worker, not to the page. -->
+       is delivered to a service worker, not to the page.
+
+       The update banner below is not decoration. sw.js serves from cache
+       first, so without it a deploy shows the OLD app on the first open and
+       the new one only on the second. Bumping VERSION in sw.js is what makes
+       a new worker install; this is what tells the user it is waiting. -->
   <script>
-    if ("serviceWorker" in navigator) {
-      window.addEventListener("load", function () {
-        navigator.serviceWorker.register("sw.js").catch(function (e) {
-          console.warn("SW registration failed", e);
-        });
-      });
+  (function () {
+    if (!("serviceWorker" in navigator)) return;
+
+    /* Phase 5 will read this: sw.js posts notification clicks here so the app
+       can jump to the timer that fired. Queued until app.js claims it. */
+    window.__zenofitSW = { pendingClicks: [], onClick: null };
+    navigator.serviceWorker.addEventListener("message", function (e) {
+      if (!e.data || e.data.type !== "notification-click") return;
+      var h = window.__zenofitSW.onClick;
+      if (typeof h === "function") h(e.data.data);
+      else window.__zenofitSW.pendingClicks.push(e.data.data);
+    });
+
+    function banner(reg) {
+      if (document.getElementById("sw-update-bar")) return;
+      var bar = document.createElement("div");
+      bar.id = "sw-update-bar";
+      bar.setAttribute("role", "status");
+      bar.style.cssText =
+        "position:fixed;left:12px;right:12px;z-index:99999;" +
+        "bottom:calc(12px + env(safe-area-inset-bottom));" +
+        "display:flex;gap:10px;align-items:center;justify-content:space-between;" +
+        "padding:10px 12px;border-radius:12px;font:500 14px/1.3 system-ui,sans-serif;" +
+        "background:#1e2027;color:#eaeaf0;box-shadow:0 6px 24px rgba(0,0,0,.45);";
+      var msg = document.createElement("span");
+      msg.textContent = "A new version is ready.";
+      var btn = document.createElement("button");
+      btn.textContent = "Reload";
+      btn.style.cssText =
+        "flex:0 0 auto;border:0;border-radius:9px;padding:8px 14px;" +
+        "font:600 14px system-ui,sans-serif;background:#4f7cff;color:#fff;";
+      btn.onclick = function () {
+        btn.disabled = true;
+        if (reg.waiting) reg.waiting.postMessage("skip-waiting");
+        else location.reload();
+      };
+      var dismiss = document.createElement("button");
+      dismiss.textContent = "Later";
+      dismiss.setAttribute("aria-label", "Dismiss");
+      dismiss.style.cssText =
+        "flex:0 0 auto;border:0;background:none;color:#9aa0ad;" +
+        "font:500 14px system-ui,sans-serif;padding:8px 4px;";
+      dismiss.onclick = function () { bar.remove(); };
+      bar.appendChild(msg); bar.appendChild(dismiss); bar.appendChild(btn);
+      document.body.appendChild(bar);
     }
+
+    /* One reload only. Without the guard, skipWaiting plus controllerchange
+       can bounce the page in a loop. */
+    var reloading = false;
+    navigator.serviceWorker.addEventListener("controllerchange", function () {
+      if (reloading) return;
+      reloading = true;
+      location.reload();
+    });
+
+    window.addEventListener("load", function () {
+      navigator.serviceWorker.register("sw.js").then(function (reg) {
+        if (reg.waiting && navigator.serviceWorker.controller) banner(reg);
+        reg.addEventListener("updatefound", function () {
+          var sw = reg.installing;
+          if (!sw) return;
+          sw.addEventListener("statechange", function () {
+            /* controller set means this is an update, not a first install */
+            if (sw.state === "installed" && navigator.serviceWorker.controller) banner(reg);
+          });
+        });
+      }).catch(function (e) {
+        console.warn("SW registration failed", e);
+      });
+    });
+  })();
   </script>
 </body>
 </html>

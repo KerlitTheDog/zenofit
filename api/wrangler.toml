@@ -1,0 +1,33 @@
+name = "zenofit-api"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "zenofit"
+database_id = "d74dafe1-35f1-413d-9066-cfde2fc27dd5"
+
+# One Durable Object per scheduled timer. A DO alarm fires at an exact second,
+# which a cron trigger cannot do: crons have one-minute resolution and a rest
+# timer is 60 to 180 seconds.
+[[durable_objects.bindings]]
+name = "TIMER"
+class_name = "TimerAlarm"
+
+# SQLite-backed, because that is the only kind the free plan supports.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["TimerAlarm"]
+
+[vars]
+# Browsers that are allowed to call this API. Comma separated, no spaces.
+ALLOWED_ORIGINS = "https://kerlitthedog.github.io,http://localhost:8080,http://127.0.0.1:8080"
+
+# Required by the push spec: who to contact if a push service sees a problem
+# with our traffic. A mailto: or an https: URL. Apple is the fussiest about it.
+VAPID_SUBJECT = "mailto:swagerooner@gmail.com"
+
+# The public half of the VAPID pair. Public by design: the app ships it too.
+# The private half lives in a secret (wrangler secret put VAPID_PRIVATE_KEY).
+VAPID_PUBLIC_KEY = "BHYPfSTAzNvtQIcnSPN99oHb5YN3FV0W1wJG_VJKQqXngrW8aJ4z8OQPg4vpgWW4MVqt_DtGgv3_I4PDzXlgOMA"

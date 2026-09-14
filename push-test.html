@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Zenofit push test</title>
+
+<!-- Deliberately NO <link rel="manifest">. The main manifest has start_url ".",
+     so linking it would make "Add to Home Screen" install the app instead of
+     this page. On iOS these apple- meta tags are what make THIS page open
+     standalone, which is the only state where iOS delivers a push at all. -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Push test">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="theme-color" content="#131417">
+
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; padding: 20px 16px calc(24px + env(safe-area-inset-bottom));
+    background: #131417; color: #eaeaf0;
+    font: 15px/1.5 system-ui, -apple-system, sans-serif;
+  }
+  h1 { font-size: 19px; margin: 0 0 4px; }
+  .sub { color: #8b90a0; font-size: 13px; margin: 0 0 20px; }
+  .card {
+    background: #1b1d24; border-radius: 14px; padding: 14px; margin-bottom: 14px;
+  }
+  .row { display: flex; justify-content: space-between; gap: 12px; padding: 5px 0; font-size: 14px; }
+  .row span:first-child { color: #8b90a0; }
+  .row span:last-child { font-weight: 600; text-align: right; }
+  .ok { color: #4ade80; } .bad { color: #f87171; } .warn { color: #fbbf24; }
+  button {
+    display: block; width: 100%; margin: 8px 0 0;
+    border: 0; border-radius: 11px; padding: 14px;
+    font: 600 15px system-ui, sans-serif; background: #4f7cff; color: #fff;
+  }
+  button.ghost { background: #2a2d37; color: #cfd3dd; }
+  button:disabled { opacity: .45; }
+  #log {
+    background: #0d0e11; border-radius: 11px; padding: 12px; margin-top: 4px;
+    font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace;
+    white-space: pre-wrap; word-break: break-word; min-height: 90px; color: #9aa0ad;
+  }
+  .note { font-size: 13px; color: #fbbf24; margin: 10px 0 0; }
+</style>
+</head>
+<body>
+
+<h1>Push test</h1>
+<p class="sub">Isolated from the app. Nothing here touches your training data.</p>
+
+<div class="card" id="diag"></div>
+
+<div class="card">
+  <button id="enable">1. Enable notifications</button>
+  <button id="test" class="ghost" disabled>2. Send a test push now</button>
+  <button id="timer" class="ghost" disabled>3. Schedule one 60 seconds out</button>
+  <p class="note" id="note" hidden></p>
+</div>
+
+<div class="card">
+  <div class="row"><span>Log</span><span id="clear" style="color:#4f7cff">clear</span></div>
+  <div id="log">ready</div>
+</div>
+
+<script src="zenofit-cloud.js"></script>
+<script>
+(function () {
+  var logEl = document.getElementById("log");
+  var lines = [];
+  function log(msg) {
+    var t = new Date().toTimeString().slice(0, 8);
+    lines.push(t + "  " + msg);
+    logEl.textContent = lines.slice(-40).join("\n");
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  document.getElementById("clear").onclick = function () { lines = []; logEl.textContent = ""; };
+
+  var REASONS = {
+    "ios-needs-install": "On iPhone push only works once this page is added to the home screen. Share, then Add to Home Screen, then open it from the icon.",
+    "denied": "Notifications are blocked for this site. Turn them back on in browser settings, there is no way to ask again from here.",
+    "unsupported": "This browser cannot do web push at all.",
+    "server-not-configured": "The server has no VAPID key set.",
+    "dismissed": "You closed the permission prompt without choosing."
+  };
+
+  function row(label, value, cls) {
+    return '<div class="row"><span>' + label + '</span><span class="' + (cls || "") + '">' + value + "</span></div>";
+  }
+
+  async function refresh() {
+    var Z = window.ZenofitCloud;
+    var reason = Z.pushBlockedReason();
+    var enabled = await Z.pushEnabled();
+    var subs = "-";
+    try {
+      if (Z.hasDevice()) {
+        var st = await Z._call("GET", "/v1/push/status");
+        subs = st.subscriptions + (st.configured ? "" : " (no server key)");
+      }
+    } catch (e) { subs = "unreachable"; }
+
+    document.getElementById("diag").innerHTML =
+      row("Installed to home screen", Z.isStandalone() ? "yes" : "no", Z.isStandalone() ? "ok" : "warn") +
+      row("Platform", Z.isIOS() ? "iPhone or iPad" : "other") +
+      row("Permission", window.Notification ? Notification.permission : "n/a",
+          window.Notification && Notification.permission === "granted" ? "ok" : "warn") +
+      row("Push possible", reason ? "no" : "yes", reason ? "bad" : "ok") +
+      row("Subscribed", enabled ? "yes" : "no", enabled ? "ok" : "warn") +
+      row("Devices registered", subs);
+
+    var note = document.getElementById("note");
+    if (reason && REASONS[reason]) { note.textContent = REASONS[reason]; note.hidden = false; }
+    else note.hidden = true;
+
+    document.getElementById("test").disabled = !enabled;
+    document.getElementById("timer").disabled = !enabled;
+    return enabled;
+  }
+
+  document.getElementById("enable").onclick = async function () {
+    log("asking for permission...");
+    var r = await window.ZenofitCloud.enablePush();
+    if (r.ok) log("subscribed OK");
+    else log("failed: " + r.reason + (r.error ? " (" + r.error + ")" : ""));
+    await refresh();
+  };
+
+  document.getElementById("test").onclick = async function () {
+    log("sending test push...");
+    try {
+      var r = await window.ZenofitCloud.testPush();
+      log("server says: sent=" + r.sent + " failed=" + r.failed + " pruned=" + (r.pruned || 0));
+      if (r.sent === 0) log("nothing was delivered, check the diagnostics above");
+    } catch (e) { log("error: " + e.message); }
+    await refresh();
+  };
+
+  document.getElementById("timer").onclick = async function () {
+    var fireAt = Date.now() + 60000;
+    log("scheduling for " + new Date(fireAt).toTimeString().slice(0, 8) + " ...");
+    var t = await window.ZenofitCloud.scheduleTimer({
+      fireAt: fireAt, label: "Test", title: "60 second test", body: "Fired from the server."
+    });
+    if (!t) { log("scheduling failed"); return; }
+    log("scheduled. LOCK YOUR PHONE AND PUT IT DOWN.");
+    log("drift between your clock and the server: " + Math.abs(t.serverNow - Date.now()) + " ms");
+  };
+
+  /* The main app registers this in index.html. This page has to do it itself,
+     and it must finish before any push subscription is possible. */
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("sw.js")
+      .then(function () { log("service worker registered"); return navigator.serviceWorker.ready; })
+      .then(function () { log("service worker active"); return refresh(); })
+      .catch(function (e) { log("service worker failed: " + e.message); });
+  } else {
+    log("no service worker support in this browser");
+    refresh();
+  }
+})();
+</script>
+</body>
+</html>

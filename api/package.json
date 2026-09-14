@@ -1,0 +1,18 @@
+{
+  "name": "zenofit-api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "migrate": "wrangler d1 migrations apply zenofit --remote",
+    "migrate:local": "wrangler d1 migrations apply zenofit --local",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^4.131.2"
+  },
+  "dependencies": {
+    "@block65/webcrypto-web-push": "^2.0.0"
+  }
+}

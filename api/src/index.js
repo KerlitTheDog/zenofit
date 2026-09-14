@@ -449,10 +449,24 @@ async function route(request, env, url) {
 
   if (p === "/v1/timers" && method === "POST") {
     const body = await readJson(request).catch(() => ({}));
-    const fireAt = Number(body.fireAt);
     const now = Date.now();
 
-    if (!Number.isFinite(fireAt)) return fail(400, "bad_request", "fireAt must be a timestamp in ms.");
+    /* Two ways to say when.
+     *
+     * durationMs is the honest one for a rest timer: "90 seconds from now",
+     * resolved against the SERVER clock. A phone whose clock is three seconds
+     * off then still gets its alarm exactly 90 seconds later, because its own
+     * idea of the time never enters the calculation. Real phones are seconds
+     * off routinely, and on a 90 second rest that is the difference between
+     * a working timer and an annoying one.
+     *
+     * fireAt stays for a genuine wall-clock moment, like a planned session.  */
+    const duration = Number(body.durationMs);
+    const fireAt = Number.isFinite(duration) ? now + duration : Number(body.fireAt);
+
+    if (!Number.isFinite(fireAt)) {
+      return fail(400, "bad_request", "Send durationMs (ms from now) or fireAt (absolute ms).");
+    }
     if (fireAt <= now + 1000) return fail(400, "too_soon", "That time has already passed.");
     if (fireAt > now + MAX_TIMER_AHEAD_MS) return fail(400, "too_far", "Timers cannot be set more than a day ahead.");
 

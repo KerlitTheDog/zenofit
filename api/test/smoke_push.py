@@ -120,6 +120,17 @@ s, b = call("DELETE", "/v1/timers/" + t2["timerId"], token=tok2)
 check("cannot cancel someone else's timer", s == 404, (s, b))
 call("DELETE", "/v1/timers/" + t2["timerId"], token=tok)
 
+print("\n== duration beats a wrong clock ==")
+s, td = call("POST", "/v1/timers", token=tok, body={"durationMs": 90_000, "label": "Rest"})
+check("accepts durationMs", s == 201 and td.get("timerId"), (s, td))
+gap = td.get("fireAt", 0) - td.get("serverNow", 0)
+check("fires 90s after the SERVER's now, not ours", 89_000 < gap < 91_000, "%d ms" % gap)
+s, b = call("POST", "/v1/timers", token=tok, body={"durationMs": -5000})
+check("refuses a negative duration", s == 400, (s, b))
+s, b = call("POST", "/v1/timers", token=tok, body={"label": "no time given"})
+check("refuses a timer with no time at all", s == 400, (s, b))
+call("DELETE", "/v1/timers/" + td["timerId"], token=tok)
+
 print("\n%d passed, %d failed" % (len(PASS), len(FAIL)))
 if FAIL:
     print("FAILED:")

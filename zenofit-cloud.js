@@ -189,23 +189,45 @@
 
   /* ---- timers ------------------------------------------------------------- */
 
-  /* fireAt is absolute server-comparable time in ms. The caller passes the
-     wall-clock moment the timer should go off, not a duration, so a phone with
-     a wrong clock cannot drift the alarm. */
+  /* Two ways to schedule, and for a rest timer only one of them is right.
+   *
+   *   scheduleTimer({ inMs: 90000 })      <- use this
+   *   scheduleTimer({ fireAt: <ms> })     <- only for a real wall-clock moment
+   *
+   * Phones are routinely a few seconds off. Measured on a real device here:
+   * 2.8 seconds. Sending an absolute time computed from Date.now() hands that
+   * error straight to the server, and the alarm lands early or late by exactly
+   * that much. Sending a duration lets the server resolve it against its own
+   * clock, and the phone's is never consulted.
+   *
+   * lastDrift is kept for diagnostics only. Nothing depends on it. */
+  let lastDrift = null;
+
   async function scheduleTimer(opts) {
     if (!hasDevice()) return null;
+
+    const payload = {
+      label: opts.label || null,
+      title: opts.title || opts.label || "Timer done",
+      body: opts.body || "",
+    };
+
+    if (Number.isFinite(opts.inMs)) payload.durationMs = opts.inMs;
+    else if (Number.isFinite(opts.fireAt)) payload.fireAt = opts.fireAt;
+    else return null;
+
     try {
-      return await call("POST", "/v1/timers", {
-        fireAt: opts.fireAt,
-        label: opts.label || null,
-        title: opts.title || opts.label || "Timer done",
-        body: opts.body || "",
-      });
+      const res = await call("POST", "/v1/timers", payload);
+      if (res && typeof res.serverNow === "number") lastDrift = res.serverNow - Date.now();
+      return res;
     } catch (e) {
       console.warn("scheduleTimer failed", e);
       return null;
     }
   }
+
+  /* Positive means the server is ahead of this device. Diagnostics only. */
+  const clockDrift = () => lastDrift;
 
   async function cancelTimer(timerId) {
     if (!timerId || !hasDevice()) return false;
@@ -232,7 +254,7 @@
     ensureDevice, hasDevice,
     isStandalone, isIOS, pushBlockedReason,
     enablePush, disablePush, pushEnabled, testPush,
-    scheduleTimer, cancelTimer,
+    scheduleTimer, cancelTimer, clockDrift,
     listProfiles, createProfile, renameProfile, deleteProfile,
     listSeeds, createSeed, rotateSeeds, revokeSeed, joinWithSeed,
     listGrants, revokeGrant,

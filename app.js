@@ -2105,6 +2105,7 @@ function importBackup(text) {
   ui.groupSheet = false; ui.timerForm = null; ui.deloadForm = null;
   ui.planResult = null; ui.showBody = false; ui.picking = false;
   ui.showProfile = false; ui.profileDraft = null; ui.profileLangWas = null;
+  ui.showStorage = false;
   resetTransient();
   ui.tab = "home";
 
@@ -2112,6 +2113,101 @@ function importBackup(text) {
   writeNow();
   render();
   alert(T("profile.importOk", { what: backupSummary(state) }));
+}
+
+/* ── WHAT IS ACTUALLY IN THIS BROWSER ─────────────────────────────────
+   An app whose every record lives in one origin's localStorage owes its
+   user a way to LOOK at that, because when it comes up empty there is no
+   way to tell the three very different things that can mean apart:
+
+     · the data is gone (storage cleared, evicted, reset),
+     · the data is fine but this is not the address it was saved at,
+     · the data is fine and right here, but the profile index no longer
+       points at it, so the app cannot see its own save.
+
+   The third one is recoverable in one tap and used to be indistinguishable
+   from the first, which is the worst way for it to fail: somebody grieves a
+   year of training that is sitting in the same browser, unreferenced. So
+   this reads every Zenofit key there is, says which profile each one is,
+   how much training is in it, and whether the index knows about it.
+
+   It reads. The only thing on this screen that writes is Recover, and all
+   Recover does is ADD: it puts an unlisted save back in the index and
+   switches to it. Nothing here overwrites, deletes or merges anything,
+   because the one guaranteed way to make a bad day worse is a repair tool
+   that can destroy the thing it was opened to rescue. */
+const STATE_PREFIX = "powerbuild-tracker:state:";
+
+function storageScan() {
+  const out = { origin: "", rows: [], total: 0, indexOk: false, readable: true };
+  try { out.origin = location.origin; } catch { /* nothing to say */ }
+  let index = null;
+  try { index = JSON.parse(localStorage.getItem(PROFILES_KEY)); } catch { /* damaged */ }
+  out.indexOk = !!(index && Array.isArray(index.list) && index.list.length);
+  const listed = new Set(out.indexOk ? index.list.map((x) => x.id) : []);
+
+  let keys = [];
+  try { for (let i = 0; i < localStorage.length; i++) keys.push(localStorage.key(i)); }
+  catch { out.readable = false; return out; }
+
+  for (const key of keys) {
+    let raw = "";
+    try { raw = localStorage.getItem(key) || ""; } catch { /* skip */ }
+    out.total += key.length + raw.length;
+    const isState = key === STORE_KEY || key.startsWith(STATE_PREFIX);
+    if (!isState && key !== PROFILES_KEY) continue;
+    const row = { key, bytes: raw.length, index: key === PROFILES_KEY };
+    if (isState) {
+      row.legacy = key === STORE_KEY;
+      row.id = row.legacy ? null : key.slice(STATE_PREFIX.length);
+      row.active = !row.legacy && row.id === activeProfileId();
+      /* a legacy key is never "listed": it predates the index entirely,
+         which is exactly why it is worth offering back */
+      row.listed = !row.legacy && listed.has(row.id);
+      try {
+        const d = JSON.parse(raw);
+        const st = d && typeof d === "object" && d.state ? d.state : d;
+        if (st && typeof st === "object" && Array.isArray(st.log)) {
+          row.ok = true;
+          row.entries = st.log.length;
+          row.days = new Set(st.log.map((e) => e.date)).size;
+          row.body = (st.body || []).length;
+          row.lifts = (st.library || []).length;
+          row.name = (st.settings && st.settings.name) || "";
+        }
+      } catch { /* row.ok stays falsy: it is there and it will not parse */ }
+    }
+    out.rows.push(row);
+  }
+  /* the save with the most in it first, so the answer is the top line */
+  out.rows.sort((a, b) => (b.entries || 0) - (a.entries || 0) || b.bytes - a.bytes);
+  return out;
+}
+
+/* Putting an unlisted save back in the index. Additive and nothing else: a
+   legacy key is COPIED to a state key of its own (never moved, so a failure
+   half-way leaves the original exactly where it was), and an orphan is
+   simply named in the index again. Then switchProfile, which parks and
+   flushes whatever is open before it goes anywhere. */
+function adoptStorage(key) {
+  const scan = storageScan();
+  const row = scan.rows.find((r) => r.key === key);
+  if (!row || !row.ok) return false;
+  let id = row.id;
+  if (row.legacy) {
+    id = uid();
+    try {
+      const raw = localStorage.getItem(STORE_KEY);
+      localStorage.setItem(stateKeyFor(id), raw);
+      if (localStorage.getItem(stateKeyFor(id)) !== raw) throw new Error("copy did not land");
+    } catch (e) { console.error("adopt failed", e); alert(T("profiles.quota")); return false; }
+  }
+  if (!profiles.list.some((x) => x.id === id)) {
+    profiles.list = [...profiles.list, { id, name: "" }];
+    saveProfiles();
+  }
+  switchProfile(id);
+  return true;
 }
 
 /* The screen turning off, the app being swiped away, or the browser
@@ -2194,6 +2290,7 @@ const ui = {
      See stdForm() for why the form is built once and then left alone. */
   std: null,            // {slug, sex, bw, bwFrom, mode, lift, liftFromLog, setReps, setWeight}
   stdResult: null,      // the last check, see stdCheck()
+  showStorage: false,   // Settings -> Data -> Storage check is open, see renderStorage
   stdPick: false,       // the standards' own exercise picker is open
   stdQ: "",             // …and its search box
   /* the progress graph is an instrument, not a picture: chartView is the
@@ -2653,6 +2750,7 @@ function render() {
   if (ui.presetView) html += renderPresetView();
   if (ui.chartFull) html += renderChartFull();
   if (ui.showProfile) html += renderProfile(ui.profileDraft);
+  if (ui.showStorage) html += renderStorage();
   if (ui.profilesWin) html += renderProfilesWindow();
   if (ui.profileForm) html += renderProfileForm();
   if (ui.showBody) html += renderBodyWindow(body, unit);
@@ -5471,6 +5569,85 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
 }
 
 
+/* ── THE STORAGE CHECK SCREEN ─────────────────────────────────────────
+   Settings -> Data -> Storage check. One screen, three questions answered
+   in the order somebody standing in front of an empty app asks them: what
+   address is this, what is actually saved here, and can I get it back.
+
+   Every save is a row that says how much training is in it, and a verdict
+   in plain words rather than a key name: the one you are in, one you are
+   not, one the app has lost track of, one it cannot read. Only the third
+   gets a button, because it is the only one this screen can fix. */
+const storageKB = (n) => (n < 1024 ? "<1" : Math.round(n / 1024)) + " KB";
+
+function renderStorage() {
+  const scan = storageScan();
+  const saves = scan.rows.filter((r) => !r.index);
+  const orphans = saves.filter((r) => r.ok && !r.listed && !r.active);
+  const withData = saves.filter((r) => r.ok && r.entries > 0);
+
+  /* The headline is the question they came here with, answered before any
+     of the detail: is anything of mine in this browser at all? */
+  const verdict = !scan.readable ? { c: "var(--red)", t: T("stor.noAccess") }
+    : !saves.length ? { c: "var(--red)", t: T("stor.nothing") }
+    : orphans.some((r) => r.entries > 0) ? { c: "var(--gold)", t: T("stor.foundLost") }
+    : withData.length ? { c: "var(--green)", t: T("stor.foundOk") }
+    : { c: "var(--muted)", t: T("stor.foundEmpty") };
+
+  const rows = saves.map((r) => {
+    const state = r.active ? { c: "var(--green)", t: T("stor.thisOne") }
+      : !r.ok ? { c: "var(--red)", t: T("stor.unreadable") }
+      : !r.listed ? { c: "var(--gold)", t: T("stor.lost") }
+      : { c: "var(--steel)", t: T("stor.otherProfile") };
+    return `<div class="pb-card" style="padding:13px 14px;margin-bottom:8px;border-color:${r.ok && !r.listed && !r.active ? "var(--gold)" : "var(--border)"}">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:7px">
+        ${chip(state.t, state.c)}
+        ${r.legacy ? chip(T("stor.legacy"), "var(--muted)") : ""}
+        <div style="flex:1"></div>
+        <div style="font-size:11px;color:var(--faint)">${storageKB(r.bytes)}</div>
+      </div>
+      ${r.ok
+        ? `<div class="pb-num" style="font-size:20px;font-weight:700;line-height:1.15">${T("stor.counts", { days: TN("day", r.days), sets: TN("logEntry", r.entries) })}</div>
+           <div style="font-size:12px;color:var(--muted);margin-top:3px">${T("stor.counts2", { lifts: TN("exercise", r.lifts), body: TN("checkin", r.body) })}${r.name ? " \u00b7 " + esc(r.name) : ""}</div>`
+        : `<div style="font-size:13px;color:var(--red);line-height:1.5">${T("stor.unreadableBody")}</div>`}
+      <div style="font-size:10.5px;color:var(--faint);margin-top:8px;word-break:break-all;font-family:ui-monospace,monospace">${esc(r.key)}</div>
+      ${r.ok && !r.listed && !r.active ? `<button data-action="storage-adopt" data-key="${esc(r.key)}" class="pb-btn pb-gold" style="width:100%;padding:12px 0;font-size:14.5px;margin-top:11px">
+        ${icon("life-buoy", 16)} ${T("stor.recover")}
+      </button>` : ""}
+    </div>`;
+  }).join("");
+
+  return fullScreen(92, `
+    <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px;border-bottom:1px solid var(--border-soft)">
+      <button data-action="close-storage" style="color:var(--muted);padding:4px">${icon("arrow-left", 21)}</button>
+      <div class="pb-num" style="font-size:19px;font-weight:700;flex:1">${T("stor.title")}</div>
+    </div>
+    <div class="pb-scroll" data-scrollkey="storage" style="flex:1;overflow-y:auto;padding:16px 16px calc(40px + var(--pb-sab))">
+      <div class="pb-card" style="padding:15px;margin-bottom:16px;border-color:${verdict.c}">
+        <div class="pb-label" style="margin-bottom:5px">${T("stor.verdict")}</div>
+        <div style="font-size:14.5px;font-weight:600;line-height:1.45;color:${verdict.c}">${verdict.t}</div>
+      </div>
+
+      ${/* The address is first because it is the one thing this screen can be
+            WRONG about in a way nothing on it would reveal: a browser looking
+            at the right app on the wrong address sees an empty store and can
+            say nothing about the one the training is actually in. */""}
+      ${sectionTitle(T("stor.address"))}
+      <div class="pb-card" style="padding:13px 14px;margin-bottom:16px">
+        <div style="font-size:13px;word-break:break-all;font-family:ui-monospace,monospace;color:var(--text)">${esc(scan.origin || "\u2014")}</div>
+        <div style="font-size:11.5px;color:var(--faint);margin-top:7px;line-height:1.5">${T("stor.addressHint")}</div>
+      </div>
+
+      ${sectionTitle(T("stor.saves"), `<span style="font-size:11px;color:var(--faint)">${T("stor.totalUsed", { size: storageKB(scan.total) })}</span>`)}
+      ${saves.length ? rows : `<div class="pb-card" style="padding:22px;text-align:center;color:var(--faint);font-size:13px;line-height:1.6">${T("stor.nothingBody")}</div>`}
+      ${scan.indexOk ? "" : `<div style="font-size:12px;color:var(--gold);line-height:1.55;margin:2px 4px 10px">${T("stor.noIndex")}</div>`}
+
+      <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:10px 4px 10px">${T("stor.footer")}</div>
+      <div style="height:14px"></div>
+    </div>
+  `, "storage");
+}
+
 /* exercise picker with quick-add (name + muscle only, like the sheet) */
 function renderPickerList(library) {
   const q = ui.pickerQ, quick = ui.pickerQuick;
@@ -6936,6 +7113,18 @@ function renderProfile(f) {
         ${T("profile.backupHint")}
       </div>
 
+      ${/* Next to the backup buttons on purpose: this is the screen you want
+            on the day the app comes up empty, and the day the app comes up
+            empty is the day nobody can remember where anything is. */""}
+      <button data-action="open-storage" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:13.5px;margin-bottom:9px;justify-content:flex-start;padding-left:14px;gap:9px">
+        ${icon("database", 15)} ${T("stor.title")}
+        <span style="flex:1"></span>
+        ${icon("chevron-right", 15, 'style="color:var(--faint)"')}
+      </button>
+      <div style="font-size:11.5px;color:var(--faint);margin-bottom:16px;line-height:1.5">
+        ${T("stor.entryHint")}
+      </div>
+
       <button data-action="reset-all" class="pb-btn" style="width:100%;padding:13px 0;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">
         ${icon("trash-2", 16)} ${T("profile.reset")}
       </button>
@@ -7913,6 +8102,21 @@ const actions = {
   "profile-weekmode": (el) => { ui.profileDraft.weekMode = el.dataset.m; render(); },
   "export-data": () => exportBackup(),
   "share-data": () => shareBackup(),
+  "open-storage": () => { ui.showStorage = true; render(); },
+  "close-storage": () => { ui.showStorage = false; render(); },
+  /* The only write on that screen, and it only ever ADDS: it asks first,
+     names what it found so the answer is about a real number of sessions
+     rather than a key, and hands off to switchProfile, which parks and
+     flushes whatever is open before it moves. */
+  "storage-adopt": (el) => {
+    const row = storageScan().rows.find((r) => r.key === el.dataset.key);
+    if (!row || !row.ok) return;
+    if (!confirm(T("stor.confirmRecover", {
+      days: TN("day", row.days), sets: TN("logEntry", row.entries),
+    }))) return;
+    ui.showStorage = false; ui.showProfile = false; ui.profileDraft = null;
+    if (!adoptStorage(el.dataset.key)) render();
+  },
   "reset-all": () => {
     if (confirm(T("profile.confirmReset"))) {
       ui.showProfile = false; ui.profileDraft = null;

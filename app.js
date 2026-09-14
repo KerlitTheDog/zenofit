@@ -2003,15 +2003,19 @@ function backupSummary(data) {
 
 const backupName = () => `zenofit-backup-${todayStr()}.json`;
 
-function exportBackup() {
-  writeNow();   // flush the debounce so the file and this device agree
-  const url = URL.createObjectURL(new Blob([backupText()], { type: "application/json" }));
+function downloadText(name, text) {
+  const url = URL.createObjectURL(new Blob([text], { type: "application/json" }));
   const a = document.createElement("a");
-  a.href = url; a.download = backupName(); a.style.display = "none";
+  a.href = url; a.download = name; a.style.display = "none";
   document.body.appendChild(a);
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+function exportBackup() {
+  writeNow();   // flush the debounce so the file and this device agree
+  downloadText(backupName(), backupText());
 }
 
 /* ── …AND STRAIGHT INTO A CHAT ────────────────────────────────────────
@@ -2052,29 +2056,32 @@ function shareFileType() {
 
 /* Nothing is awaited before navigator.share(): the call has to happen inside
    the tap that started it or the browser drops the gesture and refuses. */
-function shareBackup() {
+function shareFile(name, text) {
   const type = shareFileType();
-  if (!type) return exportBackup();
-  writeNow();
-  const name = backupName();
-  const file = new File([backupText()], name, { type });
+  if (!type) return downloadText(name, text);
+  const file = new File([text], name, { type });
   let p;
   try { p = navigator.share({ files: [file], title: name }); }
-  catch (e) { console.error("share failed", e); return shareFellBack(); }
+  catch (e) { console.error("share failed", e); return shareFellBack(name, text); }
   if (p && p.catch) p.catch((e) => {
     /* dismissing the sheet is an answer, not a failure, and saying anything
        about it would be the app arguing with a decision */
     if (e && (e.name === "AbortError" || e.name === "NotAllowedError")) return;
     console.error("share failed", e);
-    shareFellBack();
+    shareFellBack(name, text);
   });
+}
+
+function shareBackup() {
+  writeNow();
+  shareFile(backupName(), backupText());
 }
 
 /* The share sheet is a convenience on top of the file, so when it will not
    open, the file still arrives: say which happened, then download it. */
-function shareFellBack() {
+function shareFellBack(name, text) {
   try { alert(T("profile.shareFailed")); } catch { /* no UI here */ }
-  exportBackup();
+  downloadText(name, text);
 }
 
 /* Accepts the wrapper this app writes and, deliberately, a bare state
@@ -2182,6 +2189,46 @@ function storageScan() {
   /* the save with the most in it first, so the answer is the top line */
   out.rows.sort((a, b) => (b.entries || 0) - (a.entries || 0) || b.bytes - a.bytes);
   return out;
+}
+
+/* ── GETTING ONE SAVE OFF THE PHONE ───────────────────────────────────
+   The one thing that still works when the phone has no room left to write,
+   and that is not a coincidence: a full store is exactly the state that
+   stops Recover from finishing (switchProfile flushes, the flush fails,
+   you are told the device is out of space), and it is the moment you most
+   want the file. So this reads and nothing else. No flush, no localStorage
+   write, nothing that can fail for want of space.
+
+   The ACTIVE save is written from memory rather than from its key, because
+   that is the fresher of the two and costs no write. Everything else goes
+   out exactly as it is stored, in the envelope Import reads.
+
+   A save too damaged to parse goes out RAW, and its name says so. Import
+   will refuse it, and it should: it is not a backup, it is the wreckage.
+   But the bytes are the only thing left to repair by hand, and they are
+   worth far more on a laptop than they are stranded on a phone. */
+function storageFileFor(key) {
+  const row = storageScan().rows.find((r) => r.key === key);
+  if (!row || row.index) return null;
+  if (row.active) return { name: backupName(), text: backupText() };
+  let raw = "";
+  try { raw = localStorage.getItem(key) || ""; } catch { return null; }
+  if (!raw) return null;
+  /* named after the save it came from, so two of them on one phone are
+     still telling you which is which a week later */
+  const tag = (row.legacy ? "old" : String(row.id || "save")).slice(0, 14);
+  if (!row.ok) return { name: `zenofit-${tag}-damaged-${todayStr()}.json`, text: raw };
+  let data = null;
+  try { const d = JSON.parse(raw); data = d && typeof d === "object" && d.state ? d.state : d; }
+  catch { return null; }
+  const { drafts, ...clean } = data;   // eslint-disable-line no-unused-vars
+  return {
+    name: `zenofit-${tag}-${todayStr()}.json`,
+    text: JSON.stringify({
+      app: BACKUP_APP, format: BACKUP_FORMAT, version: data.version,
+      exportedAt: new Date().toISOString(), state: clean,
+    }, null, 2),
+  };
 }
 
 /* Putting an unlisted save back in the index. Additive and nothing else: a
@@ -5614,6 +5661,19 @@ function renderStorage() {
       ${r.ok && !r.listed && !r.active ? `<button data-action="storage-adopt" data-key="${esc(r.key)}" class="pb-btn pb-gold" style="width:100%;padding:12px 0;font-size:14.5px;margin-top:11px">
         ${icon("life-buoy", 16)} ${T("stor.recover")}
       </button>` : ""}
+      ${/* On EVERY save, damaged ones included, and not only the ones Recover
+            can help: getting the file off the phone is the move that works
+            when the phone is too full for Recover to finish, and it is the
+            only move at all on a save nothing can parse. Both read and
+            neither writes, which is the whole point. */""}
+      <div style="display:flex;gap:8px;margin-top:${r.ok && !r.listed && !r.active ? 8 : 11}px">
+        <button data-action="storage-export" data-key="${esc(r.key)}" class="pb-btn pb-ghost" style="flex:1;padding:11px 0;font-size:13px">
+          ${icon("download", 14)} ${T("profile.export")}
+        </button>
+        ${shareFileType() ? `<button data-action="storage-share" data-key="${esc(r.key)}" class="pb-btn pb-ghost" style="flex:1;padding:11px 0;font-size:13px">
+          ${icon("share-2", 14)} ${T("stor.share")}
+        </button>` : ""}
+      </div>
     </div>`;
   }).join("");
 
@@ -8103,6 +8163,16 @@ const actions = {
   "export-data": () => exportBackup(),
   "share-data": () => shareBackup(),
   "open-storage": () => { ui.showStorage = true; render(); },
+  /* Read-only, both of them, so they still work on a device too full to
+     save anything. Nothing is awaited before the share, see shareFile. */
+  "storage-export": (el) => {
+    const f = storageFileFor(el.dataset.key);
+    if (f) downloadText(f.name, f.text);
+  },
+  "storage-share": (el) => {
+    const f = storageFileFor(el.dataset.key);
+    if (f) shareFile(f.name, f.text);
+  },
   "close-storage": () => { ui.showStorage = false; render(); },
   /* The only write on that screen, and it only ever ADDS: it asks first,
      names what it found so the answer is about a real number of sessions

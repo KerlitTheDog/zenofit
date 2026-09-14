@@ -2001,16 +2001,80 @@ function backupSummary(data) {
   });
 }
 
+const backupName = () => `zenofit-backup-${todayStr()}.json`;
+
 function exportBackup() {
   writeNow();   // flush the debounce so the file and this device agree
-  const name = `zenofit-backup-${todayStr()}.json`;
   const url = URL.createObjectURL(new Blob([backupText()], { type: "application/json" }));
   const a = document.createElement("a");
-  a.href = url; a.download = name; a.style.display = "none";
+  a.href = url; a.download = backupName(); a.style.display = "none";
   document.body.appendChild(a);
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+/* ── …AND STRAIGHT INTO A CHAT ────────────────────────────────────────
+   Downloading is the wrong shape for the thing people actually do with a
+   backup on a phone: send it to somebody, or to themselves. Export drops a
+   file into Downloads and then it is on you to find it again in whatever
+   app you meant to send it from, which is three screens and a file picker
+   for what the OS already has a button for.
+
+   So the same bytes also go to the system share sheet (Web Share Level 2),
+   where Telegram, mail, AirDrop, Drive and the rest are one tap. It is the
+   SAME file either way: backupName() names both and backupText() writes
+   both, so there is no second export format to keep true.
+
+   Whether the sheet can take a file at all is asked, not guessed at:
+   navigator.canShare({files}) is the only honest answer, it needs a secure
+   context, and some platforms will take a .json only as plain text.
+   Whichever type it agrees to is the one the file is built with; if it
+   agrees to neither the answer is null and the button is not drawn,
+   because a share button that cannot share is worse than none.
+
+   Asked once and remembered, rather than at module load: it costs a File
+   and a platform call, this is the only screen that needs the answer, and
+   Settings re-renders on every keystroke in the name field. */
+let shareType;                      // undefined until first asked, then a type or null
+function shareFileType() {
+  if (shareType !== undefined) return shareType;
+  shareType = null;
+  try {
+    if (navigator.share && navigator.canShare && typeof File === "function")
+      for (const type of ["application/json", "text/plain"])
+        if (navigator.canShare({ files: [new File(["{}"], "zenofit.json", { type })] })) {
+          shareType = type; break;
+        }
+  } catch { /* a browser that throws rather than answer has answered */ }
+  return shareType;
+}
+
+/* Nothing is awaited before navigator.share(): the call has to happen inside
+   the tap that started it or the browser drops the gesture and refuses. */
+function shareBackup() {
+  const type = shareFileType();
+  if (!type) return exportBackup();
+  writeNow();
+  const name = backupName();
+  const file = new File([backupText()], name, { type });
+  let p;
+  try { p = navigator.share({ files: [file], title: name }); }
+  catch (e) { console.error("share failed", e); return shareFellBack(); }
+  if (p && p.catch) p.catch((e) => {
+    /* dismissing the sheet is an answer, not a failure, and saying anything
+       about it would be the app arguing with a decision */
+    if (e && (e.name === "AbortError" || e.name === "NotAllowedError")) return;
+    console.error("share failed", e);
+    shareFellBack();
+  });
+}
+
+/* The share sheet is a convenience on top of the file, so when it will not
+   open, the file still arrives: say which happened, then download it. */
+function shareFellBack() {
+  try { alert(T("profile.shareFailed")); } catch { /* no UI here */ }
+  exportBackup();
 }
 
 /* Accepts the wrapper this app writes and, deliberately, a bare state
@@ -6853,6 +6917,12 @@ function renderProfile(f) {
 
       <div class="pb-hairline" style="margin:18px 0"></div>
       ${sectionTitle(T("profile.data"))}
+      ${/* Only where the OS will actually take the file, see shareFileType. It
+            sits above the pair and full width because on a phone it is the one
+            people want: the file goes where it is going, no trip to Downloads. */
+        shareFileType() ? `<button data-action="share-data" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:13.5px;margin-bottom:8px">
+          ${icon("share-2", 15)} ${T("profile.share")}
+        </button>` : ""}
       <div style="display:flex;gap:8px;margin-bottom:9px">
         <button data-action="export-data" class="pb-btn pb-ghost" style="flex:1;padding:12px 0;font-size:13.5px">
           ${icon("download", 15)} ${T("profile.export")}
@@ -7842,6 +7912,7 @@ const actions = {
   "profile-theme": (el) => { ui.profileDraft.theme = el.dataset.t; applyTheme(el.dataset.t); render(); },
   "profile-weekmode": (el) => { ui.profileDraft.weekMode = el.dataset.m; render(); },
   "export-data": () => exportBackup(),
+  "share-data": () => shareBackup(),
   "reset-all": () => {
     if (confirm(T("profile.confirmReset"))) {
       ui.showProfile = false; ui.profileDraft = null;

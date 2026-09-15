@@ -2858,27 +2858,74 @@ async function rosterSync(opts) {
        The later stamp wins. A name that has not moved needs no request,
        which matters because this runs on the poll. */
     for (const id of profileList().map((p) => p.id)) {
-      const rec = syncFor(id);
+      let rec = syncFor(id);
       if (!rec || !rec.remoteId) continue;
       const cp = byRemote.get(rec.remoteId);
       if (!cp) continue;
       const i = profileList().findIndex((x) => x.id === id);
       const lp = profileList()[i];
+
+      /* ── THE FIRST PASS OVER A PROFILE THAT PREDATES ALL THIS ───────
+         Its record has no stamp at all, and the server's is back-filled
+         from created_at by the migration — a real number, so a plain
+         comparison would say the server wins and hand the phone back the
+         name the profile was CREATED with. That is exactly backwards:
+         the cloud name was set once when sync was turned on and never
+         maintained afterwards (which is the whole reason one profile
+         read "Main" here and "Profile 1" there), while the local one is
+         what somebody typed and has been reading since.
+
+         The bootstrap is therefore gated on the server's name still
+         being the ORIGINAL one — `nameUpdatedAt` still equal to
+         `createdAt`, meaning nothing has ever deliberately set it. That
+         gate is what makes the outcome the same whichever device syncs
+         first, which a bare "local wins" rule is not:
+
+           · the device whose local name DIFFERS from the original typed
+             that name, so it is stamped now and pushed;
+           · the device whose local name IS the original never typed
+             anything — it got that name from the server in the first
+             place — so it adopts the server's stamp and pushes nothing.
+
+         Once any device has set the name, the gate closes and everything
+         after it is judged on real clocks, where an unstamped local name
+         reads as 0 and loses to a deliberate rename. So the phone's
+         "Main" wins, the laptop takes it, and it does not matter which
+         of them opened the app first. */
+      if (rec.nameAt === undefined) {
+        const original = (cp.nameUpdatedAt || 0) === (cp.createdAt || -1);
+        const differs = profileLabel(lp, i) !== (cp.name || "");
+        if (original && differs) {
+          /* somebody typed this one here: claim it now, and the push
+             below carries it up */
+          syncSet(id, { nameAt: Date.now() });
+        } else {
+          /* this device never typed a name for this profile, so the
+             server's is the answer — and it has to be taken NOW rather
+             than left to the comparison below, because adopting the
+             stamp makes the two equal and neither branch would fire */
+          if (differs) { renameLocalProfile(id, cp.name || ""); changed = true; }
+          syncSet(id, { nameAt: cp.nameUpdatedAt || 0 });
+        }
+        rec = syncFor(id);
+      }
+
+      const lpNow = profileList()[i] || lp;   // the rename above replaced it
       const theirs = cp.nameUpdatedAt || 0, mine = rec.nameAt || 0;
 
       if (theirs > mine) {
-        if ((cp.name || "") !== (lp.name || "")) { renameLocalProfile(id, cp.name || ""); changed = true; }
+        if ((cp.name || "") !== (lpNow.name || "")) { renameLocalProfile(id, cp.name || ""); changed = true; }
         syncSet(id, { nameAt: theirs, srvName: cp.name || "", srvNameAt: theirs, pos: cp.position, seen: true });
         continue;
       }
       syncSet(id, { srvName: cp.name || "", srvNameAt: theirs, pos: cp.position, seen: true });
       /* ours is newer and different: push it, and take the answer, since
          a rename refused as stale comes back 200 with the name that won */
-      if (rec.level !== "read" && mine > theirs && profileLabel(lp, i) !== (cp.name || "")) {
+      if (rec.level !== "read" && mine > theirs && profileLabel(lpNow, i) !== (cp.name || "")) {
         try {
-          const out = await C.renameProfile(rec.remoteId, profileLabel(lp, i), mine);
+          const out = await C.renameProfile(rec.remoteId, profileLabel(lpNow, i), mine);
           if (out && out.stale) { renameLocalProfile(id, out.name); changed = true; }
-          syncSet(id, { srvName: out ? out.name : profileLabel(lp, i), srvNameAt: (out && out.nameUpdatedAt) || mine,
+          syncSet(id, { srvName: out ? out.name : profileLabel(lpNow, i), srvNameAt: (out && out.nameUpdatedAt) || mine,
             nameAt: out && out.stale ? out.nameUpdatedAt : mine });
         } catch { /* next pass */ }
       }

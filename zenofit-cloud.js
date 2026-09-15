@@ -385,6 +385,11 @@
   /* Change somebody's level without evicting them. Revoking used to be the
      only way to take write access back, which costs the other person the
      profile and a new code just to be moved to read-only. */
+  /* Give up your OWN access to a profile somebody shared with you. The
+     counterpart of deleteProfile for a profile that is not yours: both mean
+     "this is not in my account any more", and both therefore reach every
+     device the account is signed in on, which a local unlink never could. */
+  const leaveProfile   = (id) => call("DELETE", "/v1/profiles/" + id + "/grants/me");
   const setGrantLevel  = (id, userId, level) =>
     call("PUT", "/v1/profiles/" + id + "/grants/" + userId, { level: level === "write" ? "write" : "read" });
 
@@ -398,7 +403,7 @@
     pullChanges, pushChanges,
     listProfiles, createProfile, renameProfile, deleteProfile, setProfileOrder,
     listSeeds, createSeed, rotateSeeds, revokeSeed, joinWithSeed,
-    listGrants, revokeGrant, setGrantLevel,
+    listGrants, revokeGrant, setGrantLevel, leaveProfile,
     _call: call,
   };
 })();

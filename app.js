@@ -2737,6 +2737,62 @@ function dropRemote(remoteId, on) {
   try { localStorage.setItem(DROP_KEY, JSON.stringify(next)); } catch { /* nothing to remember with */ }
 }
 
+/* ── REMOVING A PROFILE IS A PROMISE, NOT A REQUEST ───────────────────
+   Deleting used to be `C.deleteProfile(id).catch(() => {})` — fire and
+   forget, on the reasoning that a tombstone can wait. It cannot. The row
+   is already gone from this device by the time that request goes out, so
+   a failure is invisible AND permanent: no retry, nothing on screen, and
+   the profile sits in the account for ever while every other device goes
+   on holding its copy. Delete something in a lift with no signal and it
+   comes back everywhere else, silently, for good.
+
+   So a removal is queued and survives being closed. The queue is drained
+   at the top of every roster pass and an entry only leaves it when the
+   server has actually agreed — or when it answers 404, which is the same
+   thing said differently: it is already gone.
+
+   Two verbs, because "this is not in my account any more" is two
+   different facts depending on whose profile it is. Yours is DELETED and
+   tombstoned for everybody. Somebody else's is LEFT: your grant is
+   revoked, their profile is untouched, and it stops being in your account
+   on every device you are signed in on — which a local unlink never did,
+   and which is the bug that made "I deleted this on my phone" mean
+   nothing at all on the laptop.                                       */
+const PEND_KEY = "zenofit:pending";
+const pendingOps = () => { try { return JSON.parse(localStorage.getItem(PEND_KEY)) || []; } catch { return []; } };
+const setPendingOps = (list) => { try { localStorage.setItem(PEND_KEY, JSON.stringify(list)); } catch { /* nothing to remember with */ } };
+const pendingFor = (remoteId) => (remoteId ? pendingOps().some((x) => x.remoteId === remoteId) : false);
+function queueRemoval(remoteId, op) {
+  if (!remoteId) return;
+  setPendingOps([...pendingOps().filter((x) => x.remoteId !== remoteId), { remoteId, op, at: Date.now() }]);
+}
+function clearRemoval(remoteId) {
+  setPendingOps(pendingOps().filter((x) => x.remoteId !== remoteId));
+}
+
+/* Drained at the top of every roster pass, before the listing is read, so
+   the listing already reflects whatever just landed. */
+async function runPendingRemovals() {
+  const C = window.ZenofitCloud;
+  if (!C) return false;
+  let any = false;
+  for (const p of pendingOps()) {
+    try {
+      if (p.op === "leave") await C.leaveProfile(p.remoteId);
+      else await C.deleteProfile(p.remoteId);
+      clearRemoval(p.remoteId);
+      any = true;
+    } catch (e) {
+      /* 404 is success wearing a different hat: no such profile, or no
+         grant of ours left on it. Anything else — offline, a 500, a
+         token that is briefly unhappy — stays queued for the next pass. */
+      if (e && e.status === 404) { clearRemoval(p.remoteId); any = true; }
+      else console.warn("removal still pending", p.op, e && e.message);
+    }
+  }
+  return any;
+}
+
 const accountOn = () => { const C = window.ZenofitCloud; return !!(C && C.signedIn && C.signedIn()); };
 
 /* The name in the index, changed in one place so every caller stamps the
@@ -2827,6 +2883,11 @@ async function rosterSync(opts) {
   rosterBusy = true;
   let changed = false;
   try {
+    /* Before anything is read: whatever this device has promised to
+       remove. Done first so the listing below already reflects it, and
+       so a delete made with no signal finally lands the moment there is
+       one, on whichever device happens to be open. */
+    await runPendingRemovals();
     const res = await C.listProfiles();
     const cloud = (res && res.profiles) || [];
     rosterAt = Date.now();
@@ -2839,12 +2900,15 @@ async function rosterSync(opts) {
        anything at all. It used to be a button per profile. */
     for (const cp of cloud) {
       if (gone.has(cp.profileId)) continue;
+      /* a removal this device has promised but not yet managed to send:
+         adopting it back is how a delete undoes itself */
+      if (pendingFor(cp.profileId)) continue;
       if (profileList().some((lp) => linked(lp) === cp.profileId)) continue;
       const level = cp.level === "read" ? "read" : cp.level === "owner" ? "owner" : "write";
       const localId = addProfile(cp.name || T("sync.joinedName"));
       if (!localId) break;                       // out of room: say nothing, try again later
       syncSet(localId, {
-        remoteId: cp.profileId, level, marks: {}, cursor: null,
+        remoteId: cp.profileId, level, owned: !!cp.isOwner, marks: {}, cursor: null,
         live: level === "read",
         nameAt: cp.nameUpdatedAt || 0, srvName: cp.name || "", srvNameAt: cp.nameUpdatedAt || 0,
         pos: cp.position, seen: true,
@@ -2864,6 +2928,26 @@ async function rosterSync(opts) {
       if (!cp) continue;
       const i = profileList().findIndex((x) => x.id === id);
       const lp = profileList()[i];
+
+      /* Whose it is, straight from the server, every pass. Delete-vs-leave
+         turns on this one field and a stale answer sends the wrong verb. */
+      syncSet(id, { owned: !!cp.isOwner });
+
+      /* ── A PROFILE YOU ONLY READ WEARS ITS OWNER'S NAME ─────────────
+         Renaming one locally was allowed, and the nickname went nowhere:
+         it is not your profile, so the server will not take the name,
+         and the result was one profile reading "Em" on the phone,
+         "Profile 1" on the laptop, and "Profile 1" in the account sheet
+         on both. Three names for one thing. The list is supposed to be
+         the same everywhere, so a read grant simply follows the owner's
+         name — and profile-form-save refuses the rename rather than
+         accepting one it knows it cannot keep. */
+      if (rec.level === "read") {
+        if ((cp.name || "") !== (lp.name || "")) { renameLocalProfile(id, cp.name || ""); changed = true; }
+        syncSet(id, { nameAt: cp.nameUpdatedAt || 0, srvName: cp.name || "",
+          srvNameAt: cp.nameUpdatedAt || 0, pos: cp.position, seen: true });
+        continue;
+      }
 
       /* ── THE FIRST PASS OVER A PROFILE THAT PREDATES ALL THIS ───────
          Its record has no stamp at all, and the server's is back-filled
@@ -2958,7 +3042,7 @@ async function rosterSync(opts) {
         const remoteId = made.profileId || made.id;
         /* linked BEFORE the push, so one that dies half way leaves a
            profile that knows where it lives rather than an orphan */
-        syncSet(id, { remoteId, level: "owner", marks: {}, cursor: null,
+        syncSet(id, { remoteId, level: "owner", owned: true, marks: {}, cursor: null,
           nameAt: at, srvName: made.name, srvNameAt: at, pos: i, seen: true });
         await syncPush(id);
         changed = true;
@@ -8812,7 +8896,10 @@ function renderAccountSheet() {
     const byRemote = new Map(cloud.map((p) => [p.profileId, p]));
     const locals = profileList();
     const linked = new Set(locals.map((lp) => (syncFor(lp.id) || {}).remoteId).filter(Boolean));
-    const cloudOnly = cloud.filter((p) => !linked.has(p.profileId));
+    /* A profile this device has promised to remove is not "in the account
+       and missing here" — it is on its way out. Offering Get it for it is
+       how a delete reads as having done nothing. */
+    const cloudOnly = cloud.filter((p) => !linked.has(p.profileId) && !pendingFor(p.profileId));
     const n = locals.length + cloudOnly.length;
     let at = 0;
     const edge = () => (++at < n ? "1px solid var(--border-soft)" : "none");
@@ -8858,7 +8945,7 @@ function renderAccountSheet() {
     const cloudRows = cloudOnly.map((p) =>
       row(p.name || T("sync.joinedName"),
         T(p.isOwner ? "acct.owned" : p.level === "read" ? "sync.levelRead" : "sync.levelWrite"), "var(--faint)",
-        `<button data-action="acct-pull" data-p="${esc(p.profileId)}" data-n="${esc(p.name || "")}" data-lv="${esc(p.level || "write")}" class="pb-btn pb-ghost" style="flex-shrink:0;padding:7px 12px;font-size:12px;color:var(--gold);border-color:rgba(233,185,73,.4)">${icon("cloud-download", 13)} ${T("acct.getIt")}</button>`)
+        `<button data-action="acct-pull" data-p="${esc(p.profileId)}" data-n="${esc(p.name || "")}" data-lv="${esc(p.level || "write")}" data-own="${p.isOwner ? "1" : "0"}" class="pb-btn pb-ghost" style="flex-shrink:0;padding:7px 12px;font-size:12px;color:var(--gold);border-color:rgba(233,185,73,.4)">${icon("cloud-download", 13)} ${T("acct.getIt")}</button>`)
     ).join("");
 
     return sheet(T("acct.title"), "accountSheet", `
@@ -9847,6 +9934,11 @@ const actions = {
        cannot undo a rename made yesterday simply by reconnecting last.
        Still fire and forget — a failed request costs a stale label for
        one poll, not data, and the roster pass will carry it. */
+    /* Not yours to name. A read grant's nickname went nowhere — the
+       server will not take a name for somebody else's profile — so it
+       only ever produced one profile called three different things on
+       three different screens. See the roster's read-grant branch. */
+    if ((syncLinked(f.id) || {}).level === "read") { toastReadOnly(); return; }
     const at = Date.now();
     renameLocalProfile(f.id, name, at);
     const rec = syncLinked(f.id);
@@ -9887,23 +9979,30 @@ const actions = {
     if (!confirm(T("profiles.confirmDelete", {
       name: profileLabel(list[i], i), days: TN("day", st.days), sets: TN("logEntry", st.entries),
     }))) return;
-    /* ── DELETING TAKES IT OUT OF THE ACCOUNT TOO ──────────────────
-       Half a delete is worse than none: leaving the cloud copy would
-       have the next roster pass adopt it straight back, and the profile
-       somebody just confirmed deleting would reappear with its training
-       in it. Read from the link BEFORE the local delete, which drops it.
-       A profile shared with you is only left, never deleted — it is not
-       yours to remove from somebody else's account. */
+    /* ── DELETING TAKES IT OUT OF THE ACCOUNT, ON EVERY DEVICE ─────
+       Read the link BEFORE the local delete, which drops it.
+
+       WHICH VERB depends on whose profile it is, and getting that wrong
+       is what made this local-only. It used to send `deleteProfile` for
+       anything not marked "read", so a profile somebody had shared with
+       write access got a delete the server rightly refused as not-yours,
+       into a `.catch` that said nothing — and a read one got no request
+       at all. Either way the grant survived, the profile stayed in the
+       account, and the laptop kept its copy of something that had been
+       deleted on the phone hours ago.
+
+       `owned` is the server's own answer out of the last listing, not a
+       guess from the level string, because that is the one field that
+       actually decides which of the two is true. */
     const link = syncLinked(list[i].id);
-    const C = window.ZenofitCloud;
-    if (link && link.remoteId) dropRemote(link.remoteId, true);
-    if (link && (link.level === "owner" || link.level === "write") && C && C.deleteProfile) {
-      C.deleteProfile(link.remoteId).catch(() => { /* the tombstone can wait */ });
-    }
+    if (link && link.remoteId) queueRemoval(link.remoteId, link.owned ? "delete" : "leave");
     deleteProfile(list[i].id);
     ui.profileForm = null;
     ui.profileStats = profileStats();
     render();
+    /* Out of the account NOW rather than at the next poll. Somebody who
+       has just deleted something goes and looks at the other device. */
+    rosterSync({ force: true });
   },
 
   "open-profile": () => {
@@ -10023,7 +10122,7 @@ const actions = {
       const made = await C.createProfile(profileLabel(list[i], i));
       /* linked BEFORE the push, so one that dies half way leaves a profile
          that knows where it lives rather than an orphan on the server */
-      syncSet(localId, { remoteId: made.profileId || made.id, level: "write", marks: {}, cursor: null, noSync: false, nameAt: Date.now() });
+      syncSet(localId, { remoteId: made.profileId || made.id, level: "write", owned: true, marks: {}, cursor: null, noSync: false, nameAt: Date.now() });
       await syncPush(localId);
       syncSet(localId, { lastOkAt: Date.now() });
     } catch (e) {
@@ -10045,7 +10144,7 @@ const actions = {
     const level = el.dataset.lv === "read" ? "read" : "write";
     const localId = addProfile(el.dataset.n || T("sync.joinedName"));
     if (!localId) { ui.accountSheet = { ...f, error: T("profiles.quota") }; render(); return; }
-    syncSet(localId, { remoteId, level, marks: {}, cursor: null, live: level === "read" });
+    syncSet(localId, { remoteId, level, owned: el.dataset.own === "1", marks: {}, cursor: null, live: level === "read" });
     ui.accountSheet = null;
     if (level === "read") { try { localStorage.removeItem(stateKeyFor(localId)); } catch { /* none yet */ } }
     switchProfile(localId);
@@ -10081,7 +10180,7 @@ const actions = {
       /* linked BEFORE the first push, so a push that dies half way leaves a
          profile that knows where it lives and can simply be synced again,
          rather than an orphan on the server nothing points at */
-      syncSet(f.localId, { remoteId: made.id || made.profileId, level: "write", marks: {}, cursor: null, noSync: false, nameAt: Date.now() });
+      syncSet(f.localId, { remoteId: made.id || made.profileId, level: "write", owned: true, marks: {}, cursor: null, noSync: false, nameAt: Date.now() });
       ui.syncBusy = false;
       await syncNow(f.localId);
     } catch (e) {
@@ -10111,9 +10210,16 @@ const actions = {
     /* A record with no link, saying so. syncForget alone would leave the
        roster free to adopt the same profile back on its very next pass,
        which is a Turn-off button that does not turn anything off. */
+    const link = syncLinked(f.localId);
     syncForget(f.localId);
     syncSet(f.localId, { noSync: true });
-    if (rec && rec.remoteId) dropRemote(rec.remoteId, true);
+    if (link) dropRemote(link.remoteId, true);
+    /* Somebody else's profile: LEAVING it is a fact about the account, not
+       about this phone, so it is queued like a delete and reaches every
+       device you are signed in on. Your own profile keeps its cloud copy —
+       turning sync off here is this device stepping back, not a decision
+       about the other ones. */
+    if (link && !link.owned) queueRemoval(link.remoteId, "leave");
     ui.syncSheet = { ...f, grants: [], code: null };
     ui.syncError = null;
     render();
@@ -10230,7 +10336,7 @@ const actions = {
        it needs a connection, and it is somebody else's log, so there is
        nothing here a failed fetch can lose. A WRITE grant is a profile you
        are expected to train in, so it is stored like any other. */
-    syncSet(localId, { remoteId, level, marks: {}, cursor: null, live: level === "read" });
+    syncSet(localId, { remoteId, level, owned: false, marks: {}, cursor: null, live: level === "read" });
     ui.joinSheet = null;
     if (level === "read") { try { localStorage.removeItem(stateKeyFor(localId)); } catch { /* none yet */ } }
     switchProfile(localId);

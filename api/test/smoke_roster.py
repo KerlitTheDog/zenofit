@@ -119,6 +119,32 @@ check("she cannot rename it", s == 404, s)
 s, o = call("POST", "/v1/profiles/order", token=her, body={"order": [a["profileId"]]})
 check("and ordering skips what she cannot write rather than failing", s == 200 and o.get("ordered") == 0, (s, o))
 
+print("\n== leaving a profile somebody shared with you ==")
+# The one that shipped broken: "delete" on a shared profile could only ever be
+# local. The grant survived, so the profile kept coming back in GET /v1/profiles,
+# every other device the account was signed in on kept its copy, and the account
+# sheet went on offering to fetch the very thing that had just been deleted.
+s, resp = call("DELETE", "/v1/profiles/%s/grants/me" % a["profileId"], token=her)
+check("a grant holder can leave", s == 200 and resp.get("left") is True, (s, resp))
+s, theirs = call("GET", "/v1/profiles", token=her)
+check("it is out of THEIR account", a["profileId"] not in ids(theirs), theirs)
+s, mine = call("GET", "/v1/profiles", token=owner)
+check("and still in the owner's", a["profileId"] in ids(mine), names(mine))
+s, _ = call("GET", "/v1/profiles/%s/changes" % a["profileId"], token=her)
+check("they can no longer read it", s == 404, s)
+
+s, _ = call("DELETE", "/v1/profiles/%s/grants/me" % a["profileId"], token=her)
+check("leaving twice is 404, which the client reads as already done", s == 404, s)
+s, resp = call("DELETE", "/v1/profiles/%s/grants/me" % a["profileId"], token=owner)
+check("an owner cannot leave their own profile", s == 400 and resp.get("error") == "owner_cannot_leave", (s, resp))
+outsider2, _ = device("outsider2")
+s, _ = call("DELETE", "/v1/profiles/%s/grants/me" % a["profileId"], token=outsider2)
+check("a stranger gets 404, not a hint it exists", s == 404, s)
+
+s, g = call("GET", "/v1/profiles/%s/grants" % a["profileId"], token=owner)
+check("the owner's people list drops whoever left",
+      her_id not in [x["userId"] for x in g.get("grants", [])], g.get("grants"))
+
 print("\n== a deleted profile leaves the roster ==")
 call("DELETE", "/v1/profiles/" + b["profileId"], token=owner)
 s, lst = call("GET", "/v1/profiles", token=owner)

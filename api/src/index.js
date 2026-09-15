@@ -543,6 +543,32 @@ async function route(request, env, url) {
 
   if (seg[0] === "v1" && seg[1] === "profiles" && seg[2] && seg[3] === "grants") {
     const { level, profile } = await accessFor(env, user.id, seg[2]);
+    if (!canRead(level)) return gone();
+
+    /* ── LEAVING IS NOT AN ADMIN ACTION ────────────────────────────────
+       Every other verb on this route is the owner deciding about someone
+       else. This one is a person deciding about themselves, and without
+       it "delete" on a profile somebody shared with you could only ever
+       be local: the grant survived, the profile kept coming back in
+       GET /v1/profiles, every other device the account was signed in on
+       kept its copy, and the account sheet went on offering to fetch the
+       thing that had just been deleted. There was no way to say no.
+
+       It revokes the caller's OWN grant and nothing else. "me" is
+       accepted alongside the real id so a client does not have to be
+       sure which user it currently is. An owner has no grant to revoke —
+       leaving your own profile is deleting it — so that is refused with
+       the verb that does work rather than a silent no-op. */
+    if (method === "DELETE" && seg.length === 5 && (seg[4] === "me" || seg[4] === user.id)) {
+      if (level === "owner") {
+        return fail(400, "owner_cannot_leave", "You own this profile. Delete it instead of leaving it.");
+      }
+      await env.DB.prepare(
+        "UPDATE grants SET revoked_at = ? WHERE profile_id = ? AND user_id = ? AND revoked_at IS NULL"
+      ).bind(Date.now(), profile.id, user.id).run();
+      return json({ profileId: profile.id, userId: user.id, left: true });
+    }
+
     if (!canAdmin(level)) return gone();
 
     if (seg.length === 4 && method === "GET") {

@@ -298,15 +298,21 @@ async function route(request, env, url) {
 
   /* ---- profiles ---------------------------------------------------------- */
 
-  /* Everything you can see: what you made, plus what you joined. */
+  /* Everything you can see: what you made, plus what you joined.
+     THIS IS THE ROSTER, and a second device builds its whole profile list
+     from it — names, order and all — so it carries `position` and
+     `nameUpdatedAt` rather than just enough to draw a row in one sheet.
+     NULL positions sort last so profiles that predate the column keep the
+     order they already had. */
   if (p === "/v1/profiles" && method === "GET") {
     const owned = await env.DB.prepare(
-      "SELECT id, name, owner_id, created_at, updated_at FROM profiles " +
-      "WHERE owner_id = ? AND deleted_at IS NULL ORDER BY created_at"
+      "SELECT id, name, owner_id, created_at, updated_at, position, name_updated_at FROM profiles " +
+      "WHERE owner_id = ? AND deleted_at IS NULL " +
+      "ORDER BY CASE WHEN position IS NULL THEN 1 ELSE 0 END, position, created_at"
     ).bind(user.id).all();
 
     const joined = await env.DB.prepare(
-      "SELECT p.id, p.name, p.owner_id, p.created_at, p.updated_at, g.level " +
+      "SELECT p.id, p.name, p.owner_id, p.created_at, p.updated_at, p.position, p.name_updated_at, g.level " +
       "FROM grants g JOIN profiles p ON p.id = g.profile_id " +
       "WHERE g.user_id = ? AND g.revoked_at IS NULL AND p.deleted_at IS NULL ORDER BY g.joined_at"
     ).bind(user.id).all();
@@ -314,6 +320,7 @@ async function route(request, env, url) {
     const shape = (r, level) => ({
       profileId: r.id, name: r.name, level,
       isOwner: r.owner_id === user.id,
+      position: r.position, nameUpdatedAt: r.name_updated_at,
       createdAt: r.created_at, updatedAt: r.updated_at,
     });
 
@@ -325,21 +332,50 @@ async function route(request, env, url) {
     });
   }
 
+  /* The order the list is dragged into, which is a property of the account
+     rather than of the phone it was dragged on. One call rather than a PUT
+     per profile: a drag moves one row and renumbers every row after it, and
+     six round trips for one gesture is how a reorder ends up half-applied.
+     Silently skips anything you cannot write to, so a list containing a
+     profile somebody shared with you for reading still orders the rest. */
+  if (p === "/v1/profiles/order" && method === "POST") {
+    const body = await readJson(request).catch(() => ({}));
+    const order = Array.isArray(body.order) ? body.order.filter((x) => typeof x === "string") : null;
+    if (!order) return fail(400, "bad_request", "Send { order: [profileId, ...] }.");
+    if (order.length > 200) return fail(400, "too_many", "That is not a profile list.");
+
+    const now = Date.now();
+    const done = [];
+    for (let i = 0; i < order.length; i++) {
+      const { level } = await accessFor(env, user.id, order[i]);
+      if (!canWrite(level)) continue;
+      await env.DB.prepare("UPDATE profiles SET position = ?, updated_at = ? WHERE id = ?")
+        .bind(i, now, order[i]).run();
+      done.push(order[i]);
+    }
+    return json({ ordered: done.length, profileIds: done, updatedAt: now });
+  }
+
   if (p === "/v1/profiles" && method === "POST") {
     const body = await readJson(request).catch(() => ({}));
     const name = cleanName(body.name, "My profile");
     const id = newId();
     const now = Date.now();
+    const position = Number.isFinite(body.position) ? Math.trunc(body.position) : null;
+    /* The client's clock, and only ever compared with itself — see the
+       migration for why a name needs a stamp at all. */
+    const nameAt = Number.isFinite(body.nameUpdatedAt) ? body.nameUpdatedAt : now;
 
     await env.DB.prepare(
-      "INSERT INTO profiles (id, owner_id, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?)"
-    ).bind(id, user.id, name, now, now).run();
+      "INSERT INTO profiles (id, owner_id, name, created_at, updated_at, position, name_updated_at) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ).bind(id, user.id, name, now, now, position, nameAt).run();
 
     /* Every profile ships with one write seed, so sharing is one tap and not
        a setup flow. The owner can revoke or rotate it later. */
     const seed = await issueSeed(env, id, "write");
 
-    return json({ profileId: id, name, level: "owner", isOwner: true, seed, createdAt: now }, 201);
+    return json({ profileId: id, name, level: "owner", isOwner: true, seed, position, nameUpdatedAt: nameAt, createdAt: now }, 201);
   }
 
   if (seg[0] === "v1" && seg[1] === "profiles" && seg[2] && seg.length === 3) {
@@ -350,19 +386,46 @@ async function route(request, env, url) {
       return json({
         profileId: profile.id, name: profile.name, level,
         isOwner: level === "owner",
+        position: profile.position, nameUpdatedAt: profile.name_updated_at,
         createdAt: profile.created_at, updatedAt: profile.updated_at,
       });
     }
 
+    /* ── A RENAME IS A SYNCED EDIT, WITH THE SAME GUARD ITEMS GET ───────
+       The roster is account data now, so two devices can both rename the
+       same profile and both push. `nameUpdatedAt` is the client's clock
+       and is used exactly as items.client_updated_at is: never to merge,
+       only to refuse to go backwards — otherwise a phone reconnecting
+       after a week in flight mode would undo yesterday's rename on the
+       laptop simply by being the last to speak. A refused rename is not
+       an error; it comes back 200 with the name that won, so the caller
+       can take that as the answer instead of retrying forever. */
     if (method === "PUT") {
       if (!canWrite(level)) return gone();
       const body = await readJson(request).catch(() => ({}));
+      const now = Date.now();
+      const at = Number.isFinite(body.nameUpdatedAt) ? body.nameUpdatedAt : now;
+
+      if (Number.isFinite(body.position)) {
+        await env.DB.prepare("UPDATE profiles SET position = ?, updated_at = ? WHERE id = ?")
+          .bind(Math.trunc(body.position), now, profile.id).run();
+      }
+
+      if (body.name === undefined) {
+        const row = await env.DB.prepare("SELECT name, name_updated_at FROM profiles WHERE id = ?").bind(profile.id).first();
+        return json({ profileId: profile.id, name: row.name, nameUpdatedAt: row.name_updated_at, updatedAt: now });
+      }
+
       const name = cleanName(body.name);
       if (!name) return fail(400, "bad_request", "A profile needs a name.");
-      const now = Date.now();
-      await env.DB.prepare("UPDATE profiles SET name = ?, updated_at = ? WHERE id = ?")
-        .bind(name, now, profile.id).run();
-      return json({ profileId: profile.id, name, updatedAt: now });
+
+      const stored = profile.name_updated_at;
+      if (stored != null && stored > at) {
+        return json({ profileId: profile.id, name: profile.name, nameUpdatedAt: stored, stale: true, updatedAt: now });
+      }
+      await env.DB.prepare("UPDATE profiles SET name = ?, name_updated_at = ?, updated_at = ? WHERE id = ?")
+        .bind(name, at, now, profile.id).run();
+      return json({ profileId: profile.id, name, nameUpdatedAt: at, updatedAt: now });
     }
 
     if (method === "DELETE") {

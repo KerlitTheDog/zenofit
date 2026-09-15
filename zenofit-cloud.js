@@ -356,9 +356,24 @@
 
   /* ---- profiles and seeds -------------------------------------------------- */
 
+  /* ---- the roster -----------------------------------------------------------
+   * listProfiles is not a listing any more, it is THE profile list: a second
+   * device builds its whole roster from it, names and order included. So a
+   * name travels with the moment it was typed (`nameUpdatedAt`, the client's
+   * clock, compared only with itself) and a position travels with the profile
+   * rather than living on whichever phone the list was dragged on.
+   */
   const listProfiles   = () => call("GET", "/v1/profiles");
-  const createProfile  = (name) => call("POST", "/v1/profiles", { name });
-  const renameProfile  = (id, name) => call("PUT", "/v1/profiles/" + id, { name });
+  const createProfile  = (name, opts) =>
+    call("POST", "/v1/profiles", { name, position: (opts || {}).position, nameUpdatedAt: (opts || {}).nameUpdatedAt });
+  /* The reply carries the name that WON, which is not always the one sent:
+     a rename older than the stored one comes back `stale: true` with the
+     newer name, and that is the answer, not an error to retry. */
+  const renameProfile  = (id, name, nameUpdatedAt) =>
+    call("PUT", "/v1/profiles/" + id, { name, nameUpdatedAt });
+  /* One call for the whole list, because a drag renumbers every row after
+     the one that moved and six round trips is how that lands half-applied. */
+  const setProfileOrder = (ids) => call("POST", "/v1/profiles/order", { order: ids });
   const deleteProfile  = (id) => call("DELETE", "/v1/profiles/" + id);
   const listSeeds      = (id) => call("GET", "/v1/profiles/" + id + "/seeds");
   const createSeed     = (id, level) => call("POST", "/v1/profiles/" + id + "/seeds", { level: level || "write" });
@@ -381,7 +396,7 @@
     enablePush, disablePush, pushEnabled, testPush,
     scheduleTimer, cancelTimer, clockDrift,
     pullChanges, pushChanges,
-    listProfiles, createProfile, renameProfile, deleteProfile,
+    listProfiles, createProfile, renameProfile, deleteProfile, setProfileOrder,
     listSeeds, createSeed, rotateSeeds, revokeSeed, joinWithSeed,
     listGrants, revokeGrant, setGrantLevel,
     _call: call,

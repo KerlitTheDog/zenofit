@@ -10,8 +10,12 @@
  * an outsider nothing.                                                      */
 
 export async function accessFor(env, userId, profileId) {
+  /* position and name_updated_at ride along because the roster is account
+     data: every route that reads a profile row also reports where it sits
+     in the list and when its name was last set. */
   const profile = await env.DB.prepare(
-    "SELECT id, owner_id, name, created_at, updated_at, deleted_at FROM profiles WHERE id = ?"
+    "SELECT id, owner_id, name, created_at, updated_at, deleted_at, position, name_updated_at " +
+    "FROM profiles WHERE id = ?"
   ).bind(profileId).first();
 
   if (!profile || profile.deleted_at) return { level: null, profile: null };

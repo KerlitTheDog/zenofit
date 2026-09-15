@@ -276,10 +276,18 @@ input[type="date"].pb-input::-webkit-date-and-time-value{
   100%  { box-shadow:0 0 0 2px rgba(233,185,73,0); }
 }
 
+/* Refresh turning while it works. A network round trip is the one thing in
+   this app with no other sign it is happening, and a button that looks
+   identical before and after a tap gets tapped again. */
+.pb-spin{ animation:pbSpin .9s linear infinite; transform-origin:50% 50%; }
+@keyframes pbSpin{ to{ transform:rotate(360deg); } }
+
 @media (prefers-reduced-motion: reduce){
   .pb-sheet{ animation:none; }
   .pb-acc-body,.pb-acc-inner,.pb-acc-chevron{ transition:none; }
   .pb-timer-done{ animation:none; box-shadow:0 0 0 3px rgba(233,185,73,.18); }
+  /* the tap still has to show it landed, so the icon dims instead of turning */
+  .pb-spin{ animation:none; opacity:.45; }
   /* no pulse, but the card still has to be findable, so the ring simply
      stays until the next render clears it */
   .pb-flash{ animation:none; box-shadow:0 0 0 2px rgba(233,185,73,.55); }

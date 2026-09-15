@@ -2131,12 +2131,17 @@ function syncHash(s) {
   return h.toString(36);
 }
 
-/* The active profile as the wire sees it. */
-function syncLocalItems() {
+/* A profile as the wire sees it. Defaults to the active one, because that
+   is the only one held in memory; the parameter exists for the first push
+   of a profile being put into the account from the account sheet, which is
+   a list where the profile you are tapping is usually not the one you are
+   looking at. */
+function syncLocalItems(from) {
+  const src0 = from || state;
   const out = [];
   for (const collection of Object.keys(SYNC_COLLECTIONS)) {
     const def = SYNC_COLLECTIONS[collection];
-    const src = state[collection];
+    const src = src0[collection];
     if (def.map) {
       if (!src || typeof src !== "object") continue;
       for (const k of Object.keys(src)) {
@@ -2216,6 +2221,7 @@ async function syncPull(localId) {
   if (!C || typeof C.pullChanges !== "function") return { ok: false, reason: "no-client" };
 
   let cursor = rec.cursor || null, applied = 0, level = rec.level, guard = 0;
+  const was = rec.level;
   /* a cursor, never a bare timestamp, once we have one: saving a workout
      stamps every set in it with the same millisecond, and `since` cannot
      separate rows that share one */
@@ -2232,12 +2238,47 @@ async function syncPull(localId) {
       else marks[key] = [syncHash(JSON.stringify(it.json)), it.clientUpdatedAt || it.updatedAt || Date.now()];
     }
     cursor = res.cursor || cursor;
-    syncSet(localId, { marks, cursor, level, lastPulledAt: Date.now() });
+    const patch = { marks, cursor, level, lastPulledAt: Date.now() };
+    /* ── A LIVE PROFILE IS ONLY EVER A READ GRANT ──────────────────────
+       The other direction of the same news. If the owner has given this
+       phone write access, the profile stops being a window onto theirs
+       and becomes one to train in — and a live profile is one writeNow
+       refuses to save, so leaving the flag up would mean her sessions
+       went to the server and nowhere else, and a launch with no signal
+       would open an empty log she had been writing in all week. */
+    if (level !== "read" && (syncFor(localId) || {}).live) patch.live = false;
+    syncSet(localId, patch);
     if (!res.hasMore) break;
   }
-  if (applied) writeNow();
-  return { ok: true, applied, level };
+  const settled = !syncLive(localId) && rec.live;   // just stopped being live
+  /* only ever the active profile: `state` IS that one, and syncPull is
+     never called for another (see THE TWO HALVES above) */
+  if ((applied || settled) && localId === activeProfileId()) writeNow();
+  /* Every pull carries the level the server has for this device, so a
+     profile that was shared "can edit" and has since been moved to read
+     only is found here rather than on the next failed push. Reported back
+     rather than acted on, because turning it into a live profile means
+     re-fetching it, and re-entering this function from inside itself is
+     not a thing to do halfway through a page loop. */
+  return { ok: true, applied, level, demoted: was !== "read" && level === "read" };
 }
+
+/* A grant that has just become read-only. The local copy is somebody
+   else's training and the server is now the only thing allowed to change
+   it, so it stops being a copy and becomes the live view the read path was
+   built for: nothing of it on this phone, fetched fresh, and the screen
+   locked by syncReadOnly on the very next frame. */
+function syncDemoted(localId) {
+  if (!syncLive(localId) && liveAdopt(localId) && localId === activeProfileId()) liveEnter(localId);
+}
+
+/* The active profile is `state`; any other one is still on disk. Only the
+   FIRST push of a profile being put into the account ever asks for another,
+   and only for reading — nothing here writes to a profile that is not on
+   screen. (readProfileState's `unreadable` latch is filed by id, so asking
+   it about a neighbour cannot disarm the guard on the one you are in.) */
+const profileStateFor = (localId) =>
+  (localId === activeProfileId() ? state : readProfileState(localId));
 
 async function syncPush(localId) {
   const rec = syncFor(localId);
@@ -2252,7 +2293,7 @@ async function syncPush(localId) {
   const seen = new Set();
   const tooBig = [];
 
-  for (const it of syncLocalItems()) {
+  for (const it of syncLocalItems(profileStateFor(localId))) {
     const key = it.collection + "/" + it.itemId;
     seen.add(key);
     const body = JSON.stringify(it.json);
@@ -2318,7 +2359,11 @@ function refreshCloudProfiles() {
   C.listProfiles()
     .then((res) => {
       if (!ui.accountSheet) return;
-      ui.accountSheet = { ...ui.accountSheet, loading: false, cloud: (res && res.profiles) || [] };
+      /* `loaded` is the difference between "the account holds nothing else"
+         and "we have not asked yet", and the list reads differently in the
+         two cases: a linked profile missing from a listing that never
+         arrived means nothing at all. */
+      ui.accountSheet = { ...ui.accountSheet, loading: false, loaded: true, cloud: (res && res.profiles) || [] };
       render();
     })
     .catch(() => {
@@ -2380,8 +2425,12 @@ async function syncNow(localId = activeProfileId()) {
   ui.syncBusy = true; ui.syncError = null; render();
   try {
     const pulled = await syncPull(localId);
-    const pushed = rec.level === "read" ? { ok: true, sent: 0 } : await syncPush(localId);
+    /* re-read rather than trusting `rec`: the pull is what learns the level,
+       and one that has just turned read-only must not be pushed to */
+    const now = syncFor(localId) || rec;
+    const pushed = now.level === "read" ? { ok: true, sent: 0 } : await syncPush(localId);
     syncSet(localId, { lastOkAt: Date.now() });
+    if (pulled.demoted) syncDemoted(localId);
     return { ok: true, pulled, pushed };
   } catch (e) {
     /* pullChanges and pushChanges THROW, unlike the rest of the client, so
@@ -2531,16 +2580,22 @@ async function syncQuiet(opts) {
   if (!C || !C.hasDevice || !C.hasDevice()) return;
   syncInFlight = true;
   try {
-    let landed = 0;
+    let landed = 0, demoted = false;
     if (!opts || opts.pull !== false) {
       syncApplying = true;                  // a pull writes; that write is not a change to push back
-      try { landed = (await syncPull(localId)).applied || 0; } finally { syncApplying = false; }
+      let out;
+      try { out = await syncPull(localId); } finally { syncApplying = false; }
+      landed = out.applied || 0;
+      demoted = !!out.demoted;
       syncLastPull = Date.now();
     }
-    if ((!opts || opts.push !== false) && rec.level !== "read") await syncPush(localId);
+    /* what the PULL just learned, not what `rec` said before it: a grant
+       moved to read-only between two syncs must not be pushed to */
+    if ((!opts || opts.push !== false) && (syncFor(localId) || rec).level !== "read") await syncPush(localId);
     ui.syncError = null;
     syncSet(localId, { lastOkAt: Date.now() });
-    if (landed && !syncTyping()) render();
+    if (demoted) syncDemoted(localId);
+    else if (landed && !syncTyping()) render();
   } catch (e) {
     ui.syncError = syncErrText(e);
     console.warn("auto sync failed", e);
@@ -2583,6 +2638,98 @@ document.addEventListener("visibilitychange", () => {
   if (Date.now() - syncLastPull > SYNC_PULL_GAP) syncQuiet();
 });
 window.addEventListener("pagehide", () => { clearTimeout(syncPushTimer); syncQuiet({ pull: false }); });
+
+/* ── ONE CONTROL THAT MEANS "SHOW ME WHAT IS ACTUALLY THERE NOW" ──────
+   Two different things go stale in here, and until this button both were
+   fixed the same way: close the app, open it again, and if that did not
+   do it, do it once more.
+
+   THE TRAINING. A live profile is fetched on the way in and then polled
+   every few minutes, and a synced one the same. That is the right pacing
+   for a phone in a pocket and no use at all to somebody stood there having
+   just been told a set was logged on the other phone, because the answer
+   to "is it there yet" cannot be "wait three minutes".
+
+   THE APP ITSELF. sw.js answers from cache first and re-fetches behind
+   you, which is what makes it open instantly and work with no signal, and
+   it also means a deploy appears on the SECOND launch. Nothing on screen
+   ever said so, so what it teaches is exactly the habit above.
+
+   From where the user stands those are one request, so they are one
+   button. It asks the worker for the shell from the network past both
+   caches, reloads ONLY if something really came back different — a
+   refresh that reloads every time is one nobody dares press mid-set — and
+   otherwise pulls the profile in front of them.
+
+   Nothing here can cost anything: the debounce is flushed before a reload
+   can happen, a live profile's re-entry already puts back what was on
+   screen if the fetch fails, and a failed pull leaves the local log
+   untouched, as every other sync does.                                 */
+
+/* Ask the controlling worker to re-fetch the shell. Resolves false on
+   anything unusual (no worker yet, a first load that nothing controls,
+   a reply that never comes), because "could not check" and "nothing
+   changed" lead to the same next step: refresh the data instead. */
+function swRefreshShell() {
+  return new Promise((resolve) => {
+    const sw = ("serviceWorker" in navigator) && navigator.serviceWorker.controller;
+    if (!sw) return resolve(false);
+    let settled = false;
+    const done = (v) => { if (settled) return; settled = true; clearTimeout(timer); resolve(v); };
+    const timer = setTimeout(() => done(false), 15000);
+    try {
+      const ch = new MessageChannel();
+      ch.port1.onmessage = (e) => done(!!(e.data && e.data.changed));
+      sw.postMessage({ type: "refresh-shell" }, [ch.port2]);
+    } catch { done(false); }
+  });
+}
+
+async function refreshNow() {
+  if (ui.refreshing) return;
+  ui.refreshing = true; render();
+  writeNow();                   // a reload must not land inside the debounce
+  /* Held for a beat even when the answer comes back instantly, because a
+     spinner that flashes for 40ms is the same thing to a finger as a button
+     that did nothing, and this one is pressed precisely when somebody is
+     already unsure whether the app is listening. */
+  const floor = new Promise((r) => setTimeout(r, 450));
+  try {
+    if ("serviceWorker" in navigator) {
+      const reg = await navigator.serviceWorker.getRegistration();
+      if (reg) {
+        await reg.update().catch(() => { /* offline: the cached app stands */ });
+        /* A worker already waiting is a new version that has finished
+           installing and is holding the door. Taking it fires
+           controllerchange, which reloads the page, so there is nothing
+           after this worth doing. */
+        if (reg.waiting) { reg.waiting.postMessage("skip-waiting"); return; }
+      }
+    }
+    if (await swRefreshShell()) { location.reload(); return; }
+
+    const id = activeProfileId();
+    if (syncLive(id)) { ui.syncError = null; liveEnter(id); }
+    else if ((syncFor(id) || {}).remoteId) await syncNow(id);
+  } catch (e) {
+    console.warn("refresh failed", e);
+  } finally {
+    await floor;
+    ui.refreshing = false;
+    render();
+  }
+}
+
+/* The control itself, drawn into both headers so it is in the same place on
+   every tab. The spin lives on a wrapper rather than on the icon, because
+   the icon is a lucide placeholder until after the frame is built and what
+   it hands back is not this element. */
+function refreshBtn(size, pad) {
+  const label = esc(T("a11y.refresh"));
+  return `<button data-action="refresh-now" title="${label}" aria-label="${label}" style="color:var(--muted);padding:${pad}px;display:flex;align-items:center">
+    <span class="${ui.refreshing ? "pb-spin" : ""}" style="display:flex">${icon("refresh-cw", size)}</span>
+  </button>`;
+}
 
 /* ── BACKUP: EVERYTHING, OUT AND BACK IN ──────────────────────────────
    The whole point of this app is that it keeps what you did, and the whole
@@ -2927,6 +3074,7 @@ const ui = {
   joinSheet: null,      // {code, busy, error} redeeming somebody's code
   syncBusy: false,      // a pull or push is in flight
   syncError: null,      // what the last one failed with, cleared by the next
+  refreshing: false,    // the header's Refresh is working, see refreshNow
   profileOrder: false,  // …that list is in drag-to-reorder mode
   profileStats: null,   // counts per profile, read once when the window opens
   profileLangWas: null,   // the saved language, so a previewed one can be backed out of
@@ -3373,6 +3521,7 @@ function render() {
       <img src="logoC.png" alt="${T("a11y.logo")}" width="30" height="30" style="width:30px;height:30px;object-fit:contain;border-radius:8px;display:block;flex-shrink:0">
       <div class="pb-num" style="font-size:19px;font-weight:700;flex:1">${titles[tab]}</div>
       ${rollingWeeks() ? "" : chip(T("common.wkShort", { n: currentWeek }), "var(--gold)")}
+      ${refreshBtn(20, 4)}
       <button data-action="open-body" title="${T("a11y.bodyBtn")}" style="color:var(--muted);padding:4px">${icon("ruler", 20)}</button>
       <button data-action="open-profile" style="color:var(--muted);padding:4px">${icon("settings", 20)}</button>
     </div>`;
@@ -3742,6 +3891,7 @@ function renderHome(settings, currentWeek, unit) {
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:2px;flex-shrink:0">
+        ${refreshBtn(22, 8)}
         <button data-action="open-body" title="${T("a11y.bodyBtn")}" style="color:var(--muted);padding:8px">${icon("ruler", 22)}</button>
         <button data-action="open-profile" style="color:var(--muted);padding:8px">${icon("settings", 22)}</button>
       </div>
@@ -5357,6 +5507,14 @@ function reorderPinnedTimers(from, to) {
   if (next) patch({ timers: next });
 }
 
+/* DRAG_READ_OK below is READ_OK's other half, and it draws the same line:
+   the profile INDEX and the timers belong to this phone, everything else
+   here is a write into somebody else's training. A drag never met that
+   check at all, because it arrives as pointerdown rather than as a click —
+   so on a profile whose every button said no, dragging the library into a
+   different order went straight through, and the next pull silently put it
+   back. A new reorderable list has to be decided about in both tables, and
+   the default in both is no. */
 const DRAG_COMMIT = {
   group: reorderGroups,
   preset: reorderPresets,
@@ -5367,6 +5525,7 @@ const DRAG_COMMIT = {
   set: reorderSets,
   profile: reorderProfiles,
 };
+const DRAG_READ_OK = new Set(["profile", "pinnedTimer"]);
 
 /* The sets inside the open entry. Everywhere else in the app an order is a
    presentation choice; here it is read as data. entryLastResult matches set
@@ -5422,7 +5581,13 @@ function reorderLibraryExercises(from, to, row) {
 
 document.addEventListener("pointerdown", (e) => {
   const h = e.target.closest("[data-drag-handle]");
-  if (h) startRowDrag(e, h);
+  if (!h) return;
+  /* Refused before the gesture starts rather than on release: a row that
+     picks up, follows your finger and then springs back having changed
+     nothing reads as a bug, not as a rule. */
+  const row = h.closest("[data-dragrow]");
+  if (syncReadOnly() && row && !DRAG_READ_OK.has(row.dataset.dragrow)) { toastReadOnly(); return; }
+  startRowDrag(e, h);
 });
 document.addEventListener("pointermove", moveRowDrag);
 document.addEventListener("pointerup", endRowDrag);
@@ -8130,15 +8295,27 @@ function renderSyncSheet() {
       </div>`
     : "";
 
+  /* Each person carries what they can do and a way to change it. The level
+     is the thing that actually decides whether their phone can write into
+     this log, and until it was on this row the only way to take write back
+     was to throw somebody out and re-invite them. */
   const grants = (f.grants || []).length
-    ? `<div class="pb-card" style="overflow:hidden;margin-bottom:10px">${f.grants.map((g, n) => `
-        <div style="display:flex;align-items:center;gap:10px;padding:11px 12px;border-bottom:${n < f.grants.length - 1 ? "1px solid var(--border-soft)" : "none"}">
-          <span style="flex:1;min-width:0">
-            <span style="display:block;font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(g.displayName || T("sync.someone"))}</span>
-            <span style="display:block;font-size:11px;color:var(--faint)">${T(g.level === "write" ? "sync.levelWrite" : "sync.levelRead")}</span>
-          </span>
-          <button data-action="sync-revoke" data-g="${esc(g.userId)}" class="pb-btn" style="flex-shrink:0;padding:7px 12px;font-size:12px;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">${T("sync.revoke")}</button>
-        </div>`).join("")}</div>`
+    ? `<div class="pb-card" style="overflow:hidden;margin-bottom:10px">${f.grants.map((g, n) => {
+        const w = g.level === "write";
+        const name = g.displayName || T("sync.someone");
+        return `<div style="padding:11px 12px;border-bottom:${n < f.grants.length - 1 ? "1px solid var(--border-soft)" : "none"}">
+          <div style="display:flex;align-items:center;gap:10px">
+            <span style="flex:1;min-width:0">
+              <span style="display:block;font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(name)}</span>
+              <span style="display:block;font-size:11px;color:${w ? "var(--gold)" : "var(--faint)"}">${T(w ? "sync.levelWrite" : "sync.levelRead")}</span>
+            </span>
+            <button data-action="sync-revoke" data-g="${esc(g.userId)}" class="pb-btn" style="flex-shrink:0;padding:7px 12px;font-size:12px;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">${T("sync.revoke")}</button>
+          </div>
+          <button data-action="sync-set-level" data-g="${esc(g.userId)}" data-name="${esc(name)}" data-level="${w ? "read" : "write"}" ${ui.syncBusy ? "disabled" : ""} class="pb-btn pb-ghost" style="width:100%;padding:8px 0;margin-top:9px;font-size:12px;opacity:${ui.syncBusy ? 0.45 : 1}">
+            ${icon(w ? "eye" : "pencil", 13)} ${T(w ? "sync.makeThemRead" : "sync.makeThemWrite")}
+          </button>
+        </div>`;
+      }).join("")}</div>`
     : `<div style="font-size:11.5px;color:var(--faint);margin-bottom:10px;line-height:1.5">${T("sync.nobody")}</div>`;
 
   const body = !cloud
@@ -8234,30 +8411,73 @@ function renderAccountSheet() {
       `<div style="font-size:12.5px;color:var(--faint);line-height:1.6">${T("sync.noClient")}</div>`, 124);
   }
 
-  /* ── signed in: who you are, and what is waiting ── */
+  /* ── signed in: who you are, and what is waiting ──
+     ONE LIST, AND IT IS THE SAME LIST THE PROFILES SCREEN SHOWS. This used
+     to draw only what the server handed back, so a profile made on this
+     phone and never synced was simply absent — and since the heading says
+     "Your profiles" and the screen two taps away says four of them, the
+     obvious reading was that the list had failed to refresh. It had not:
+     it was answering a different question, and never said which.
+
+     So every profile on this phone appears, in the order the Profiles
+     screen has them, each one saying where it actually is — in the
+     account, or only here — and a profile that is only here gets the one
+     button that changes that. Below them go the profiles in the account
+     that this phone does NOT hold, which is the other half of what an
+     account is for. Nothing is hidden and nothing has to be guessed at. */
   if (me) {
-    const list = f.cloud || [];
-    const linked = new Set(Object.values(syncAll()).map((r) => r && r.remoteId).filter(Boolean));
-    const rows = list.length
-      ? list.map((p, i) => {
-          const here = linked.has(p.profileId);
-          /* the name THIS phone knows it by, where it is on this phone at
-             all: a rename that has not reached the server yet, or one made
-             before renames were sent, must not make the list disagree with
-             the Profiles screen two taps away */
-          const mine = profileList().findIndex((lp) => (syncFor(lp.id) || {}).remoteId === p.profileId);
-          const shown = mine >= 0 ? profileLabel(profileList()[mine], mine) : (p.name || T("sync.joinedName"));
-          return `<div style="display:flex;align-items:center;gap:10px;padding:11px 12px;border-bottom:${i < list.length - 1 ? "1px solid var(--border-soft)" : "none"}">
-            <span style="flex:1;min-width:0">
-              <span style="display:block;font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(shown)}</span>
-              <span style="display:block;font-size:11px;color:var(--faint)">${T(p.isOwner ? "acct.owned" : p.level === "read" ? "sync.levelRead" : "sync.levelWrite")}</span>
-            </span>
-            ${here
-              ? `<span style="flex-shrink:0;font-size:11.5px;color:var(--green);font-weight:600">${T("acct.onThisPhone")}</span>`
-              : `<button data-action="acct-pull" data-p="${esc(p.profileId)}" data-n="${esc(p.name || "")}" data-lv="${esc(p.level || "write")}" class="pb-btn pb-ghost" style="flex-shrink:0;padding:7px 12px;font-size:12px;color:var(--gold);border-color:rgba(233,185,73,.4)">${icon("cloud-download", 13)} ${T("acct.getIt")}</button>`}
-          </div>`;
-        }).join("")
-      : `<div style="padding:14px;font-size:12px;color:var(--faint);line-height:1.5">${T(f.loading ? "acct.looking" : "acct.noneUp")}</div>`;
+    const cloud = f.cloud || [];
+    const byRemote = new Map(cloud.map((p) => [p.profileId, p]));
+    const locals = profileList();
+    const linked = new Set(locals.map((lp) => (syncFor(lp.id) || {}).remoteId).filter(Boolean));
+    const cloudOnly = cloud.filter((p) => !linked.has(p.profileId));
+    const n = locals.length + cloudOnly.length;
+    let at = 0;
+    const edge = () => (++at < n ? "1px solid var(--border-soft)" : "none");
+
+    const row = (name, sub, subInk, right) =>
+      `<div style="display:flex;align-items:center;gap:10px;padding:11px 12px;border-bottom:${edge()}">
+        <span style="flex:1;min-width:0">
+          <span style="display:block;font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(name)}</span>
+          <span style="display:block;font-size:11px;color:${subInk}">${sub}</span>
+        </span>
+        ${right}
+      </div>`;
+
+    const here = `<span style="flex-shrink:0;font-size:11.5px;color:var(--green);font-weight:600">${T("acct.onThisPhone")}</span>`;
+
+    const localRows = locals.map((lp, i) => {
+      const rec = syncFor(lp.id) || {};
+      const up = rec.remoteId ? byRemote.get(rec.remoteId) : null;
+      /* Not linked at all: it exists on this phone and nowhere else, which
+         is the app's default and not a fault — every profile starts this
+         way and stays that way until somebody says otherwise. */
+      if (!rec.remoteId) {
+        return row(profileLabel(lp, i), T("acct.localOnly"), "var(--faint)",
+          `<button data-action="acct-backup" data-id="${esc(lp.id)}" ${ui.syncBusy ? "disabled" : ""} class="pb-btn pb-ghost" style="flex-shrink:0;padding:7px 12px;font-size:12px;color:var(--gold);border-color:rgba(233,185,73,.4);opacity:${ui.syncBusy ? 0.45 : 1}">${icon("cloud-upload", 13)} ${T("acct.backUp")}</button>`);
+      }
+      /* Linked, and the listing has loaded, and it is not in it: this phone
+         is signed in somewhere else than the account that profile was
+         synced under, or the grant has been taken back. Worth saying, since
+         it is the one case where a profile here is quietly not syncing. */
+      if (!up && f.loaded) {
+        return row(profileLabel(lp, i), T("acct.notInAccount"), "var(--steel)", "");
+      }
+      /* the server's answer where there is one, since a grant can change
+         under this phone; the stored level is only the stand-in until the
+         listing lands */
+      const owned = up ? up.isOwner : rec.level === "owner";
+      const lvl = rec.level === "read" ? "sync.levelRead" : owned ? "acct.owned" : "sync.levelWrite";
+      return row(profileLabel(lp, i), T(lvl), "var(--faint)", here);
+    }).join("");
+
+    /* In the account, not on this phone. The name is the server's here,
+       because there is no local one to prefer. */
+    const cloudRows = cloudOnly.map((p) =>
+      row(p.name || T("sync.joinedName"),
+        T(p.isOwner ? "acct.owned" : p.level === "read" ? "sync.levelRead" : "sync.levelWrite"), "var(--faint)",
+        `<button data-action="acct-pull" data-p="${esc(p.profileId)}" data-n="${esc(p.name || "")}" data-lv="${esc(p.level || "write")}" class="pb-btn pb-ghost" style="flex-shrink:0;padding:7px 12px;font-size:12px;color:var(--gold);border-color:rgba(233,185,73,.4)">${icon("cloud-download", 13)} ${T("acct.getIt")}</button>`)
+    ).join("");
 
     return sheet(T("acct.title"), "accountSheet", `
       <div class="pb-card2" style="padding:12px 14px;margin-bottom:16px">
@@ -8265,8 +8485,9 @@ function renderAccountSheet() {
         <div class="pb-num" style="font-size:19px;font-weight:700;color:var(--gold);line-height:1.2;word-break:break-all">${esc(me)}</div>
       </div>
       ${sectionTitle(T("acct.yourProfiles"), f.loading ? `<span style="font-size:11px;color:var(--faint)">${T("sync.working")}</span>` : "")}
-      <div class="pb-card" style="overflow:hidden;margin-bottom:10px">${rows}</div>
-      <div style="font-size:11.5px;color:var(--faint);margin-bottom:16px;line-height:1.55">${T("acct.pullHint")}</div>
+      <div class="pb-card" style="overflow:hidden;margin-bottom:10px">${localRows}${cloudRows}</div>
+      ${f.error ? `<div style="font-size:12.5px;color:var(--red);margin-bottom:10px;line-height:1.5">${esc(f.error)}</div>` : ""}
+      <div style="font-size:11.5px;color:var(--faint);margin-bottom:16px;line-height:1.55">${T(cloudOnly.length ? "acct.pullHint" : "acct.backUpHint")}</div>
       <div class="pb-hairline" style="margin:16px 0"></div>
       <button data-action="acct-signout" class="pb-btn" style="width:100%;padding:12px 0;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">
         ${icon("log-out", 15)} ${T("acct.signOut")}
@@ -9289,10 +9510,13 @@ const actions = {
   "open-storage": () => { ui.showStorage = true; render(); },
   /* ── the account ─────────────────────────────────────────────────── */
   "live-retry": () => { ui.syncError = null; liveEnter(activeProfileId()); },
+  /* Reads and re-reads; writes nothing anywhere, which is why it is on the
+     read-only allowlist and why it is safe on every screen. */
+  "refresh-now": () => refreshNow(),
 
   "open-account": () => {
     ui.profileForm = null;
-    ui.accountSheet = { username: "", password: "", free: null, busy: false, error: null, cloud: [], loading: false };
+    ui.accountSheet = { username: "", password: "", free: null, busy: false, error: null, cloud: [], loading: false, loaded: false };
     render();
     refreshCloudProfiles();
   },
@@ -9338,8 +9562,48 @@ const actions = {
     const C = window.ZenofitCloud;
     if (!C || !confirm(T("acct.confirmSignOut"))) return;
     C.signOut();
-    ui.accountSheet = { username: "", password: "", free: null, busy: false, error: null, cloud: [], loading: false };
+    ui.accountSheet = { username: "", password: "", free: null, busy: false, error: null, cloud: [], loading: false, loaded: false };
     render();
+  },
+
+  /* ── THE OTHER DIRECTION, FROM THE LIST THAT SHOWS WHAT IS MISSING ──
+     Turning sync on has always lived behind Profiles → the pencil → Sync,
+     which is the right home for it and the wrong place to NOTICE it: the
+     account sheet is where you see, in one list, that two of your four
+     profiles are only on this phone. So the same move is offered there, on
+     the row that says so, behind the same confirm — this is still the
+     moment a training log starts leaving the device.
+
+     It does not require the profile to be the one on screen, which Sync →
+     Turn on does: that restriction is there because syncNow PULLS, and a
+     pull writes into `state`, which is whichever profile is open. A first
+     push has nothing to pull — the cloud profile was minted empty one line
+     above — so it pushes from the profile's own saved state and stops. */
+  "acct-backup": async (el) => {
+    const localId = el.dataset.id;
+    const list = profileList();
+    const i = list.findIndex((p) => p.id === localId);
+    if (i < 0 || ui.syncBusy || syncFor(localId)) return;
+    if (!confirm(T("sync.confirmOn"))) return;
+    const C = window.ZenofitCloud;
+    if (!C) return;
+    ui.syncBusy = true;
+    ui.accountSheet = { ...ui.accountSheet, error: null };
+    render();
+    try {
+      await C.ensureDevice();
+      const made = await C.createProfile(profileLabel(list[i], i));
+      /* linked BEFORE the push, so one that dies half way leaves a profile
+         that knows where it lives rather than an orphan on the server */
+      syncSet(localId, { remoteId: made.profileId || made.id, level: "write", marks: {}, cursor: null });
+      await syncPush(localId);
+      syncSet(localId, { lastOkAt: Date.now() });
+    } catch (e) {
+      ui.accountSheet = { ...ui.accountSheet, error: syncErrText(e) };
+    }
+    ui.syncBusy = false;
+    render();
+    refreshCloudProfiles();
   },
 
   /* Bring one down as a NEW local profile, the same rule joining follows:
@@ -9422,6 +9686,20 @@ const actions = {
     render();
   },
 
+  /* ── ONE LIVE CODE AT A TIME, WHICH IS WHAT THE SHEET ALREADY SAID ──
+     This called createSeed, which ADDS a code and retires nothing, while
+     the line under the two buttons said "making a new code retires the old
+     one". Three ways that bit. Every profile is minted with a write seed
+     it never shows anybody (see POST /v1/profiles), so a profile shared
+     read-only still had a live write code hanging off it. A read code made
+     after a write one left the write one working, so "I've made it read
+     only now" was not true. And a code that leaked stayed good forever,
+     because nothing in the app had ever revoked one.
+
+     rotate: true is the server's word for "revoke every code on this
+     profile, then mint this one". Nobody already in is touched — a grant
+     is a person, a seed is only the doorway — which is the difference
+     between this and Remove.                                          */
   "sync-make-code": async (el) => {
     const f = ui.syncSheet;
     const rec = f && syncFor(f.localId);
@@ -9429,12 +9707,31 @@ const actions = {
     const level = el.dataset.level === "write" ? "write" : "read";
     ui.syncBusy = true; ui.syncError = null; render();
     try {
-      const made = await window.ZenofitCloud.createSeed(rec.remoteId, level);
+      const made = await window.ZenofitCloud.rotateSeeds(rec.remoteId, level);
       ui.syncSheet = { ...ui.syncSheet, code: made.seed, codeLevel: level, copied: false };
     } catch (e) {
       ui.syncError = syncErrText(e);
     }
     ui.syncBusy = false; render();
+  },
+
+  /* ── MOVING SOMEBODY BETWEEN READ AND WRITE ────────────────────────
+     The people list could only remove, so "she should just be able to
+     look at it now" meant revoking her, sending a new code and having her
+     join again from nothing. It asks first because it changes what
+     somebody else's phone is allowed to do with a log they are holding. */
+  "sync-set-level": async (el) => {
+    const f = ui.syncSheet;
+    const rec = f && syncFor(f.localId);
+    if (!rec || !rec.remoteId || ui.syncBusy) return;
+    const level = el.dataset.level === "write" ? "write" : "read";
+    const who = el.dataset.name || T("sync.someone");
+    if (!confirm(T(level === "read" ? "sync.confirmToRead" : "sync.confirmToWrite", { name: who }))) return;
+    ui.syncBusy = true; ui.syncError = null; render();
+    try { await window.ZenofitCloud.setGrantLevel(rec.remoteId, el.dataset.g, level); }
+    catch (e) { ui.syncError = syncErrText(e); }
+    ui.syncBusy = false; render();
+    refreshGrants();
   },
 
   "sync-copy-code": async () => {
@@ -9475,6 +9772,16 @@ const actions = {
         error: T(code === "not_found" || e.status === 404 ? "sync.joinBadCode"
           : code === "rate_limited" || e.status === 429 ? "sync.joinTooMany"
           : "sync.joinFailed") };
+      render();
+      return;
+    }
+    /* Your own code, typed on the phone that made it. The server says so
+       rather than letting you in, and without this the "read" fallback
+       below turned that into a second, read-only, live copy of a profile
+       already sitting in the list — one that would then be blank the first
+       time the signal went. */
+    if (joined.alreadyMine) {
+      ui.joinSheet = { ...ui.joinSheet, busy: false, error: T("sync.joinOwn") };
       render();
       return;
     }
@@ -10759,8 +11066,8 @@ const READ_OK = new Set([
   "profile-menu", "profile-add", "profile-duplicate", "profile-delete", "profile-form-save",
   "profiles-reorder",
   "open-sync", "sync-now", "sync-disable", "sync-copy-code",
-  "open-account", "acct-go", "acct-signout", "acct-pull",
-  "live-retry",
+  "open-account", "acct-go", "acct-signout", "acct-pull", "acct-backup",
+  "live-retry", "refresh-now",
   "open-join", "join-go", "open-push-test",
   "chart-zoom-in", "chart-zoom-out", "chart-reset", "chart-full", "chart-exit-full", "chart-pick",
   "select-progress", "ex-hist-all", "open-preset", "plan-open", "plan-result-close",

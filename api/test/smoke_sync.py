@@ -85,6 +85,61 @@ s, b = call("POST", "/v1/profiles/%s/items" % PID, token=outsider,
             body={"items": [item("log", "L3", {})]})
 check("an outsider gets 404, not 403", s == 404, (s, b))
 
+# ── the level is not a label, and it has to be able to go DOWN ─────────────
+# This is the one that shipped broken. Join used to keep the better of the two
+# levels, so handing a read code to somebody who had once been given a write
+# one changed nothing at all: her app said "read only" because that is what
+# the code said, the server still took her pushes because the grant still said
+# write, and her sets landed in his log.
+print("\n== a read code demotes, and the owner can set a level directly ==")
+demoted, demoted_id = device("demoted")
+s, b = call("POST", "/v1/join", token=demoted, body={"seed": WRITE_SEED})
+check("joined on the write code, as write", s == 201 and b.get("level") == "write", (s, b))
+
+s, rs2 = call("POST", "/v1/profiles/%s/seeds" % PID, token=owner, body={"level": "read"})
+s, b = call("POST", "/v1/join", token=demoted, body={"seed": rs2["seed"]})
+check("re-joining on a read code reports read", s in (200, 201) and b.get("level") == "read", (s, b))
+s, b = call("POST", "/v1/profiles/%s/items" % PID, token=demoted,
+            body={"items": [item("log", "L4", {"exercise": "Hers"})]})
+check("and the push is refused afterwards", s == 403 and b.get("error") == "read_only", (s, b))
+
+s, b = call("PUT", "/v1/profiles/%s/grants/%s" % (PID, demoted_id), token=owner, body={"level": "write"})
+check("the owner can put somebody back to write", s == 200 and b.get("level") == "write", (s, b))
+s, b = call("POST", "/v1/profiles/%s/items" % PID, token=demoted,
+            body={"items": [item("log", "L4", {"exercise": "Hers"})]})
+check("and the push works again", s == 200 and b.get("accepted") == 1, (s, b))
+
+s, b = call("PUT", "/v1/profiles/%s/grants/%s" % (PID, demoted_id), token=owner, body={"level": "read"})
+check("and move them to read without evicting them", s == 200 and b.get("level") == "read", (s, b))
+s, b = call("GET", "/v1/profiles/%s/changes" % PID, token=demoted)
+check("they can still read after the move", s == 200 and b.get("level") == "read", (s, b))
+
+s, b = call("PUT", "/v1/profiles/%s/grants/%s" % (PID, owner_id), token=demoted, body={"level": "write"})
+check("a grant holder cannot set levels", s == 404, (s, b))
+s, b = call("PUT", "/v1/profiles/%s/grants/%s" % (PID, demoted_id), token=owner, body={"level": "admin"})
+check("an invented level is refused", s == 400, (s, b))
+s, b = call("PUT", "/v1/profiles/%s/grants/nobody" % PID, token=owner, body={"level": "read"})
+check("setting a level on a stranger is 404, not a silent ok", s == 404, (s, b))
+
+# ── rotate: what the share sheet's own caption has always claimed ─────────
+print("\n== a rotated code retires the old ones and evicts nobody ==")
+s, spare = call("POST", "/v1/profiles" , token=owner, body={"name": "Rotate test"})
+P3, P3_SEED = spare["profileId"], spare["seed"]
+joiner, _ = device("joiner")
+call("POST", "/v1/join", token=joiner, body={"seed": P3_SEED})
+s, rot = call("POST", "/v1/profiles/%s/seeds" % P3, token=owner, body={"level": "read", "rotate": True})
+check("rotating mints a new code", s == 201 and bool(rot.get("seed")), (s, rot))
+s, b = call("GET", "/v1/profiles/%s/seeds" % P3, token=owner)
+check("exactly one code is live afterwards", len(b.get("seeds", [])) == 1, b)
+check("and the one shipped with the profile is not it",
+      all(x["seed"] != P3_SEED for x in b.get("seeds", [])), b)
+s, b = call("POST", "/v1/join", token=outsider, body={"seed": P3_SEED})
+check("the retired code no longer works", s == 404, (s, b))
+s, b = call("POST", "/v1/profiles/%s/items" % P3, token=joiner,
+            body={"items": [item("log", "R1", {"still": "in"})]})
+check("somebody who joined before the rotate is untouched", s == 200, (s, b))
+call("DELETE", "/v1/profiles/" + P3, token=owner)
+
 print("\n== the allowlist is closed ==")
 for coll, iid, why in [
     ("drafts", "entry", "drafts never sync"),

@@ -447,13 +447,26 @@ async function route(request, env, url) {
       return json({ profileId: row.profile_id, name: row.name, level: "owner", isOwner: true, alreadyMine: true });
     }
 
-    /* Re-joining on a better seed upgrades you; a worse one does not quietly
-       demote you, because the owner revoking is the way to take access away. */
+    /* ── THE CODE YOU CAME IN ON DECIDES YOUR LEVEL, BOTH WAYS ──────────
+       This used to keep the better of the two — a write grant survived a
+       later join on a read code — reasoning that only the owner revoking
+       should take access away. Both halves of that were wrong.
+
+       It is the OWNER who mints a code, so handing somebody a read code IS
+       the owner taking write access away; the person typing it cannot
+       promote themselves with a code they were never given. And the cost
+       of getting it backwards is the worst kind: sharing read-only to
+       somebody who had once been given write left a profile that said
+       "read only" on one phone and was fully editable on the other, with
+       her sets syncing back into his log and nothing anywhere saying why.
+
+       Nobody is let in by this that was not let in before: an unknown or
+       revoked code is already a 404 above, and a grant is still only ever
+       created by a code the owner issued.                               */
     await env.DB.prepare(
       "INSERT INTO grants (profile_id, user_id, level, seed, joined_at) VALUES (?, ?, ?, ?, ?) " +
       "ON CONFLICT(profile_id, user_id) DO UPDATE SET " +
-      "  level = CASE WHEN excluded.level = 'write' THEN 'write' ELSE grants.level END, " +
-      "  seed = excluded.seed, revoked_at = NULL"
+      "  level = excluded.level, seed = excluded.seed, revoked_at = NULL"
     ).bind(row.profile_id, user.id, row.level, seed, Date.now()).run();
 
     const after = await env.DB.prepare(
@@ -480,6 +493,23 @@ async function route(request, env, url) {
           userId: r.user_id, displayName: r.display_name, level: r.level, joinedAt: r.joined_at,
         })),
       });
+    }
+
+    /* ── CHANGING SOMEBODY'S LEVEL WITHOUT THROWING THEM OUT ────────────
+       Revoke used to be the only way to take write access back, and
+       revoking is a blunt instrument: the person loses the profile, has to
+       be sent a new code, and rejoins as a stranger. "I'd rather she just
+       looked at it now" is an ordinary thing to want, so it gets its own
+       verb. Owner only, like everything else on this route. */
+    if (seg.length === 5 && method === "PUT") {
+      const body = await readJson(request).catch(() => ({}));
+      const lvl = body.level === "write" ? "write" : body.level === "read" ? "read" : null;
+      if (!lvl) return fail(400, "bad_request", "level must be 'read' or 'write'.");
+      const res = await env.DB.prepare(
+        "UPDATE grants SET level = ? WHERE profile_id = ? AND user_id = ? AND revoked_at IS NULL"
+      ).bind(lvl, profile.id, seg[4]).run();
+      if (!res.meta || !res.meta.changes) return fail(404, "not_found", "Nobody here by that id.");
+      return json({ profileId: profile.id, userId: seg[4], level: lvl });
     }
 
     if (seg.length === 5 && method === "DELETE") {

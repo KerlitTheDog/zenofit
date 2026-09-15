@@ -367,6 +367,11 @@
   const joinWithSeed   = (seed) => call("POST", "/v1/join", { seed });
   const listGrants     = (id) => call("GET", "/v1/profiles/" + id + "/grants");
   const revokeGrant    = (id, userId) => call("DELETE", "/v1/profiles/" + id + "/grants/" + userId);
+  /* Change somebody's level without evicting them. Revoking used to be the
+     only way to take write access back, which costs the other person the
+     profile and a new code just to be moved to read-only. */
+  const setGrantLevel  = (id, userId, level) =>
+    call("PUT", "/v1/profiles/" + id + "/grants/" + userId, { level: level === "write" ? "write" : "read" });
 
   window.ZenofitCloud = {
     API,
@@ -378,7 +383,7 @@
     pullChanges, pushChanges,
     listProfiles, createProfile, renameProfile, deleteProfile,
     listSeeds, createSeed, rotateSeeds, revokeSeed, joinWithSeed,
-    listGrants, revokeGrant,
+    listGrants, revokeGrant, setGrantLevel,
     _call: call,
   };
 })();

@@ -2078,6 +2078,10 @@ function profileStats() {
 
 const SYNC_KEY = "zenofit:profiles";
 const SYNC_PAGE = 200;            // the server's own per-push ceiling
+/* The server's MAX_ITEM_BYTES, kept a little under it: the two sides count
+   the same JSON, but a margin means a rounding difference can never turn a
+   row we thought was fine into a batch the server throws out whole. */
+const SYNC_MAX_ITEM = 500 * 1024;
 
 const syncAll = () => { try { return JSON.parse(localStorage.getItem(SYNC_KEY)) || {}; } catch { return {}; } };
 const syncFor = (localId) => syncAll()[localId] || null;
@@ -2246,11 +2250,29 @@ async function syncPush(localId) {
   const now = Date.now();
   const queue = [];
   const seen = new Set();
+  const tooBig = [];
 
   for (const it of syncLocalItems()) {
     const key = it.collection + "/" + it.itemId;
     seen.add(key);
-    const h = syncHash(JSON.stringify(it.json));
+    const body = JSON.stringify(it.json);
+    /* ── ONE OVERSIZED ROW MUST NOT STOP THE OTHER FOUR HUNDRED ────────
+       The server validates the whole batch before writing any of it and
+       refuses all of it if one item is bad, which is the right call there:
+       a push that half-lands leaves the client unable to say what it still
+       owes. The consequence on this side is the part that bit — a single
+       exercise photo over the limit meant the profile NEVER uploaded, so
+       the person it was shared with opened it and saw an empty log, with
+       nothing on either screen naming the one row responsible.
+
+       A photo is 1000px of JPEG in base64 (see readImageScaled), which is
+       routinely 200-500 KB and sometimes past it, so this is not an exotic
+       case. It is left behind and named instead: everything else syncs,
+       and the sheet says how many did not and why. Deliberately NOT marked
+       as sent, so shrinking or removing the picture makes it go next time
+       with no extra bookkeeping. */
+    if (body.length > SYNC_MAX_ITEM) { tooBig.push(key); continue; }
+    const h = syncHash(body);
     if (marks[key] && marks[key][0] === h) continue;          // unchanged since last time
     marks[key] = [h, now];
     queue.push({ collection: it.collection, itemId: it.itemId, json: it.json, clientUpdatedAt: now });
@@ -2261,7 +2283,8 @@ async function syncPush(localId) {
     const cut = key.indexOf("/");
     queue.push({ collection: key.slice(0, cut), itemId: key.slice(cut + 1), json: null, deleted: true, clientUpdatedAt: now });
   }
-  if (!queue.length) { syncSet(localId, { lastPushedAt: Date.now() }); return { ok: true, sent: 0, stale: 0 }; }
+  syncSet(localId, { tooBig });
+  if (!queue.length) { syncSet(localId, { lastPushedAt: Date.now() }); return { ok: true, sent: 0, stale: 0, tooBig }; }
 
   let sent = 0, stale = 0;
   for (let i = 0; i < queue.length; i += SYNC_PAGE) {
@@ -2279,7 +2302,7 @@ async function syncPush(localId) {
     }
     syncSet(localId, { marks, lastPushedAt: Date.now() });
   }
-  return { ok: true, sent, stale };
+  return { ok: true, sent, stale, tooBig };
 }
 
 /* What the account has up there, for the list in the account sheet. Async
@@ -2303,6 +2326,28 @@ function refreshCloudProfiles() {
       ui.accountSheet = { ...ui.accountSheet, loading: false };
       render();
     });
+}
+
+/* ── WHAT WENT WRONG, IN WORDS SOMEBODY CAN ACT ON ────────────────────
+   The server is specific and this used to throw that away: it reported
+   `e.code` and nothing else, so "bad_item" appeared on screen while the
+   message beside it said exactly which row was too big and by how much.
+   Somebody stared at a profile that would not sync and had no way to
+   learn that one exercise photo was the reason.
+
+   Two codes are translated rather than shown raw, because the raw word is
+   actively misleading. `not_found` on a profile you are linked to does
+   not mean it is gone: it means THIS device cannot see it, which is what
+   happens when the grant was revoked or the phone is signed in as
+   somebody else. `read_only` likewise. Everything else keeps the server's
+   own sentence, which is nearly always the most useful thing available. */
+function syncErrText(e) {
+  if (!e) return T("sync.errGeneric");
+  const code = e.code;
+  if (code === "not_found" || e.status === 404) return T("sync.errGone");
+  if (code === "read_only" || e.status === 403) return T("sync.errReadOnly");
+  if (e.message) return e.message;
+  return code || T("sync.errGeneric");
 }
 
 /* Who is in, for the list in the share sheet. Its own function because it
@@ -2341,7 +2386,7 @@ async function syncNow(localId = activeProfileId()) {
   } catch (e) {
     /* pullChanges and pushChanges THROW, unlike the rest of the client, so
        a revoked grant arrives as a 403 rather than as an empty profile */
-    ui.syncError = (e && (e.code || e.message)) || "failed";
+    ui.syncError = syncErrText(e);
     console.warn("sync failed", e);
     return { ok: false, error: e };
   } finally {
@@ -2411,7 +2456,7 @@ function liveEnter(localId) {
          empty log and drawing the obvious wrong conclusion. */
       state = fallback;
       ui.liveLoading = false;
-      ui.syncError = (e && (e.code || e.message)) || "failed";
+      ui.syncError = syncErrText(e);
       render();
     });
 }
@@ -2497,7 +2542,7 @@ async function syncQuiet(opts) {
     syncSet(localId, { lastOkAt: Date.now() });
     if (landed && !syncTyping()) render();
   } catch (e) {
-    ui.syncError = (e && (e.code || e.message)) || "failed";
+    ui.syncError = syncErrText(e);
     console.warn("auto sync failed", e);
   } finally {
     syncInFlight = false;
@@ -8063,6 +8108,12 @@ function renderSyncSheet() {
         <div style="font-size:11.5px;color:${ui.syncError ? "var(--red)" : "var(--faint)"};margin-top:5px;line-height:1.5">
           ${ui.syncError ? T("sync.failed", { why: esc(String(ui.syncError)) }) : when(rec.lastOkAt || rec.lastPulledAt || rec.lastPushedAt)}
         </div>
+        ${/* Named rather than silently dropped: one photo over the limit is
+              the difference between a profile that syncs and one that does
+              not, and nothing else on this screen would ever say so. */
+          (rec.tooBig || []).length ? `<div style="font-size:11.5px;color:var(--steel);margin-top:6px;line-height:1.5">
+            ${icon("image-off", 12)} ${T("sync.tooBig", { n: rec.tooBig.length })} · ${T("sync.tooBigHint")}
+          </div>` : ""}
       </div>`
     : `<div style="font-size:12.5px;color:var(--faint);line-height:1.6;margin-bottom:14px">${T("sync.offBody")}</div>`;
 
@@ -8190,9 +8241,15 @@ function renderAccountSheet() {
     const rows = list.length
       ? list.map((p, i) => {
           const here = linked.has(p.profileId);
+          /* the name THIS phone knows it by, where it is on this phone at
+             all: a rename that has not reached the server yet, or one made
+             before renames were sent, must not make the list disagree with
+             the Profiles screen two taps away */
+          const mine = profileList().findIndex((lp) => (syncFor(lp.id) || {}).remoteId === p.profileId);
+          const shown = mine >= 0 ? profileLabel(profileList()[mine], mine) : (p.name || T("sync.joinedName"));
           return `<div style="display:flex;align-items:center;gap:10px;padding:11px 12px;border-bottom:${i < list.length - 1 ? "1px solid var(--border-soft)" : "none"}">
             <span style="flex:1;min-width:0">
-              <span style="display:block;font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(p.name || T("sync.joinedName"))}</span>
+              <span style="display:block;font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(shown)}</span>
               <span style="display:block;font-size:11px;color:var(--faint)">${T(p.isOwner ? "acct.owned" : p.level === "read" ? "sync.levelRead" : "sync.levelWrite")}</span>
             </span>
             ${here
@@ -9164,6 +9221,16 @@ const actions = {
     }
     profiles.list = profileList().map((p) => (p.id === f.id ? { ...p, name } : p));
     saveProfiles();
+    /* The server keeps a name of its own, set when the profile was created
+       and never touched since, so renaming here used to leave the account
+       sheet listing a profile under a name that exists nowhere on this
+       phone. It is display only — nothing is filed under it — so this is
+       fire and forget and a failure costs a stale label, not data. */
+    const rec = syncFor(f.id);
+    const C = window.ZenofitCloud;
+    if (rec && rec.remoteId && rec.level !== "read" && C && C.renameProfile) {
+      C.renameProfile(rec.remoteId, name).catch(() => { /* the label can wait */ });
+    }
     ui.profileForm = null;
     render();
   },
@@ -9327,7 +9394,7 @@ const actions = {
       await syncNow(f.localId);
     } catch (e) {
       ui.syncBusy = false;
-      ui.syncError = (e && (e.code || e.message)) || "failed";
+      ui.syncError = syncErrText(e);
       render();
     }
   },
@@ -9365,7 +9432,7 @@ const actions = {
       const made = await window.ZenofitCloud.createSeed(rec.remoteId, level);
       ui.syncSheet = { ...ui.syncSheet, code: made.seed, codeLevel: level, copied: false };
     } catch (e) {
-      ui.syncError = (e && (e.code || e.message)) || "failed";
+      ui.syncError = syncErrText(e);
     }
     ui.syncBusy = false; render();
   },
@@ -9384,7 +9451,7 @@ const actions = {
     if (!rec || !rec.remoteId || !confirm(T("sync.confirmRevoke"))) return;
     ui.syncBusy = true; render();
     try { await window.ZenofitCloud.revokeGrant(rec.remoteId, el.dataset.g); }
-    catch (e) { ui.syncError = (e && (e.code || e.message)) || "failed"; }
+    catch (e) { ui.syncError = syncErrText(e); }
     ui.syncBusy = false; render();
     refreshGrants();
   },

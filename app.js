@@ -1866,6 +1866,11 @@ function snapshotDrafts() {
 let quotaWarned = false;
 function writeNow() {
   clearTimeout(saveTimer); saveTimer = null;
+  /* A live profile is not on this phone: see the LIVE block. Nothing of it
+     is written, including the crash snapshot, because a half-typed form
+     belonging to a profile that will be re-fetched from scratch is not
+     worth a byte on a device that is short of them. */
+  if (typeof syncLive === "function" && syncLive(profiles.active)) return;
   snapshotDrafts();
   /* the whole point of the block above: what is on screen is a blank the
      app invented, and the key still holds the real thing */
@@ -1889,6 +1894,10 @@ function writeNow() {
 function persist() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(writeNow, 400);
+  /* One hook for the whole app: every mutation already goes through here,
+     so automatic sync sees every change without a single call site knowing
+     it exists. Defined further down, hence the guard on first load. */
+  if (typeof syncTouch === "function") syncTouch();
 }
 function patch(p) { state = { ...state, ...p }; persist(); render(); }
 
@@ -1934,6 +1943,9 @@ function switchProfile(id) {
   ui.tab = "home";
   applyTheme(state.settings.theme);
   render();
+  /* a live profile has nothing on disk, so what loadState just handed back
+     is an empty default; the rows come off the server */
+  liveEnter(id);
 }
 
 /* A new profile starts empty, exactly as the app does on a new phone: the
@@ -2337,6 +2349,196 @@ async function syncNow(localId = activeProfileId()) {
   }
 }
 
+/* ── A PROFILE THAT IS NOT ON THIS PHONE ──────────────────────────────
+   Everything else in this app is local-first and stays that way. This is
+   the one deliberate exception, and it exists for a real person: a phone
+   too full to save anything, and a training log she still wants to look
+   at. Her sessions live on the phone that owns them; hers just shows them.
+
+   A LIVE profile is read-only and holds NOTHING on disk. `state` is
+   filled from the server into memory when you switch to it, and writeNow
+   refuses to write its key, so closing the app forgets it entirely and
+   opening it fetches again. That is the whole trick — there is no clever
+   eviction, just a profile the save path declines to save.
+
+   WHAT IT COSTS, said plainly: no signal means no profile. Every other
+   profile in this app works in a basement with the phone in flight mode,
+   and this one does not. That is the trade, it was chosen on purpose, and
+   it is only ever applied to a READ grant — somebody else's training,
+   which they are still holding the real copy of. A profile you own is
+   never live, because losing your own log to a dead connection is not a
+   trade anybody would take.
+
+   Read-only is what makes it safe: with nothing of yours in there, there
+   is nothing a failed fetch can lose. See READ_OK, which already refuses
+   every write, and syncReadOnly, which is what marks the strip at the top
+   of the screen.
+
+   The cursor is dropped on the way in. A cursor says "I have everything
+   up to here", and a live profile starts every session with nothing, so
+   the incremental path would hand back an empty page and an empty log. */
+
+const syncLive = (localId) => { const r = syncFor(localId || activeProfileId()); return !!(r && r.live); };
+
+/* Switching into one: forget what a previous session cached, then fetch.
+   Nothing is awaited by the caller — the app draws the empty profile with
+   its "fetching" strip and fills in when the rows land. */
+function liveEnter(localId) {
+  if (!syncLive(localId)) return;
+  /* From scratch, always. A cursor says "I have everything up to here" and
+     a live profile starts every session with nothing, so the incremental
+     path would hand back an empty page and an empty log. Starting blank
+     also means what you end up looking at is EXACTLY what the server holds,
+     tombstones and all, rather than a merge with whatever happened to be
+     left over. */
+  syncSet(localId, { cursor: null, marks: {} });
+  const fallback = state;
+  state = defaultState();
+  ui.liveLoading = true;
+  render();
+  syncPull(localId)
+    .then(() => {
+      ui.liveLoading = false; ui.syncError = null;
+      /* only now: a save left behind before the fetch proved it could be
+         replaced is the one copy somebody had. Storage check would offer
+         to recover it, and it would be the right thing to recover. */
+      try { localStorage.removeItem(stateKeyFor(localId)); } catch { /* never was one */ }
+      render();
+    })
+    .catch((e) => {
+      /* No signal, or the grant was revoked. Put back whatever was on
+         screen a moment ago rather than leaving somebody looking at an
+         empty log and drawing the obvious wrong conclusion. */
+      state = fallback;
+      ui.liveLoading = false;
+      ui.syncError = (e && (e.code || e.message)) || "failed";
+      render();
+    });
+}
+
+/* Turn a read-only profile into a live one. The local copy goes, which is
+   the point: it is a cache of somebody else's log and it comes back from
+   the server. Nothing of the user's own is ever in one. */
+function liveAdopt(localId) {
+  const rec = syncFor(localId);
+  if (!rec || rec.level !== "read") return false;
+  /* The key is deliberately left where it is. writeNow stops writing it
+     from here on, and liveEnter drops it once a fetch has proved the
+     server can hand the same thing back — so a phone with no signal on the
+     day this ships still opens the copy it already had. */
+  syncSet(localId, { live: true, cursor: null, marks: {} });
+  return true;
+}
+
+/* ── SYNC THAT NOBODY HAS TO REMEMBER TO TAP ──────────────────────────
+   Manual sync was a button, and a button is a thing people forget. What
+   it costs to make it automatic is entirely in the pacing, so here it is
+   in one place.
+
+   PUSHING IS DEBOUNCED, not immediate. Saving one workout writes state a
+   dozen times in a minute (every set, every field), and a push per write
+   would be a dozen requests for one session. SYNC_PUSH_AFTER waits for
+   the typing to stop. A push that finds nothing changed sends zero rows
+   anyway — see the marks hash — so the cost of being a little eager is
+   one cheap request, and the cost of being late is that a phone closed
+   inside the window has not uploaded yet. Hence the pagehide flush.
+
+   PULLING IS POLLED, because there is nothing to push us. A rest timer
+   gets a real push notification; a set logged on the other phone does
+   not, and asking the server every few minutes is the cheap, boring,
+   correct answer at this size: two people, a handful of requests an hour,
+   against a hundred thousand a day. It only runs while the app is on
+   screen, and coming back to the app pulls straight away, which is when
+   somebody actually wants to see what changed.
+
+   NOTHING HERE RE-RENDERS UNLESS SOMETHING LANDED, and not even then if a
+   field has the caret in it. render() rebuilds #app wholesale: a sync
+   that repainted while somebody was typing their username would throw
+   away the input mid-word, which is a bug this app has already shipped
+   once and does not need a second time from a timer nobody can see.
+
+   IT IS SILENT. Automatic means unattended, and an unattended failure
+   that raises an alert is a phone that interrupts a set to say the wifi
+   is bad. Errors are recorded for the sync sheet to show and nothing
+   else; the local log is untouched and stays the thing that matters. */
+
+const SYNC_PUSH_AFTER = 8000;        // quiet time before a push
+const SYNC_POLL_EVERY = 3 * 60000;   // while the app is on screen
+const SYNC_PULL_GAP = 30000;         // the most often coming back can pull
+
+let syncPushTimer = null, syncPollTimer = null;
+let syncLastPull = 0, syncInFlight = false, syncApplying = false;
+
+/* Is a field being typed in right now? A repaint would take it away. */
+function syncTyping() {
+  const el = document.activeElement;
+  return !!el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+}
+
+/* One round trip, unattended. Deliberately not syncNow(): that one is the
+   button, and it flips ui.syncBusy and renders twice on purpose so a tap
+   visibly does something. This one is meant not to be noticed. */
+async function syncQuiet(opts) {
+  const localId = activeProfileId();
+  const rec = syncFor(localId);
+  if (!rec || !rec.remoteId || syncInFlight || ui.syncBusy) return;
+  const C = window.ZenofitCloud;
+  if (!C || !C.hasDevice || !C.hasDevice()) return;
+  syncInFlight = true;
+  try {
+    let landed = 0;
+    if (!opts || opts.pull !== false) {
+      syncApplying = true;                  // a pull writes; that write is not a change to push back
+      try { landed = (await syncPull(localId)).applied || 0; } finally { syncApplying = false; }
+      syncLastPull = Date.now();
+    }
+    if ((!opts || opts.push !== false) && rec.level !== "read") await syncPush(localId);
+    ui.syncError = null;
+    syncSet(localId, { lastOkAt: Date.now() });
+    if (landed && !syncTyping()) render();
+  } catch (e) {
+    ui.syncError = (e && (e.code || e.message)) || "failed";
+    console.warn("auto sync failed", e);
+  } finally {
+    syncInFlight = false;
+  }
+}
+
+/* Something changed locally. Called from the save path, so it sees every
+   write without a single call site having to remember it. */
+function syncTouch() {
+  if (syncApplying) return;               // our own pull, landing
+  const rec = syncedActive();
+  if (!rec || !rec.remoteId || rec.level === "read") return;
+  clearTimeout(syncPushTimer);
+  syncPushTimer = setTimeout(() => syncQuiet({ pull: false }), SYNC_PUSH_AFTER);
+}
+
+/* The poll, armed only while the app is actually on screen. A phone in a
+   pocket has nothing to show anybody. */
+function syncPollStart() {
+  clearInterval(syncPollTimer);
+  syncPollTimer = setInterval(() => {
+    if (document.hidden) return;
+    syncQuiet();
+  }, SYNC_POLL_EVERY);
+}
+
+/* Coming back to the app is the moment somebody wants to see what the
+   other phone did, so it pulls then — throttled, because on some platforms
+   visibilitychange fires more than once for one glance. */
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    /* leaving: anything inside the debounce window goes now rather than
+       waiting for a timer this page may not live long enough to fire */
+    clearTimeout(syncPushTimer);
+    syncQuiet({ pull: false });
+    return;
+  }
+  if (Date.now() - syncLastPull > SYNC_PULL_GAP) syncQuiet();
+});
+window.addEventListener("pagehide", () => { clearTimeout(syncPushTimer); syncQuiet({ pull: false }); });
+
 /* ── BACKUP: EVERYTHING, OUT AND BACK IN ──────────────────────────────
    The whole point of this app is that it keeps what you did, and the whole
    risk of it is that a browser holds that in one origin's localStorage:
@@ -2674,6 +2876,7 @@ const ui = {
   profileDraft: null,
   profilesWin: false,   // the profiles window (which training is on screen)
   profileForm: null,    // {id, name, mode:"add"|"rename"|"copy"} name editor
+  liveLoading: false,   // a live profile is being fetched, see the LIVE block
   accountSheet: null,   // {username, password, free, cloud} sign in / sign up
   syncSheet: null,      // {localId, grants, code, copied} the share sheet
   joinSheet: null,      // {code, busy, error} redeeming somebody's code
@@ -3135,9 +3338,18 @@ function render() {
      it is and why the buttons refuse — said once, at the top, on every tab,
      including Home, where there is no header to hang it under. */
   if (syncReadOnly()) {
-    html += `<div style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:rgba(93,138,168,.14);border-bottom:1px solid var(--border-soft)${tab === "home" ? ";padding-top:calc(8px + var(--pb-sat))" : ""}">
-      ${icon("eye", 14, 'style="color:var(--steel);flex-shrink:0"')}
-      <span style="font-size:11.5px;color:var(--steel);line-height:1.4">${T("sync.roBanner")}</span>
+    /* A live profile says where it is as well as whose it is, because the
+       difference matters the moment the signal goes: an empty log with no
+       explanation reads as lost data. */
+    const live = syncLive();
+    const bad = live && ui.syncError && !ui.liveLoading;
+    const msg = ui.liveLoading ? T("live.loading") : bad ? T("live.offline") : live ? T("live.banner") : T("sync.roBanner");
+    const tint = bad ? "rgba(208,90,80,.14)" : "rgba(93,138,168,.14)";
+    const ink = bad ? "var(--red)" : "var(--steel)";
+    html += `<div style="display:flex;align-items:center;gap:8px;padding:8px 16px;background:${tint};border-bottom:1px solid var(--border-soft)${tab === "home" ? ";padding-top:calc(8px + var(--pb-sat))" : ""}">
+      ${icon(ui.liveLoading ? "refresh-cw" : bad ? "cloud-off" : live ? "cloud" : "eye", 14, `style="color:${ink};flex-shrink:0"`)}
+      <span style="flex:1;min-width:0;font-size:11.5px;color:${ink};line-height:1.4">${msg}</span>
+      ${bad ? `<button data-action="live-retry" class="pb-btn" style="flex-shrink:0;padding:4px 10px;font-size:11px;background:transparent;color:var(--red);border:1px solid rgba(208,90,80,.4)">${T("live.retry")}</button>` : ""}
     </div>`;
   }
 
@@ -7921,6 +8133,45 @@ function renderSyncSheet() {
    you what is up there and lets you pick, one profile at a time, because
    a phone that suddenly holds four people's logs because somebody logged
    in is a phone nobody asked for. */
+/* The two things under the name field that change while it is being typed
+   in. Both are read by the renderer AND by updateAccountPreview, which is
+   the whole point: one answer, drawn twice, so a keystroke can repaint them
+   without repainting the field the keystroke landed in. */
+const ACCT_NAME_RE = /^[a-z0-9][a-z0-9._-]{2,23}$/;
+
+function acctNameHint(f) {
+  const name = (f.username || "").trim();
+  if (name && !ACCT_NAME_RE.test(name)) return T("acct.nameRules");
+  if (f.free === false) return T("acct.nameTaken");
+  if (f.free === true) return T("acct.nameFree");
+  return T("acct.nameHint");
+}
+
+function acctButtonKey(f) {
+  if (f.busy) return "acct.working";
+  return f.free === true ? "acct.createBtn" : f.free === false ? "acct.signInBtn" : "acct.continueBtn";
+}
+
+/* Typing must never reach render(). It rebuilds #app wholesale, which
+   throws away the input the caret is sitting in: the field came back
+   empty-ish and the cursor jumped to position 0, so "wo" then "rds" typed
+   itself backwards as "rdswo". Same rule as the strength-standards hints,
+   and the same reason. */
+function updateAccountPreview() {
+  const f = ui.accountSheet;
+  if (!f) return;
+  const hint = document.getElementById("acctNameHint");
+  const label = document.getElementById("acctGoLabel");
+  const btn = document.getElementById("acctGoBtn");
+  if (hint) hint.textContent = acctNameHint(f);
+  if (label) label.textContent = T(acctButtonKey(f));
+  if (btn) {
+    const ok = ACCT_NAME_RE.test((f.username || "").trim()) && (f.password || "").length >= 8 && !f.busy;
+    btn.disabled = !ok;
+    btn.style.opacity = ok ? 1 : 0.45;
+  }
+}
+
 function renderAccountSheet() {
   const f = ui.accountSheet;
   const C = window.ZenofitCloud;
@@ -7946,7 +8197,7 @@ function renderAccountSheet() {
             </span>
             ${here
               ? `<span style="flex-shrink:0;font-size:11.5px;color:var(--green);font-weight:600">${T("acct.onThisPhone")}</span>`
-              : `<button data-action="acct-pull" data-p="${esc(p.profileId)}" data-n="${esc(p.name || "")}" class="pb-btn pb-ghost" style="flex-shrink:0;padding:7px 12px;font-size:12px;color:var(--gold);border-color:rgba(233,185,73,.4)">${icon("cloud-download", 13)} ${T("acct.getIt")}</button>`}
+              : `<button data-action="acct-pull" data-p="${esc(p.profileId)}" data-n="${esc(p.name || "")}" data-lv="${esc(p.level || "write")}" class="pb-btn pb-ghost" style="flex-shrink:0;padding:7px 12px;font-size:12px;color:var(--gold);border-color:rgba(233,185,73,.4)">${icon("cloud-download", 13)} ${T("acct.getIt")}</button>`}
           </div>`;
         }).join("")
       : `<div style="padding:14px;font-size:12px;color:var(--faint);line-height:1.5">${T(f.loading ? "acct.looking" : "acct.noneUp")}</div>`;
@@ -7975,19 +8226,23 @@ function renderAccountSheet() {
   /* `free` is null until the server has answered, so the button does not
      flicker between "sign in" and "create" while somebody is still typing */
   const free = f.free;
-  const label = f.busy ? "acct.working" : free === true ? "acct.createBtn" : free === false ? "acct.signInBtn" : "acct.continueBtn";
+  const label = acctButtonKey(f);
 
   return sheet(T("acct.title"), "accountSheet", `
     <div style="font-size:12.5px;color:var(--faint);line-height:1.6;margin-bottom:16px">${T("acct.intro")}</div>
-    ${field(T("acct.username"),
+    ${/* the hint carries an id because it is rewritten WHILE you type, in
+          place, the way the strength-standards hints are: a render here
+          rebuilds the input and the caret goes back to the start, which is
+          exactly the bug this field shipped with. */
+      field(T("acct.username"),
       `<input class="pb-input" data-bind="acctName" value="${esc(f.username)}" placeholder="${esc(T("acct.usernamePh"))}" autocapitalize="none" autocorrect="off" autocomplete="username" spellcheck="false" maxlength="24" data-autofocus>`,
-      name && !nameOk ? T("acct.nameRules") : free === false ? T("acct.nameTaken") : free === true ? T("acct.nameFree") : T("acct.nameHint"))}
+      `<span id="acctNameHint">${acctNameHint(f)}</span>`)}
     ${field(T("acct.password"),
       `<input class="pb-input" type="password" data-bind="acctPass" value="${esc(pw)}" autocapitalize="none" autocorrect="off" autocomplete="current-password" spellcheck="false">`,
       T("acct.passwordHint"))}
     ${f.error ? `<div style="font-size:12.5px;color:var(--red);margin:-4px 0 12px;line-height:1.5">${esc(f.error)}</div>` : ""}
-    <button data-action="acct-go" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
-      ${icon("log-in", 16)} ${T(label)}
+    <button id="acctGoBtn" data-action="acct-go" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
+      ${icon("log-in", 16)} <span id="acctGoLabel">${T(label)}</span>
     </button>
     <div style="font-size:11.5px;color:var(--faint);margin-top:12px;line-height:1.55">${T("acct.warning")}</div>
   `, 124);
@@ -8966,6 +9221,8 @@ const actions = {
   "share-data": () => shareBackup(),
   "open-storage": () => { ui.showStorage = true; render(); },
   /* ── the account ─────────────────────────────────────────────────── */
+  "live-retry": () => { ui.syncError = null; liveEnter(activeProfileId()); },
+
   "open-account": () => {
     ui.profileForm = null;
     ui.accountSheet = { username: "", password: "", free: null, busy: false, error: null, cloud: [], loading: false };
@@ -9024,12 +9281,16 @@ const actions = {
     const f = ui.accountSheet;
     if (!f || f.busy) return;
     const remoteId = el.dataset.p;
+    /* the level the listing reported, not an assumption: one of these can
+       be somebody else's profile shared with the account for reading */
+    const level = el.dataset.lv === "read" ? "read" : "write";
     const localId = addProfile(el.dataset.n || T("sync.joinedName"));
     if (!localId) { ui.accountSheet = { ...f, error: T("profiles.quota") }; render(); return; }
-    syncSet(localId, { remoteId, level: "write", marks: {}, cursor: null });
+    syncSet(localId, { remoteId, level, marks: {}, cursor: null, live: level === "read" });
     ui.accountSheet = null;
+    if (level === "read") { try { localStorage.removeItem(stateKeyFor(localId)); } catch { /* none yet */ } }
     switchProfile(localId);
-    await syncNow(localId);
+    if (level !== "read") await syncNow(localId);
   },
   /* ── sharing a profile ───────────────────────────────────────────────
      Every one of these talks to a network, so every one of them can fail
@@ -9157,10 +9418,16 @@ const actions = {
        be undone afterwards. */
     const localId = addProfile(joined.name || T("sync.joinedName"));
     if (!localId) { ui.joinSheet = { ...ui.joinSheet, busy: false, error: T("profiles.quota") }; render(); return; }
-    syncSet(localId, { remoteId, level, marks: {}, cursor: null });
+    /* A READ grant is held live: nothing of it is written to this phone,
+       it is fetched when you open it. See the LIVE block for the trade —
+       it needs a connection, and it is somebody else's log, so there is
+       nothing here a failed fetch can lose. A WRITE grant is a profile you
+       are expected to train in, so it is stored like any other. */
+    syncSet(localId, { remoteId, level, marks: {}, cursor: null, live: level === "read" });
     ui.joinSheet = null;
+    if (level === "read") { try { localStorage.removeItem(stateKeyFor(localId)); } catch { /* none yet */ } }
     switchProfile(localId);
-    await syncNow(localId);
+    if (level !== "read") await syncNow(localId);
   },
 
   /* ── OUT TO THE PUSH DIAGNOSTIC AND BACK ─────────────────────────────
@@ -10426,6 +10693,7 @@ const READ_OK = new Set([
   "profiles-reorder",
   "open-sync", "sync-now", "sync-disable", "sync-copy-code",
   "open-account", "acct-go", "acct-signout", "acct-pull",
+  "live-retry",
   "open-join", "join-go", "open-push-test",
   "chart-zoom-in", "chart-zoom-out", "chart-reset", "chart-full", "chart-exit-full", "chart-pick",
   "select-progress", "ex-hist-all", "open-preset", "plan-open", "plan-result-close",
@@ -10516,19 +10784,28 @@ function handleBind(el) {
   } else if (bind === "acctName") {
     /* Lower-cased as it is typed, because that is what it will be compared
        as anyway (username_lc), and a name that reads back differently from
-       what you signed up with is a name you will mistrust. */
+       what you signed up with is a name you will mistrust.
+
+       NOTHING HERE CALLS render(). It used to, on every keystroke that left
+       the name too short to check, and render() rebuilds #app: the input
+       the caret was sitting in was thrown away and replaced, so the cursor
+       went to position 0 and "wo" followed by "rds" came out "rdswo". The
+       hint and the button are patched in place instead. */
     const clean = v.toLowerCase().replace(/[^a-z0-9._-]/g, "").slice(0, 24);
     if (el.value !== clean) {
-      const pos = Math.max(0, (el.selectionStart || 0) - (v.length - clean.length));
+      /* only ever rewritten when the cleaning actually removed something,
+         and the caret is moved back by however much came out before it */
+      const cut = el.value.slice(0, el.selectionStart || 0).replace(/[^a-z0-9._-]/gi, "").length;
       el.value = clean;
-      try { el.setSelectionRange(pos, pos); } catch { /* not a text field */ }
+      try { el.setSelectionRange(cut, cut); } catch { /* not a text field */ }
     }
     ui.accountSheet = { ...ui.accountSheet, username: clean, free: null, error: null };
+    updateAccountPreview();
     /* Asked while typing, and only once it could possibly be valid. The
        answer decides whether the button offers to sign in or to create, so
        it has to arrive before the button is pressed, not after. */
     clearTimeout(acctNameTimer);
-    if (/^[a-z0-9][a-z0-9._-]{2,23}$/.test(clean)) {
+    if (ACCT_NAME_RE.test(clean)) {
       const asked = clean;
       acctNameTimer = setTimeout(() => {
         const C = window.ZenofitCloud;
@@ -10538,15 +10815,13 @@ function handleBind(el) {
              looking at any more */
           if (!ui.accountSheet || ui.accountSheet.username !== asked) return;
           ui.accountSheet = { ...ui.accountSheet, free: !!r.available };
-          render();
+          updateAccountPreview();
         }).catch(() => { /* the attempt itself will say */ });
       }, 450);
-    } else render();
+    }
   } else if (bind === "acctPass") {
     ui.accountSheet = { ...ui.accountSheet, password: v, error: null };
-    const btn = document.querySelector('[data-action="acct-go"]');
-    const ok = /^[a-z0-9][a-z0-9._-]{2,23}$/.test(ui.accountSheet.username || "") && v.length >= 8;
-    if (btn) { btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
+    updateAccountPreview();
   } else if (bind === "joinCode") {
     /* ── TYPING A CODE SOMEBODY READ OUT TO YOU ────────────────────────
        The seed is printed XXXX-XXXX-XX and it is usually being copied off
@@ -10762,3 +11037,22 @@ applyViewport();        // size the frame to this device before it is first draw
 sweepTimers();          // anything that ran out while the app was closed
 render();
 startTimerEngine();
+
+/* ── and the sync engine ──────────────────────────────────────────────
+   After the first paint, never before it: the app has to be on screen in
+   whatever state it already has, and a network round trip is not
+   something a launch should wait behind. */
+(function startSync() {
+  /* Anybody already holding a read-only copy from before live profiles
+     existed is moved over here. It is a cache of somebody else's log and
+     it comes straight back from the server, so nothing of theirs is lost;
+     what it buys is the space it was taking up, which on the phone this
+     was built for is the entire point. */
+  for (const p of profileList()) {
+    const rec = syncFor(p.id);
+    if (rec && rec.level === "read" && !rec.live) liveAdopt(p.id);
+  }
+  if (syncLive(activeProfileId())) liveEnter(activeProfileId());
+  else syncQuiet();          // catch up on whatever the other phone did while this one was shut
+  syncPollStart();
+})();

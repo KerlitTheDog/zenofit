@@ -6,7 +6,7 @@
    Scope note: this file must stay in the repo root. A service worker can only
    control pages at or below its own URL, and the app lives at /zenofit/.       */
 
-const VERSION = "zenofit-v10";
+const VERSION = "zenofit-v11";
 const SHELL = [
   "./",
   "./index.html",

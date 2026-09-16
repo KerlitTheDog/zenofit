@@ -311,6 +311,17 @@ const variantRootId = (ex) => (ex ? (ex.variantOf || ex.id) : null);
 const variantsOf = (id, library) =>
   ((library || (state && state.library) || [])).filter((x) => x.variantOf === id);
 
+/* ── A PHOTO THAT EXISTS SOMEWHERE ELSE ───────────────────────────────
+   `imageMissing` is set by sync, on the way UP: a picture too big for the
+   wire is left behind so the lift itself can travel (see withoutBigPhoto),
+   and the row arrives saying that a photo exists on the phone it was taken
+   on. Saying nothing would make two very different rows identical on
+   screen — a lift nobody has ever photographed, and a lift photographed on
+   another phone — and only one of those is worth going and asking about.
+   The photo always wins over the flag, here and in syncApply: a row that
+   holds one is not a row waiting for one.                              */
+const photoAway = (ex) => !!(ex && !ex.image && ex.imageMissing);
+
 function exLabelOf(ex) {
   if (!ex) return "";
   /* a variation reads as its parent plus what makes it one, composed now
@@ -1951,6 +1962,8 @@ function switchProfile(id) {
      living on invisibly in the crash snapshot. */
   if (ui.workoutSheet) closeWorksheet();
   writeNow();
+  /* before `profiles.active` moves, or the flush pushes the wrong profile */
+  if (typeof syncFlush === "function") syncFlush();
   profiles.active = id;
   saveProfiles();
   state = loadState();
@@ -1965,11 +1978,35 @@ function switchProfile(id) {
 }
 
 /* A new profile starts empty, exactly as the app does on a new phone: the
-   seeded library, the seeded timers, nothing logged. */
-function addProfile(name) {
+   seeded library, the seeded timers, nothing logged.
+
+   ── EXCEPT ONE THAT IS ABOUT TO BE FILLED FROM THE SERVER ─────────────
+   `forRemote` is a profile being made to HOLD somebody's cloud copy —
+   joined with a code, pulled from the account, adopted by the roster.
+   Those start with the library and the groups EMPTY, because the seeds
+   are not this profile's data, they are this app's opening offer, and
+   every one of them is about to be overwritten by the real thing anyway.
+
+   What they used to do instead was survive. The owner had deleted five
+   built-in exercises and renamed a group; the pull replaced the rows the
+   owner still had and left the other five sitting there, unmatched and
+   unmarked — so the joining device pushed them back up as its own, and
+   the five lifts the owner had thrown out reappeared in their library
+   with nobody having asked for them. A profile that is a copy of another
+   one has to start from nothing, or it is not a copy, it is a merge.
+   Live profiles have always done exactly this (see liveEnter); this is
+   the same rule applied to the copies that are kept on disk.
+
+   The timers are deliberately still seeded: they never sync, they belong
+   to the phone rather than to the training, and an empty Timer tab is
+   not what anybody joining a profile is asking for. */
+function addProfile(name, opts) {
   writeNow();
   const id = uid();
-  try { localStorage.setItem(stateKeyFor(id), JSON.stringify(defaultState())); }
+  const blank = opts && opts.forRemote
+    ? { ...defaultState(), library: [], groups: [] }
+    : defaultState();
+  try { localStorage.setItem(stateKeyFor(id), JSON.stringify(blank)); }
   catch (e) { console.error("profile create failed", e); alert(T("profiles.quota")); return null; }
   profiles.list = [...profiles.list, { id, name: (name || "").trim() }];
   saveProfiles();
@@ -2099,6 +2136,40 @@ const SYNC_PAGE = 200;            // the server's own per-push ceiling
    the same JSON, but a margin means a rounding difference can never turn a
    row we thought was fine into a batch the server throws out whole. */
 const SYNC_MAX_ITEM = 500 * 1024;
+/* The server's own cap on an itemId. An itemId here is frequently a NAME —
+   the exercise a goal belongs to, the muscle group a volume target is for —
+   and a name the server refuses fails the WHOLE push, for ever, silently.
+   See syncPush: a row it would refuse never joins a batch. */
+const SYNC_MAX_ID = 200;
+
+/* ── A PHOTO THAT CANNOT TRAVEL MUST NOT TAKE THE LIFT WITH IT ────────
+   The photo is by far the biggest thing in this app: 1000px of JPEG in
+   base64, routinely 200-500 KB and sometimes past the limit (see
+   readImageScaled). A library row over the limit used to be left behind
+   WHOLE, which meant the exercise did not travel either — so the person
+   the profile was shared with opened a log full of sessions naming a lift
+   their library had never heard of, and nothing on either screen said
+   which row was responsible.
+
+   The lift is the part that matters and it is tiny. So the picture is
+   dropped and the row goes up carrying `imageMissing`, which is not a
+   consolation prize: it is the fact that there IS a photo, on the device
+   that took it, and it is what lets the other phone say so instead of
+   drawing a blank where a machine should be. Sending less than we hold is
+   safe in exactly one direction and syncApply enforces it: a row that
+   says "the photo could not come" never erases a photo already there.
+
+   Done HERE rather than in syncPush so the trimmed row is built before
+   `__i` is appended, which keeps the key order — and therefore the change
+   hash — identical on the device that sent it and the device that got it.
+   Two devices disagreeing about that hash is a row that pushes itself
+   back and forth for ever, one request per sync, changing nothing.    */
+const withoutBigPhoto = (ex) => {
+  if (!ex || !ex.image) return ex;
+  /* the margin covers the `__i` this row is about to be given */
+  if (JSON.stringify(ex).length + 16 <= SYNC_MAX_ITEM) return ex;
+  return { ...ex, image: "", imageMissing: true };
+};
 
 const syncAll = () => { try { return JSON.parse(localStorage.getItem(SYNC_KEY)) || {}; } catch { return {}; } };
 const syncFor = (localId) => syncAll()[localId] || null;
@@ -2169,6 +2240,10 @@ function syncLocalItems(from) {
       for (const k of Object.keys(src)) {
         if (def.keys && def.keys.indexOf(k) < 0) continue;
         if (src[k] === undefined) continue;
+        /* an empty key is an itemId the server refuses, and it would take
+           the whole batch with it. The array branch has always guarded
+           this; a map is reached from the other end and never did. */
+        if (!k) continue;
         /* wrapped, because an item's json has to be an object and a goal
            is a bare number */
         out.push({ collection, itemId: k, json: { v: src[k] } });
@@ -2178,7 +2253,14 @@ function syncLocalItems(from) {
       src.forEach((item, i) => {
         const itemId = def.id(item);
         if (itemId == null || itemId === "") return;
-        out.push({ collection, itemId: String(itemId), json: def.order ? { ...item, __i: i } : item });
+        /* the picture is the only thing in here that has ever been too big
+           for the wire, and it is not worth the lift it is attached to */
+        const row = collection === "library" ? withoutBigPhoto(item) : item;
+        out.push({
+          collection, itemId: String(itemId),
+          json: def.order ? { ...row, __i: i } : row,
+          heldPhoto: row !== item,
+        });
       });
     }
   }
@@ -2211,22 +2293,53 @@ function syncApply(items, into) {
       else if (it.json) {
         const row = { ...it.json };
         delete row.__i;
+        /* ── A ROW THAT SAYS "THE PHOTO COULD NOT COME" NEVER TAKES ONE ──
+           syncPush sends a library row without its picture when the
+           picture is too big for the wire, and the server does not filter
+           a pull by the device that wrote it — so the phone that stripped
+           the photo pulls the stripped row straight back. Applied
+           literally that is a phone deleting its own photograph the
+           moment it shares the profile. The flag only ever means "there
+           is one elsewhere", so wherever a photo is actually held, the
+           photo wins and the flag goes. */
+        if (row.imageMissing && at >= 0 && list[at] && list[at].image) {
+          row.image = list[at].image;
+          delete row.imageMissing;
+        }
         if (at >= 0) list[at] = row; else list.push(row);
         n++;
       } else continue;
       dst[it.collection] = list;
     }
   }
-  /* an item store has no order, so an ordered list is put back into the one
-     its own items remember */
+  /* ── AN ITEM STORE HAS NO ORDER, AND A PAGE IS NOT THE WHOLE LIST ────
+     The three lists whose order the user set and can see carry their index
+     as `__i`, and the list is sorted back into it on the way in. The trap
+     is what to do about a row the page did NOT mention: it used to sort
+     last, which is only correct when the page IS the whole collection.
+     It almost never is. Renaming one exercise on the other phone pushes
+     exactly one library row, so this arrived holding one index and an
+     opinion about nothing else — and sorted that single row to the top of
+     the library while every other row fell in behind it. The local order
+     then went back up as if somebody had meant it, and the two devices
+     spent the rest of the day shuffling each other's library.
+
+     A row the page did not mention keeps THE PLACE IT ALREADY HAS, which
+     is the only honest reading of a page that says nothing about it. A
+     move really made on the other device still lands whole, because
+     moving one row renumbers every row after it and pushes all of them,
+     so the page carries the part of the list that actually changed. */
   for (const c of touched) {
     const def = SYNC_COLLECTIONS[c];
     if (!def.order || !Array.isArray(dst[c])) continue;
     const ix = new Map();
     for (const it of items)
       if (it.collection === c && it.json && typeof it.json.__i === "number") ix.set(String(it.itemId), it.json.__i);
-    const pos = (x) => (ix.has(String(def.id(x))) ? ix.get(String(def.id(x))) : Number.MAX_SAFE_INTEGER);
-    dst[c] = [...dst[c]].sort((a, b) => pos(a) - pos(b));
+    if (!ix.size) continue;
+    dst[c] = dst[c]
+      .map((x, i) => { const k = String(def.id(x)); return { x, at: ix.has(k) ? ix.get(k) : i, i }; })
+      .sort((a, b) => (a.at - b.at) || (a.i - b.i))
+      .map((r) => r.x);
   }
   return n;
 }
@@ -2329,27 +2442,39 @@ async function syncPush(localId) {
   const queue = [];
   const seen = new Set();
   const tooBig = [];
+  const heldPhotos = [];
 
   for (const it of syncLocalItems(profileStateFor(localId))) {
     const key = it.collection + "/" + it.itemId;
     seen.add(key);
     const body = JSON.stringify(it.json);
-    /* ── ONE OVERSIZED ROW MUST NOT STOP THE OTHER FOUR HUNDRED ────────
+    /* ── ONE ROW THE SERVER WOULD REFUSE MUST NOT STOP THE OTHER FOUR
+       HUNDRED ──────────────────────────────────────────────────────────
        The server validates the whole batch before writing any of it and
        refuses all of it if one item is bad, which is the right call there:
        a push that half-lands leaves the client unable to say what it still
        owes. The consequence on this side is the part that bit — a single
-       exercise photo over the limit meant the profile NEVER uploaded, so
-       the person it was shared with opened it and saw an empty log, with
-       nothing on either screen naming the one row responsible.
+       bad row meant the profile NEVER uploaded, so the person it was
+       shared with opened it and saw an empty log, with nothing on either
+       screen naming the row responsible.
 
-       A photo is 1000px of JPEG in base64 (see readImageScaled), which is
-       routinely 200-500 KB and sometimes past it, so this is not an exotic
-       case. It is left behind and named instead: everything else syncs,
-       and the sheet says how many did not and why. Deliberately NOT marked
-       as sent, so shrinking or removing the picture makes it go next time
-       with no extra bookkeeping. */
+       Two things can make a row unsendable. Its SIZE, which used to mean
+       an exercise photo and now cannot: withoutBigPhoto has already left
+       the picture behind so the lift itself travels, and anything still
+       over the limit after that is a genuinely enormous row. And its
+       ITEMID, which for a goal or a volume target is an exercise or group
+       NAME, and a long enough one is refused outright.
+
+       Either way it is left behind and NAMED instead: everything else
+       syncs and the sheet says how many did not. Deliberately not marked
+       as sent, so fixing the row makes it go next time with no extra
+       bookkeeping. */
+    if (it.itemId.length > SYNC_MAX_ID) { tooBig.push(key); continue; }
     if (body.length > SYNC_MAX_ITEM) { tooBig.push(key); continue; }
+    /* recorded whether or not the row itself has changed since the last
+       push: a photo left behind is a standing fact about this profile,
+       not an event that happened during one sync */
+    if (it.heldPhoto) heldPhotos.push(key);
     const h = syncHash(body);
     if (marks[key] && marks[key][0] === h) continue;          // unchanged since last time
     marks[key] = [h, now];
@@ -2361,8 +2486,8 @@ async function syncPush(localId) {
     const cut = key.indexOf("/");
     queue.push({ collection: key.slice(0, cut), itemId: key.slice(cut + 1), json: null, deleted: true, clientUpdatedAt: now });
   }
-  syncSet(localId, { tooBig });
-  if (!queue.length) { syncSet(localId, { lastPushedAt: Date.now() }); return { ok: true, sent: 0, stale: 0, tooBig }; }
+  syncSet(localId, { tooBig, heldPhotos });
+  if (!queue.length) { syncSet(localId, { lastPushedAt: Date.now() }); return { ok: true, sent: 0, stale: 0, tooBig, heldPhotos }; }
 
   let sent = 0, stale = 0;
   for (let i = 0; i < queue.length; i += SYNC_PAGE) {
@@ -2380,7 +2505,7 @@ async function syncPush(localId) {
     }
     syncSet(localId, { marks, lastPushedAt: Date.now() });
   }
-  return { ok: true, sent, stale, tooBig };
+  return { ok: true, sent, stale, tooBig, heldPhotos };
 }
 
 /* What the account has up there, for the list in the account sheet. Async
@@ -2651,6 +2776,24 @@ function syncTouch() {
   syncPushTimer = setTimeout(() => syncQuiet({ pull: false }), SYNC_PUSH_AFTER);
 }
 
+/* ── THE DEBOUNCE BELONGS TO THE PROFILE THAT ARMED IT ────────────────
+   The push timer names no profile: it fires later and pushes whichever
+   one is active THEN. Leaving one profile inside the eight-second window
+   therefore armed a push for the profile you arrived at and dropped the
+   one you left, whose last few sets sat on the phone until something
+   else happened to touch it — which, for a profile you switched away
+   from, can be weeks. The person it is shared with sees a log that
+   stopped mid-session.
+
+   So switching flushes first, on the way out, while the profile being
+   left is still the active one. It costs nothing when nothing changed: a
+   push with no rows to send never reaches the network (see syncPush). */
+function syncFlush() {
+  clearTimeout(syncPushTimer);
+  syncPushTimer = null;
+  syncQuiet({ pull: false });
+}
+
 /* The poll, armed only while the app is actually on screen. A phone in a
    pocket has nothing to show anybody. */
 function syncPollStart() {
@@ -2905,7 +3048,7 @@ async function rosterSync(opts) {
       if (pendingFor(cp.profileId)) continue;
       if (profileList().some((lp) => linked(lp) === cp.profileId)) continue;
       const level = cp.level === "read" ? "read" : cp.level === "owner" ? "owner" : "write";
-      const localId = addProfile(cp.name || T("sync.joinedName"));
+      const localId = addProfile(cp.name || T("sync.joinedName"), { forRemote: true });
       if (!localId) break;                       // out of room: say nothing, try again later
       syncSet(localId, {
         remoteId: cp.profileId, level, owned: !!cp.isOwner, marks: {}, cursor: null,
@@ -5795,7 +5938,13 @@ function renderLibraryList(library) {
     <div class="pb-card" style="overflow:hidden">
       ${nestVariations(rows).map((ex, i, arr) => `<button data-action="open-exercise-window" data-name="${esc(ex.name)}" style="width:100%;display:flex;align-items:center;gap:10px;padding:11px 14px 11px ${ex.variantOf ? 30 : 14}px;text-align:left;color:var(--text);border-bottom:${i < arr.length - 1 ? "1px solid var(--border-soft)" : "none"}">
         ${ex.variantOf ? icon("corner-down-right", 13, 'style="color:var(--faint);flex-shrink:0;margin-right:-2px"') : ""}
-        ${ex.image ? `<img src="${esc(ex.image)}" alt="" style="width:38px;height:38px;border-radius:8px;object-fit:cover;flex-shrink:0;border:1px solid var(--border)">` : ""}
+        ${ex.image
+          ? `<img src="${esc(ex.image)}" alt="" style="width:38px;height:38px;border-radius:8px;object-fit:cover;flex-shrink:0;border:1px solid var(--border)">`
+          : photoAway(ex)
+          /* the same 38px the photo would have taken, so a shared library
+             does not comb itself into two differently-indented columns */
+          ? `<span title="${esc(T("ex.photoAway"))}" style="width:38px;height:38px;border-radius:8px;flex-shrink:0;border:1.5px dashed var(--border);display:flex;align-items:center;justify-content:center;color:var(--faint)">${icon("image-off", 15)}</span>`
+          : ""}
         <div style="flex:1;min-width:0">
           <div style="font-weight:600;font-size:14px">${ex.variantOf ? esc(ex.variantName || ex.name) : esc(exLabelOf(ex))}${newFlag(ex)}</div>
           <div style="font-size:11.5px;color:var(--faint)">${esc(exFieldOf(ex, "equipment"))}</div>
@@ -6388,6 +6537,22 @@ function readImageScaled(file, cb) {
    button opens. It's read-only by default; the Edit button flips it to
    the editable form. Also handles creating a brand-new custom exercise. */
 
+/* ── WHAT THE SAVE BUTTON IS WAITING FOR ──────────────────────────────
+   The same two questions actions["exwin-save"] asks, in ONE place,
+   because they are asked from two: here, to draw the button, and from
+   handleBind, to flip it while somebody types. Keeping a second copy of
+   the rule is what broke variations.
+
+   A VARIATION types its short part and nothing else — "Wide grip" — and
+   its stored name is composed from the parent's at save time, so the
+   draft's `name` starts empty and STAYS empty no matter how completely
+   the form is filled in. Both copies of the check looked at `name`, found
+   nothing, and left Save greyed out for every variation there has ever
+   been: the one form in the app that could not be submitted at all. The
+   field that has to be filled is whichever one is on screen.          */
+const exDraftReady = (f) => !!(f && (f.muscle || "").trim() &&
+  (f.variantOf ? (f.variantName || "").trim() : (f.name || "").trim()));
+
 function renderExerciseWindow(library) {
   const editing = ui.exWinEdit;
   const isNew = !!(ui.exWin && ui.exWin.isNew);
@@ -6412,7 +6577,7 @@ function renderExerciseWindow(library) {
   if (ui.chartSel.ex && !(hist && hist.chart.some((d) => d.e.id === ui.chartSel.ex))) ui.chartSel.ex = null;
   if (!chartState.exLine && ui.chartFull === "ex") ui.chartFull = null;
 
-  const canSave = !!(ex.name && ex.name.trim() && ex.muscle && ex.muscle.trim());
+  const canSave = exDraftReady(ex);
   const headerRight = editing
     ? `<button data-action="exwin-save" id="exwinSaveBtn" class="pb-btn pb-gold" style="padding:8px 16px;font-size:13.5px;opacity:${canSave ? 1 : 0.45}" ${canSave ? "" : "disabled"}>${icon("check", 15)} ${T("common.save")}</button>`
     : (ex.missing ? "" : `<button data-action="exwin-edit" class="pb-btn pb-ghost" style="padding:8px 14px;font-size:13.5px">${icon("pencil", 14)} ${T("common.edit")}</button>`);
@@ -6519,6 +6684,16 @@ function exWindowViewBody(ex, hist) {
 
     ${ex.image
       ? `<img src="${esc(ex.image)}" alt="${esc(exLabelOf(ex))}" style="width:100%;max-height:300px;object-fit:cover;border-radius:14px;border:1px solid var(--border);margin-bottom:18px;display:block">`
+      : photoAway(ex)
+      /* Where the machine should be, saying what is actually the case: the
+         picture exists and is not on this phone. Not an error and not a
+         broken image — nothing here has failed, the training all arrived,
+         and one file was too big to come with it. */
+      ? `<div class="pb-placeholder" style="height:110px;flex-direction:column;gap:7px;margin-bottom:8px">
+          ${icon("image-off", 20)}
+          <span style="font-size:12px;letter-spacing:.02em;text-transform:none">${T("ex.photoAway")}</span>
+        </div>
+        <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:0 2px 18px">${T("ex.photoAwayHint")}</div>`
       : ""}
 
     ${vid
@@ -6732,9 +6907,14 @@ function exWindowEditBody(f, library) {
         ${icon("image", 15)} ${T("ex.replacePhoto")}
         <input type="file" accept="image/*" data-filebind="exwin.image" style="display:none">
       </label>`
+    /* A row whose photo stayed on another phone offers the same control
+       saying something different: there is nothing here to replace, and
+       nothing this device can do to fetch it, so what is on offer is a
+       picture of your OWN machine. Uploading one clears the flag, because
+       the row now holds a photo and is not waiting for one. */
     : `<label class="pb-placeholder" style="height:120px;cursor:pointer;flex-direction:column;gap:8px;color:var(--faint)">
-        ${icon("image-plus", 22)}
-        <span style="font-size:12px;letter-spacing:.04em;text-transform:none;font-weight:600">${T("ex.uploadPhoto")}</span>
+        ${icon(photoAway(f) ? "image-off" : "image-plus", 22)}
+        <span style="font-size:12px;letter-spacing:.04em;text-transform:none;font-weight:600">${T(photoAway(f) ? "ex.photoAwayAdd" : "ex.uploadPhoto")}</span>
         <input type="file" accept="image/*" data-filebind="exwin.image" style="display:none">
       </label>`;
 
@@ -6752,7 +6932,7 @@ function exWindowEditBody(f, library) {
     ${field(T("ex.groupRequired"), musclePicker, T("ex.groupHint"))}
     ${field(T("kind.exLabel"), kindPicker("exwin-kind", exKind(f), f.muscle ? groupKind(f.muscle) : null), T("kind.exHint"))}
 
-    ${field(T("ex.photo"), imageBlock, T("ex.photoHint"))}
+    ${field(T("ex.photo"), imageBlock, photoAway(f) ? T("ex.photoAwayHint") : T("ex.photoHint"))}
 
     ${field(T("ex.videoLabel"), `<input class="pb-input" type="url" inputmode="url" data-bind="exwin.video" value="${esc(f.video)}" placeholder="—">`,
       vid ? T("ex.videoOk") : (f.video ? T("ex.videoBad") : T("ex.videoHint")))}
@@ -8739,11 +8919,23 @@ function renderSyncSheet() {
         <div style="font-size:11.5px;color:${ui.syncError ? "var(--red)" : "var(--faint)"};margin-top:5px;line-height:1.5">
           ${ui.syncError ? T("sync.failed", { why: esc(String(ui.syncError)) }) : when(rec.lastOkAt || rec.lastPulledAt || rec.lastPushedAt)}
         </div>
-        ${/* Named rather than silently dropped: one photo over the limit is
-              the difference between a profile that syncs and one that does
-              not, and nothing else on this screen would ever say so. */
-          (rec.tooBig || []).length ? `<div style="font-size:11.5px;color:var(--steel);margin-top:6px;line-height:1.5">
-            ${icon("image-off", 12)} ${T("sync.tooBig", { n: rec.tooBig.length })} · ${T("sync.tooBigHint")}
+        ${/* ── THE TWO THINGS THAT DO NOT GO UP WHOLE ──────────────────
+              Both named rather than silently dropped, and kept apart
+              because one is a shrug and the other is a job.
+
+              A PHOTO LEFT BEHIND costs nothing but the picture: the lift,
+              its cues, its history and everything else about the profile
+              are up there, and the row on the other phone says a photo
+              exists. Nothing is broken and there is nothing to do.
+
+              A ROW LEFT BEHIND is a row the other phone does not have,
+              which is worth looking at. Since the photos are handled
+              above, what lands here now is rare and genuinely odd. */
+          (rec.heldPhotos || []).length ? `<div style="font-size:11.5px;color:var(--steel);margin-top:6px;line-height:1.5">
+            ${icon("image-off", 12)} ${T("sync.photosHeld", { n: TN("syncPhoto", rec.heldPhotos.length) })} · ${T("sync.photosHeldHint")}
+          </div>` : ""}
+        ${(rec.tooBig || []).length ? `<div style="font-size:11.5px;color:var(--steel);margin-top:6px;line-height:1.5">
+            ${icon("alert-triangle", 12)} ${T("sync.tooBig", { n: TN("syncRow", rec.tooBig.length) })} · ${T("sync.tooBigHint")}
           </div>` : ""}
       </div>`
     : `<div style="font-size:12.5px;color:var(--faint);line-height:1.6;margin-bottom:14px">${T("sync.offBody")}</div>`;
@@ -10119,10 +10311,18 @@ const actions = {
     render();
     try {
       await C.ensureDevice();
-      const made = await C.createProfile(profileLabel(list[i], i));
+      /* Minted exactly as the roster mints one (rosterSync step 4), name
+         stamp and position included. Sending neither left the server to
+         stamp the name with ITS clock while the record here carried this
+         phone's, and the two are routinely seconds apart — so the very
+         next roster pass read the server's as the later one and handed
+         the phone back a name it had just sent up. */
+      const at = Date.now();
+      const made = await C.createProfile(profileLabel(list[i], i), { position: i, nameUpdatedAt: at });
       /* linked BEFORE the push, so one that dies half way leaves a profile
          that knows where it lives rather than an orphan on the server */
-      syncSet(localId, { remoteId: made.profileId || made.id, level: "write", owned: true, marks: {}, cursor: null, noSync: false, nameAt: Date.now() });
+      syncSet(localId, { remoteId: made.profileId || made.id, level: "write", owned: true, marks: {}, cursor: null,
+        noSync: false, nameAt: at, srvName: made.name, srvNameAt: at, pos: i, seen: true });
       await syncPush(localId);
       syncSet(localId, { lastOkAt: Date.now() });
     } catch (e) {
@@ -10142,7 +10342,7 @@ const actions = {
     /* the level the listing reported, not an assumption: one of these can
        be somebody else's profile shared with the account for reading */
     const level = el.dataset.lv === "read" ? "read" : "write";
-    const localId = addProfile(el.dataset.n || T("sync.joinedName"));
+    const localId = addProfile(el.dataset.n || T("sync.joinedName"), { forRemote: true });
     if (!localId) { ui.accountSheet = { ...f, error: T("profiles.quota") }; render(); return; }
     syncSet(localId, { remoteId, level, owned: el.dataset.own === "1", marks: {}, cursor: null, live: level === "read" });
     ui.accountSheet = null;
@@ -10176,11 +10376,14 @@ const actions = {
       await C.ensureDevice();
       const list = profileList();
       const i = list.findIndex((p) => p.id === f.localId);
-      const made = await C.createProfile(profileLabel(list[i], i));
+      /* same mint as acct-backup and as the roster's own: see there */
+      const at = Date.now();
+      const made = await C.createProfile(profileLabel(list[i], i), { position: i, nameUpdatedAt: at });
       /* linked BEFORE the first push, so a push that dies half way leaves a
          profile that knows where it lives and can simply be synced again,
          rather than an orphan on the server nothing points at */
-      syncSet(f.localId, { remoteId: made.id || made.profileId, level: "write", owned: true, marks: {}, cursor: null, noSync: false, nameAt: Date.now() });
+      syncSet(f.localId, { remoteId: made.profileId || made.id, level: "write", owned: true, marks: {}, cursor: null,
+        noSync: false, nameAt: at, srvName: made.name, srvNameAt: at, pos: i, seen: true });
       ui.syncBusy = false;
       await syncNow(f.localId);
     } catch (e) {
@@ -10329,7 +10532,7 @@ const actions = {
     /* A NEW local profile, always. Folding somebody else's training into a
        profile that already has yours in it is the one move here that cannot
        be undone afterwards. */
-    const localId = addProfile(joined.name || T("sync.joinedName"));
+    const localId = addProfile(joined.name || T("sync.joinedName"), { forRemote: true });
     if (!localId) { ui.joinSheet = { ...ui.joinSheet, busy: false, error: T("profiles.quota") }; render(); return; }
     /* A READ grant is held live: nothing of it is written to this phone,
        it is fetched when you open it. See the LIVE block for the trade —
@@ -10982,7 +11185,16 @@ const actions = {
     if (ui.exWin && ui.exWin.isNew) ui.exWin = null;
     ui.exWinEdit = false; ui.exWinDraft = null; render();
   },
-  "exwin-remove-image": () => { if (ui.exWinDraft) { ui.exWinDraft.image = ""; render(); } },
+  /* `imageMissing` goes with it. The flag means "there is one elsewhere",
+     which is a thing to go and fetch; a photo the user has just deleted is
+     a decision, and the row must not go on advertising a picture nobody
+     is coming back for. Same on upload, one screen down. */
+  "exwin-remove-image": () => {
+    if (!ui.exWinDraft) return;
+    ui.exWinDraft.image = "";
+    delete ui.exWinDraft.imageMissing;
+    render();
+  },
   /* ── A RENAME HAS TO TAKE THE LIFT'S WHOLE PAST WITH IT ─────────────
      An exercise's NAME is its identity: a logged entry points at it, a
      plan and a preset name it, a goal is filed under it. Writing a new
@@ -11859,7 +12071,7 @@ function handleBind(el) {
   } else if (bind.startsWith("exwin.")) {
     ui.exWinDraft[bind.slice(6)] = v;
     const btn = document.getElementById("exwinSaveBtn");
-    if (btn) { const ok = ui.exWinDraft.name.trim() && ui.exWinDraft.muscle.trim(); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
+    if (btn) { const ok = exDraftReady(ui.exWinDraft); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
   } else if (bind.startsWith("body.")) {
     ui.bodyForm[bind.slice(5)] = v;
   } else if (bind.startsWith("profile.")) {
@@ -11892,7 +12104,7 @@ function handleFile(el) {
   const file = el.files && el.files[0];
   if (!file) return;
   if (el.dataset.filebind === "exwin.image" && ui.exWinDraft) {
-    readImageScaled(file, (dataUrl) => { ui.exWinDraft.image = dataUrl; render(); });
+    readImageScaled(file, (dataUrl) => { ui.exWinDraft.image = dataUrl; delete ui.exWinDraft.imageMissing; render(); });
   } else if (el.dataset.filebind === "backup") {
     const r = new FileReader();
     r.onload = () => importBackup(String(r.result || ""));

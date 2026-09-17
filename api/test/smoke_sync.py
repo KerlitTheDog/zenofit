@@ -247,6 +247,40 @@ print("\n== a bad cursor is rejected, not ignored ==")
 s, b = call("GET", "/v1/profiles/%s/changes?cursor=notacursor" % P2, token=owner)
 check("garbage cursor is a 400", s == 400 and b.get("error") == "bad_cursor", (s, b))
 
+print("\n== a batch that is mostly deletions is refused ==")
+# The incident this guards against: a client whose local copy was emptied or
+# half-filled reads every mark with no item behind it as a deletion, and one
+# unattended push then empties the profile for every device on the account.
+# Fixed on the client in three places; enforced here as well, because the app
+# is served from a cache-first service worker and an old build goes on pushing
+# for at least one more launch, and longer on a phone that is rarely opened.
+P3 = call("POST", "/v1/profiles", token=owner, body={"name": "Wipe guard"})[1]["profileId"]
+WALL = [item("log", "w%02d" % i, {"id": "w%02d" % i, "date": "2026-09-01"}) for i in range(20)]
+s, b = call("POST", "/v1/profiles/%s/items" % P3, token=owner, body={"items": WALL})
+check("20 rows go up normally", s == 200 and b.get("accepted") == 20, (s, b))
+
+# under the floor: ordinary tidying is untouched
+s, b = call("POST", "/v1/profiles/%s/items" % P3, token=owner,
+            body={"items": [item("log", "w%02d" % i, None, deleted=True) for i in range(9)]})
+check("9 deletions still go through", s == 200 and b.get("accepted") == 9, (s, b))
+
+# over the floor and over half of what is left: refused whole
+s, b = call("POST", "/v1/profiles/%s/items" % P3, token=owner,
+            body={"items": [item("log", "w%02d" % i, None, deleted=True) for i in range(9, 20)]})
+check("11 deletions from 11 rows is a 409", s == 409 and b.get("error") == "wipe_refused", (s, b))
+
+s, b = call("GET", "/v1/profiles/%s/changes?limit=500" % P3, token=owner)
+alive = [i for i in b.get("items", []) if not i.get("deleted")]
+check("and not one row of that batch was written", len(alive) == 11, "%d alive" % len(alive))
+
+# the user saying "replace what is there": importing a backup, or a reset
+s, b = call("POST", "/v1/profiles/%s/items" % P3, token=owner,
+            body={"allowWipe": True,
+                  "items": [item("log", "w%02d" % i, None, deleted=True) for i in range(9, 20)]})
+check("allowWipe lets the same batch through", s == 200 and b.get("accepted") == 11, (s, b))
+
+call("DELETE", "/v1/profiles/" + P3, token=owner)
+
 call("DELETE", "/v1/profiles/" + PID, token=owner)
 call("DELETE", "/v1/profiles/" + P2, token=owner)
 

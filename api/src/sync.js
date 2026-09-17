@@ -57,6 +57,38 @@ export const PAGE_BYTE_BUDGET = 900 * 1024;
  * INSERT. Statements go through db.batch() instead, one per item. */
 export const BATCH_CHUNK = 50;
 
+/* ── THE LAST THING STANDING BETWEEN A BUG AND EVERYBODY'S TRAINING ────
+ * A tombstone is the one write here that cannot be undone and that reaches
+ * every device on the account at once. The client decides to send one by
+ * INFERENCE — it holds a mark with no item behind it — so any bug that
+ * empties or half-fills a phone's local copy arrives at this endpoint
+ * indistinguishable from a person deleting their whole log.
+ *
+ * Three such bugs shipped. They were fixed on the client, which protects
+ * exactly the devices running the fixed client: the app is served from a
+ * cache-first service worker, so an old build can go on pushing for days,
+ * and it only takes one to empty the profile for everyone. This is the
+ * half of the fix that does not depend on which build is asking.
+ *
+ * The rule is deliberately crude, because a sharp one would need to know
+ * what the client meant. A batch may not delete more than half of what the
+ * profile is currently holding, once it is deleting more than a handful.
+ * Ordinary tidying — scrapping a day, clearing a few goals, renaming a
+ * group — is single figures and never comes near it. `allowWipe` is the
+ * escape, and the client only sets it when the user has said "replace what
+ * is there" out loud, behind a confirm: restoring a backup, or a reset.
+ *
+ * Counted per batch rather than per push, because a push arrives as up to
+ * 200 items at a time and there is no transaction spanning them. Halving
+ * rather than comparing outright is what makes that safe: a wipe split
+ * across two batches is caught on the first, not after the first has
+ * already landed.                                                        */
+export const WIPE_FLOOR = 10;
+
+export function wipeRefused(deletions, liveCount) {
+  return deletions >= WIPE_FLOOR && deletions * 2 > liveCount;
+}
+
 export function validateItem(item) {
   if (!item || typeof item !== "object") return "item is not an object";
 

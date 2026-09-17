@@ -2595,12 +2595,19 @@ async function syncPush(localId) {
      confirm, and it opens this for exactly one push. And a refusal keeps
      the marks untouched, so nothing is lost: once a pull has put the
      profile back, the same push goes through on its own. */
-  if (tombs.length >= SYNC_WIPE_FLOOR && tombs.length > seen.size && !syncWipeOk) {
+  const wouldWipe = tombs.length >= SYNC_WIPE_FLOOR && tombs.length > seen.size;
+  if (wouldWipe && !syncWipeOk) {
     console.error("sync: refusing to delete", tombs.length, "items from a profile holding", seen.size);
     syncSet(localId, { tooBig, heldPhotos, wipeBlocked: { at: Date.now(), tombs: tombs.length, held: seen.size } });
     return { ok: false, reason: "wipe-blocked", tombs: tombs.length, held: seen.size };
   }
-  syncWipeOk = false;                       // spent, whether it was needed or not
+  /* spent only by the push that actually needed it, so a debounced save
+     landing between the import and its own push cannot quietly eat the
+     permission and leave the restore blocked */
+  if (wouldWipe) syncWipeOk = false;
+  /* and carried to the server, which keeps the same refusal for the same
+     reason and does not get to see the confirm this device already showed */
+  const allowWipe = wouldWipe;
   queue.push(...tombs);
   syncSet(localId, { tooBig, heldPhotos, wipeBlocked: null });
   if (!queue.length) { syncSet(localId, { lastPushedAt: Date.now() }); return { ok: true, sent: 0, stale: 0, tooBig, heldPhotos }; }
@@ -2608,7 +2615,7 @@ async function syncPush(localId) {
   let sent = 0, stale = 0;
   for (let i = 0; i < queue.length; i += SYNC_PAGE) {
     const batch = queue.slice(i, i + SYNC_PAGE);
-    const res = await C.pushChanges(rec.remoteId, batch);
+    const res = await C.pushChanges(rec.remoteId, batch, { allowWipe });
     sent += res.accepted || 0;
     const staleKeys = new Set((res.staleItems || []).map((s) => s.collection + "/" + s.itemId));
     stale += staleKeys.size;
@@ -2778,7 +2785,23 @@ function liveEnter(localId) {
   ui.liveLoading = true;
   render();
   syncPull(localId)
-    .then(() => {
+    .then((res) => {
+      /* ── A PULL THAT RESOLVED IS NOT A PULL THAT FETCHED ──────────────
+         syncPull only REJECTS on a network or permission failure. Every
+         other way it gives up — no link, no cloud client because the
+         script did not load, a live profile asked for off screen —
+         resolves with {ok:false}, lands here, and used to delete the key
+         on the strength of it. `state` is already the blank by then, so
+         that is the app throwing away the copy it has and replacing it
+         with nothing, in the one case where it could not check. Treated
+         as the failure it is: put back what was on screen. */
+      if (!res || !res.ok) {
+        state = fallback;
+        ui.liveLoading = false;
+        ui.syncError = T("sync.errGeneric");
+        render();
+        return;
+      }
       ui.liveLoading = false; ui.syncError = null;
       /* only now: a save left behind before the fetch proved it could be
          replaced is the one copy somebody had. Storage check would offer

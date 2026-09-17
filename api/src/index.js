@@ -23,6 +23,7 @@ import {
   validateItem, encodeCursor, decodeCursor,
   MAX_ITEMS_PER_PUSH, MAX_PUSH_BODY_BYTES,
   PAGE_DEFAULT, PAGE_MAX, PAGE_BYTE_BUDGET, BATCH_CHUNK,
+  wipeRefused, WIPE_FLOOR,
 } from "./sync.js";
 export { TimerAlarm } from "./timer.js";
 
@@ -854,6 +855,28 @@ async function route(request, env, url) {
     for (const item of incoming) {
       const problem = validateItem(item);
       if (problem) return fail(400, "bad_item", problem);
+    }
+
+    /* ── A BATCH THAT IS MOSTLY DELETIONS DOES NOT GET THE BENEFIT OF THE
+       DOUBT ────────────────────────────────────────────────────────────
+       See the block above wipeRefused in sync.js for why this lives here
+       and not only on the client. Counted before anything is written, and
+       answered with 409 rather than 400: nothing about the request is
+       malformed, it is the one shape of valid request this refuses. */
+    const deletions = incoming.reduce((n, i) => n + (i.deleted ? 1 : 0), 0);
+    /* gated on the floor, not on there being any deletion at all: below it
+       nothing can be refused, and the COUNT is a query per push that would
+       buy nothing on a budget of ten milliseconds */
+    if (deletions >= WIPE_FLOOR && body.allowWipe !== true) {
+      const held = await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM items WHERE profile_id = ? AND deleted = 0"
+      ).bind(profile.id).first();
+      const live = (held && held.n) || 0;
+      if (wipeRefused(deletions, live)) {
+        return fail(409, "wipe_refused",
+          "That would delete " + deletions + " items from a profile holding " + live +
+          ". Refused. If you meant it, restore a backup or reset the profile.");
+      }
     }
 
     const now = Date.now();

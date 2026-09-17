@@ -349,9 +349,17 @@
 
   /* items: [{collection, itemId, json, deleted?, clientUpdatedAt?}]
      The response reports `accepted`, and `staleItems` for anything refused
-     because the stored copy carried a newer clientUpdatedAt. */
-  function pushChanges(profileId, items) {
-    return call("POST", "/v1/profiles/" + profileId + "/items", { items: items });
+     because the stored copy carried a newer clientUpdatedAt.
+
+     opts.allowWipe lifts the server's refusal of a batch that would delete
+     most of the profile (409 wipe_refused). It is never set by the ordinary
+     sync path: only by a restore or a reset, which are the user saying
+     "replace what is there" behind a confirm. Passing it is app.js's
+     decision, not this file's — see the block in syncPush. */
+  function pushChanges(profileId, items, opts) {
+    const body = { items: items };
+    if (opts && opts.allowWipe) body.allowWipe = true;
+    return call("POST", "/v1/profiles/" + profileId + "/items", body);
   }
 
   /* ---- profiles and seeds -------------------------------------------------- */

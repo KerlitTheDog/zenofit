@@ -1844,7 +1844,10 @@ function readProfileState(id) {
    the roster's background fill uses it — the profile in front of you is
    still written by writeNow, from `state`, on the debounce. */
 function writeProfileState(id, data) {
-  if (id === profiles.active) { writeNow(); return true; }
+  /* the answer is writeNow's, not an assumption: it refuses an unreadable
+     save and fails on a full store, and a caller asking whether the bytes
+     are down has to hear about both */
+  if (id === profiles.active) return writeNow();
   if (unreadable === id) return false;
   try { localStorage.setItem(stateKeyFor(id), JSON.stringify(data)); return true; }
   catch (e) {
@@ -1859,8 +1862,18 @@ function writeProfileState(id, data) {
 let unreadableWarned = false;
 
 /* The user saying "replace it" in as many words. Only importBackup and
-   reset-all call this, and both have already asked. */
-function allowOverwrite() { unreadable = null; unreadableWarned = false; }
+   reset-all call this, and both have already asked.
+
+   It now also carries that answer as far as the cloud copy. Restoring a
+   backup over a full profile is the one legitimate way to delete most of
+   what is up there, and syncPush refuses a push like that on its own —
+   correctly, because every bug in this file looks identical from there.
+   This is the difference between the app inferring a wipe and the user
+   asking for one, which is the whole distinction that block is drawing. */
+function allowOverwrite() {
+  unreadable = null; unreadableWarned = false;
+  syncWipeOk = true;                  // declared below; only ever called from a tap
+}
 
 function loadState() {
   return readProfileState(profiles.active);
@@ -1889,15 +1902,24 @@ function snapshotDrafts() {
   };
 }
 
-/* write straight through, used when the page is about to go away */
+/* write straight through, used when the page is about to go away.
+
+   RETURNS WHETHER THE BYTES ARE ACTUALLY DOWN. Every caller before sync
+   ignored the answer and could afford to, because the only cost of a lost
+   write was a lost write. syncPull cannot: it persists a cursor saying "I
+   have everything up to here", and a cursor that outlives the rows it
+   describes is how a device ends up claiming to hold training it does not
+   have — which the next push turns into tombstones. So the three ways
+   this does NOT write are now reported rather than swallowed. */
 let quotaWarned = false;
 function writeNow() {
   clearTimeout(saveTimer); saveTimer = null;
   /* A live profile is not on this phone: see the LIVE block. Nothing of it
      is written, including the crash snapshot, because a half-typed form
      belonging to a profile that will be re-fetched from scratch is not
-     worth a byte on a device that is short of them. */
-  if (typeof syncLive === "function" && syncLive(profiles.active)) return;
+     worth a byte on a device that is short of them. Reported as TRUE: the
+     rows are exactly as kept as they are ever meant to be. */
+  if (typeof syncLive === "function" && syncLive(profiles.active)) return true;
   snapshotDrafts();
   /* the whole point of the block above: what is on screen is a blank the
      app invented, and the key still holds the real thing */
@@ -1906,15 +1928,16 @@ function writeNow() {
       unreadableWarned = true;
       try { alert(T("profiles.unreadable")); } catch { /* no UI here */ }
     }
-    return;
+    return false;
   }
-  try { localStorage.setItem(stateKeyFor(profiles.active), JSON.stringify(state)); }
+  try { localStorage.setItem(stateKeyFor(profiles.active), JSON.stringify(state)); return true; }
   catch (e) {
     console.error("save failed", e);
     /* A full browser store used to fail in silence, which is the worst way
        for it to fail: everything keeps working on screen and none of it is
        being kept. Said once, because a debounced save says it every 400ms. */
     if (!quotaWarned) { quotaWarned = true; try { alert(T("profiles.quota")); } catch { /* no UI here */ } }
+    return false;
   }
 }
 
@@ -2141,6 +2164,14 @@ const SYNC_MAX_ITEM = 500 * 1024;
    and a name the server refuses fails the WHOLE push, for ever, silently.
    See syncPush: a row it would refuse never joins a batch. */
 const SYNC_MAX_ID = 200;
+/* Below this many deletions in one push, nothing is questioned: scrapping a
+   day, clearing a few goals and renaming a group all land in single figures.
+   Above it, see the block in syncPush — a push is refused when it would
+   delete more than the profile still holds. */
+const SYNC_WIPE_FLOOR = 10;
+/* One push's worth of permission to do exactly that, granted only by
+   allowOverwrite() and spent by the next push that asks. */
+let syncWipeOk = false;
 
 /* ── A PHOTO THAT CANNOT TRAVEL MUST NOT TAKE THE LIFT WITH IT ────────
    The photo is by far the biggest thing in this app: 1000px of JPEG in
@@ -2369,15 +2400,47 @@ async function syncPull(localId) {
   if (!onScreen && syncLive(localId)) return { ok: false, reason: "live-offscreen" };
   const into = onScreen ? state : readProfileState(localId);
 
-  let cursor = rec.cursor || null, applied = 0, level = rec.level, guard = 0;
+  let cursor = rec.cursor || null, applied = 0, level = rec.level, guard = 0, kept = true;
   const was = rec.level;
+
+  /* ── THE PAGE GOES DOWN BEFORE THE CURSOR THAT SAYS WE HAVE IT ───────
+     This loop used to persist `marks` and `cursor` per page and write the
+     ROWS once, after the loop. Every way out of the middle of it — a
+     page that throws, a phone locking, a full store — therefore left the
+     device holding a cursor past rows it never saved and marks claiming
+     rows it never had. Nothing on screen said so, and the damage did not
+     surface here at all: syncPush reads a mark with no item behind it as
+     something DELETED on this device, so the next quiet push turned every
+     one of those rows into a tombstone and took them off every device on
+     the account.
+
+     So the order is inverted. The rows are written first, and the cursor
+     only moves if the write actually happened — which is why writeNow and
+     writeProfileState now report. A page that cannot be kept ends the
+     loop with the cursor where it was, so the very same page is fetched
+     again next pass; the server pages by (updated_at, collection, itemId)
+     and the client upserts by itemId, so refetching one is free.
+
+     The on-screen test is repeated rather than trusted, because `onScreen`
+     was decided before the first request and a profile switch inside a
+     page loop invalidates it: `into` and `state` are two different objects
+     by then and writing either over the other loses somebody's edits. That
+     page is dropped too, for the same reason and at the same cost. */
+  const keepPage = () => {
+    if (syncLive(localId)) return true;                       // holds nothing, by design
+    if ((localId === activeProfileId()) !== onScreen) return false;   // switched under us
+    return onScreen ? writeNow() : writeProfileState(localId, into);
+  };
+
   /* a cursor, never a bare timestamp, once we have one: saving a workout
      stamps every set in it with the same millisecond, and `since` cannot
      separate rows that share one */
   while (guard++ < 500) {
     const res = await C.pullChanges(rec.remoteId, cursor || { since: 0, limit: SYNC_PAGE });
     if (res.level) level = res.level;
-    applied += syncApply(res.items, into);
+    const landed = syncApply(res.items, into);
+    applied += landed;
+    if (landed && !keepPage()) { kept = false; break; }
     /* marks follow what just landed, or the very next push hands the server
        its own rows straight back */
     const marks = { ...((syncFor(localId) || {}).marks || {}) };
@@ -2399,8 +2462,12 @@ async function syncPull(localId) {
     syncSet(localId, patch);
     if (!res.hasMore) break;
   }
+  /* Each page has already written itself. This is only for a profile that
+     stopped being live during the loop, whose rows were deliberately not
+     written while the flag was up — and never for a loop that bailed,
+     where `into` is precisely the thing that must not be saved. */
   const settled = !syncLive(localId) && rec.live;   // just stopped being live
-  if (applied || settled) {
+  if (settled && kept) {
     if (onScreen) writeNow();
     else writeProfileState(localId, into);
   }
@@ -2437,12 +2504,31 @@ async function syncPush(localId) {
   const C = window.ZenofitCloud;
   if (!C || typeof C.pushChanges !== "function") return { ok: false, reason: "no-client" };
 
+  /* ── A BLANK THE APP INVENTED IS NOT AN EMPTY PROFILE ────────────────
+     readProfileState hands back defaultState() for a save that will not
+     parse, and writeNow refuses to overwrite the key so the real bytes
+     survive for Storage check to rescue. That protection stopped at the
+     edge of this device: the blank on screen was pushed anyway, and every
+     row the marks named and the blank did not hold went up as a delete.
+     The app kept the local copy and destroyed the cloud one. */
+  if (unreadable === localId) return { ok: false, reason: "unreadable" };
+
   const marks = { ...(rec.marks || {}) };
   const now = Date.now();
   const queue = [];
   const seen = new Set();
   const tooBig = [];
   const heldPhotos = [];
+  /* ── A MARK IS EARNED BY THE BATCH THAT CARRIED IT, NOT BY BEING QUEUED
+     `marks` used to be stamped here, in the sweep that builds the queue,
+     and persisted whole after the FIRST batch came back. A push of 450
+     rows whose second batch failed therefore recorded all 450 as sent
+     while the server held 200. The hash matched from then on, so the
+     other 250 were never offered again: stranded on one device, silently,
+     for ever — and read as deletions by the next device to push.
+
+     So a hash waits here until the batch it travelled in is accepted. */
+  const pending = new Map();
 
   for (const it of syncLocalItems(profileStateFor(localId))) {
     const key = it.collection + "/" + it.itemId;
@@ -2477,16 +2563,46 @@ async function syncPush(localId) {
     if (it.heldPhoto) heldPhotos.push(key);
     const h = syncHash(body);
     if (marks[key] && marks[key][0] === h) continue;          // unchanged since last time
-    marks[key] = [h, now];
+    pending.set(key, h);
     queue.push({ collection: it.collection, itemId: it.itemId, json: it.json, clientUpdatedAt: now });
   }
   /* a mark with no item behind it is something deleted on this device */
+  const tombs = [];
   for (const key of Object.keys(marks)) {
     if (seen.has(key)) continue;
     const cut = key.indexOf("/");
-    queue.push({ collection: key.slice(0, cut), itemId: key.slice(cut + 1), json: null, deleted: true, clientUpdatedAt: now });
+    tombs.push({ collection: key.slice(0, cut), itemId: key.slice(cut + 1), json: null, deleted: true, clientUpdatedAt: now });
   }
-  syncSet(localId, { tooBig, heldPhotos });
+
+  /* ── NOTHING DELETES A PROFILE BY ACCIDENT, EVER AGAIN ───────────────
+     Every path above is now honest about what it holds, and this is the
+     backstop for the one after it that is not. A tombstone is generated
+     from an ABSENCE — a mark with no item behind it — which means any bug
+     that empties or half-fills the local state reads, here, as the user
+     having deleted their entire training. It is the one operation in this
+     app that is irreversible on every device at once, and it was reached
+     by inference, unattended, on a timer.
+
+     So a push is refused when it would delete more rows than the profile
+     still holds AND that is more than a handful. Both halves matter: the
+     second lets ordinary tidying through (scrapping a day, clearing a few
+     goals) and the first lets a genuinely small profile shrink. What
+     cannot get through is 139 deletions from a state holding five rows,
+     which is what every bug in this file looks like from here.
+
+     It is not a lock. allowOverwrite() — importing a backup, Reset all
+     data — is the user saying "replace what is there" out loud, behind a
+     confirm, and it opens this for exactly one push. And a refusal keeps
+     the marks untouched, so nothing is lost: once a pull has put the
+     profile back, the same push goes through on its own. */
+  if (tombs.length >= SYNC_WIPE_FLOOR && tombs.length > seen.size && !syncWipeOk) {
+    console.error("sync: refusing to delete", tombs.length, "items from a profile holding", seen.size);
+    syncSet(localId, { tooBig, heldPhotos, wipeBlocked: { at: Date.now(), tombs: tombs.length, held: seen.size } });
+    return { ok: false, reason: "wipe-blocked", tombs: tombs.length, held: seen.size };
+  }
+  syncWipeOk = false;                       // spent, whether it was needed or not
+  queue.push(...tombs);
+  syncSet(localId, { tooBig, heldPhotos, wipeBlocked: null });
   if (!queue.length) { syncSet(localId, { lastPushedAt: Date.now() }); return { ok: true, sent: 0, stale: 0, tooBig, heldPhotos }; }
 
   let sent = 0, stale = 0;
@@ -2502,6 +2618,9 @@ async function syncPush(localId) {
          a pull has shown us what the other device had to say */
       if (staleKeys.has(key)) { delete marks[key]; continue; }
       if (b.deleted) delete marks[key];
+      /* and here is where a hash is finally earned: this row was in THIS
+         batch, and this batch came back accepted */
+      else if (pending.has(key)) marks[key] = [pending.get(key), now];
     }
     syncSet(localId, { marks, lastPushedAt: Date.now() });
   }
@@ -2591,6 +2710,12 @@ async function syncNow(localId = activeProfileId()) {
        and one that has just turned read-only must not be pushed to */
     const now = syncFor(localId) || rec;
     const pushed = now.level === "read" ? { ok: true, sent: 0 } : await syncPush(localId);
+    /* a refused wipe is not a sync that worked, and the button must not
+       report one: see the block in syncQuiet for why this one speaks up */
+    if (pushed && pushed.reason === "wipe-blocked") {
+      ui.syncError = T("sync.errWipeBlocked", { tombs: pushed.tombs, held: pushed.held });
+      return { ok: false, pulled, pushed };
+    }
     syncSet(localId, { lastOkAt: Date.now() });
     if (pulled.demoted) syncDemoted(localId);
     return { ok: true, pulled, pushed };
@@ -2753,8 +2878,18 @@ async function syncQuiet(opts) {
     }
     /* what the PULL just learned, not what `rec` said before it: a grant
        moved to read-only between two syncs must not be pushed to */
-    if ((!opts || opts.push !== false) && (syncFor(localId) || rec).level !== "read") await syncPush(localId);
-    ui.syncError = null;
+    let out = null;
+    if ((!opts || opts.push !== false) && (syncFor(localId) || rec).level !== "read") out = await syncPush(localId);
+    /* ── THE ONE FAILURE THIS IS NOT ALLOWED TO SWALLOW ────────────────
+       Everything else in here is deliberately silent: an unattended sync
+       that raises an alert is a phone interrupting a set to say the wifi
+       is bad, and the local log is untouched either way. A refused wipe
+       is the opposite case. It means this device and the account disagree
+       about a whole profile, nothing is going up until that is resolved,
+       and the resolution is one tap the user cannot know to make. */
+    ui.syncError = out && out.reason === "wipe-blocked"
+      ? T("sync.errWipeBlocked", { tombs: out.tombs, held: out.held })
+      : null;
     syncSet(localId, { lastOkAt: Date.now() });
     if (demoted) syncDemoted(localId);
     else if (landed && !syncTyping()) render();

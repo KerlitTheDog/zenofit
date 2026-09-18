@@ -311,6 +311,34 @@ const variantRootId = (ex) => (ex ? (ex.variantOf || ex.id) : null);
 const variantsOf = (id, library) =>
   ((library || (state && state.library) || [])).filter((x) => x.variantOf === id);
 
+/* ── WHICH END OF THE FAMILY CAME FIRST IS AN ACCIDENT ────────────────
+   The base of a family is whichever row happened to exist before there
+   were variations at all, and that is a fact about the order somebody
+   started logging in, not about the movement. Log the one-arm machine for
+   a year and it becomes the base every ordinary pulldown then has to hang
+   off, which reads exactly backwards: the machine is the variation.
+
+   So a row can be attached to another one after the fact (reparentUnder).
+   The stored name is recomposed from the new parent's so it stays the
+   thing exwin-save would have written, which makes it a RENAME, and a
+   rename here is the same cascade it is anywhere else. Its own variations
+   come with it — a family is one level deep, so they re-attach beside it
+   rather than hanging off a row that is no longer a base.
+
+   The short part is what is left of a name once the parent's is taken off
+   the front: "Lat Pulldown (OA machine)" filed under "Lat Pulldown" is an
+   OA machine. It is a first guess, shown in a field before anything is
+   written, never a silent decision. */
+function shortUnder(ex, parentName) {
+  if (!ex) return "";
+  if ((ex.variantName || "").trim()) return ex.variantName.trim();
+  let s = (ex.name || "").trim();
+  const p = (parentName || "").trim();
+  if (p && s.toLowerCase().startsWith(p.toLowerCase())) s = s.slice(p.length).trim();
+  s = s.replace(/^[([{\-–—:·,]+/, "").replace(/[)\]}]+$/, "").trim();
+  return s || (ex.name || "").trim();
+}
+
 /* ── A PHOTO THAT EXISTS SOMEWHERE ELSE ───────────────────────────────
    `imageMissing` is set by sync, on the way UP: a picture too big for the
    wire is left behind so the lift itself can travel (see withoutBigPhoto),
@@ -357,6 +385,17 @@ const exMatches = (ex, q) => {
 const exIsNamed = (ex, q) => {
   const s = String(q || "").trim().toLowerCase();
   return !!s && (ex.name.toLowerCase() === s || exLabelOf(ex).toLowerCase() === s);
+};
+
+/* the same test where all that is to hand is a stored NAME — a dashboard
+   row, a log entry — rather than the library row itself. Same two readings
+   for the same reason: a lift is stored in English and shown translated,
+   and a variation is shown as its parent plus its own short part, so
+   typing "pulldown" has to find "Lat Pulldown · Wide grip" too. */
+const nameMatches = (name, q) => {
+  const s = String(q || "").trim().toLowerCase();
+  return !s || String(name || "").toLowerCase().includes(s) ||
+    exLabel(name).toLowerCase().includes(s);
 };
 
 /* an exercise's label, looked up from the log by its stored name */
@@ -1964,7 +2003,7 @@ function patch(p) { state = { ...state, ...p }; persist(); render(); }
 function closeEverything() {
   ui.workoutSheet = null; ui.entryForm = null; ui.setForm = null; ui.picking = false;
   ui.pickerQ = ""; ui.pickerQuick = null;
-  ui.exWin = null; ui.exWinEdit = false; ui.exWinDraft = null;
+  ui.exWin = null; ui.exWinEdit = false; ui.exWinDraft = null; ui.exWinAttach = null;
   ui.showProfile = false; ui.profileDraft = null; ui.profileLangWas = null;
   ui.showBody = false; ui.bodyForm = null;
   ui.groupSheet = false; ui.groupForm = null;
@@ -3650,7 +3689,7 @@ function importBackup(text) {
 
   /* every open form points at records that no longer exist */
   ui.workoutSheet = null; ui.entryForm = null; ui.setForm = null;
-  ui.bodyForm = null; ui.exWin = null; ui.exWinDraft = null;
+  ui.bodyForm = null; ui.exWin = null; ui.exWinDraft = null; ui.exWinAttach = null;
   ui.presetForm = null; ui.presetView = null; ui.groupForm = null;
   ui.groupSheet = false; ui.timerForm = null; ui.deloadForm = null;
   ui.planResult = null; ui.showBody = false; ui.picking = false;
@@ -3860,6 +3899,10 @@ const ui = {
   exWin: null,          // exercise detail window: {name} for an existing lift, or {isNew:true}
   exWinEdit: false,     // false = read-only view, true = editable
   exWinDraft: null,     // working copy while editing/creating
+  /* filing an existing lift under another one, see reparentUnder:
+     {id, q, parentId, short} — the row being moved, the search box, the
+     base picked for it, and the short name it will wear under that base */
+  exWinAttach: null,
   exHistAll: false,     // its history list is showing every session, not just the recent ones
   bodyForm: null,
   bodyFormWasNew: false,
@@ -3884,6 +3927,7 @@ const ui = {
   libOrder: false,      // …the exercise library is, inside each of its groups
   progSeg: "progress",  // progress | standards, Progress sub-tab
   progressSelected: null,
+  progressQ: "",        // …and the search box over that list of lifts
   /* the strength standards lookup (Progress → Standards). Like the 1RM
      calculator it is a question you ask, not a feed: `std` is the form,
      `stdResult` the last answer, and neither is cleared by changing tab.
@@ -3920,6 +3964,7 @@ function resetTransient() {
   ui.accordions = {};
   ui.progSeg = "progress";
   ui.progressSelected = null;
+  ui.progressQ = "";
   ui.chartView = { main: null, ex: null }; ui.chartSel = { main: null, ex: null }; ui.chartFull = null;
   ui.goalEditing = null;
   ui.volGoalEditing = null;
@@ -4231,6 +4276,33 @@ function flashLogDay() {
   card.classList.add("pb-flash");
 }
 
+/* ── A FOOTER THAT GROWS HAS TO BE MEASURED, NOT GUESSED ──────────────
+   The workout sheet and the entry form both park their save button over a
+   scrolling list, fading the list out under it, and the clearance that list
+   was given underneath was a hand-written 120px. That is right for a footer
+   holding one button and wrong the moment it holds more: the workout sheet
+   adds *Save as preset*, and above that up to two lines saying what is
+   still unlogged — copy that WRAPS, so the number was not merely too small,
+   it was not a fixed number at all. Past 120px the bottom of the list came
+   to rest under the transparent top of that gradient, and the caption
+   printed straight across the timer dials' labels.
+
+   So the clearance is read off the footer. This is content being measured,
+   not the device — applyViewport still owns every dimension that answers to
+   the screen, and the safe-area inset is already inside this height because
+   the footer's own padding carries it. It runs with flashLogDay, after the
+   icons, for the reason stated there: the glyphs are what settle the final
+   heights. A footer that wants clearing declares the list it sits over, so
+   a third screen in this shape is an attribute rather than another guess. */
+const FOOTER_CLEAR = 10;   // breathing room between the last row and the fade
+
+function fitScrollFooters() {
+  app.querySelectorAll("[data-footer-for]").forEach((foot) => {
+    const box = app.querySelector(`[data-scrollkey="${foot.dataset.footerFor}"]`);
+    if (box) box.style.paddingBottom = `${Math.ceil(foot.offsetHeight) + FOOTER_CLEAR}px`;
+  });
+}
+
 function render() {
   /* re-measure the device first. The engine's own listeners normally have
      this done already and the call costs nothing when nothing has changed,
@@ -4367,6 +4439,7 @@ function render() {
   if (ui.setForm) html += renderSetForm(ui.setForm, ui.entryForm ? unitOf(ui.entryForm.f) : unit);
   if (ui.timerForm) html += renderTimerForm(ui.timerForm);
   if (ui.exWin) html += renderExerciseWindow(library);
+  if (ui.exWinAttach) html += renderAttachVariation();
   if (ui.presetForm) html += renderPresetForm();
   if (ui.presetView) html += renderPresetView();
   if (ui.chartFull) html += renderChartFull();
@@ -4397,6 +4470,7 @@ function render() {
 
   /* after the icons, because they are what settles the final heights this
      scroll is measured against */
+  fitScrollFooters();
   if (ui.logJump) flashLogDay();
 
   /* ── play transitions between the old frame and this one ───────────── */
@@ -5383,7 +5457,7 @@ function renderProgress(log, library, goals, badges, settings, unit) {
   if (ui.chartSel.main && !chartData.some((d) => d.e.id === ui.chartSel.main)) ui.chartSel.main = null;
   if (!chartState.line && ui.chartFull === "main") ui.chartFull = null;
 
-  const goalRows = rows.map((r, i) => renderGoalRow(r, unit, i === rows.length - 1, sel === r.name)).join("");
+  const goalRows = progressLiftRows(rows, sel, unit);
 
   const detail = series.length > 0
     ? `<div class="pb-card pb-scroll" data-scrollkey="prog-detail" style="margin-bottom:20px;max-height:210px;overflow-y:auto">
@@ -5405,7 +5479,11 @@ function renderProgress(log, library, goals, badges, settings, unit) {
     </div>
 
     ${sectionTitle(T("prog.yourLifts"))}
-    <div class="pb-card" style="margin-bottom:20px;overflow:hidden">${goalRows}</div>
+    <div style="position:relative;margin-bottom:10px">
+      ${icon("search", 16, 'style="position:absolute;left:12px;top:12px;color:var(--faint)"')}
+      <input class="pb-input" style="padding-left:36px" placeholder="${T("prog.search")}" data-bind="progq" value="${esc(ui.progressQ)}">
+    </div>
+    <div class="pb-card" id="progLifts" style="margin-bottom:20px;overflow:hidden">${goalRows}</div>
 
     ${sectionTitle(T("prog.graph"), `<span style="font-size:11px;color:var(--faint)">${metricLabel(selRow?.kind || DEFAULT_KIND, unit)}</span>`)}
     <div class="pb-card" style="padding:14px 8px 8px;margin-bottom:12px">
@@ -5874,6 +5952,35 @@ function renderChartFull() {
     <div data-linechart="${scope}" data-chartfull="1" style="position:relative;flex:1;min-height:120px;margin:0 8px;touch-action:none"></div>
     <div class="pb-scroll" data-linedetail="${scope}" style="max-height:44%;overflow-y:auto;padding:0 12px calc(18px + var(--pb-sab))">${renderPointDetail(scope)}</div>
   `, "chartFull");
+}
+
+/* ── FINDING A LIFT IN A LIST THAT ONLY GROWS ─────────────────────────
+   Your lifts is every exercise you have ever logged, newest bests and all,
+   and after a year of training that is a screen and a half of scrolling to
+   reach the one you came for. So the same search box the library and the
+   picker have, over the same two readings of a name (nameMatches).
+
+   IT FILTERS THE LIST AND NOTHING ELSE. The selected lift is worked out
+   from the WHOLE list before the filter runs, so typing never moves the
+   graph out from under you, and the dropdown above the graph still offers
+   everything — narrowing a control that owns the selection would leave the
+   lift on screen missing from the only thing that can change it. Tapping a
+   result is what moves the graph, exactly as tapping a row always has. */
+function progressLiftRows(rows, sel, unit) {
+  const shown = rows.filter((r) => nameMatches(r.name, ui.progressQ));
+  if (!shown.length)
+    return `<div style="padding:24px;text-align:center;color:var(--muted);font-size:13px;line-height:1.6">${T("prog.noMatch")}</div>`;
+  return shown.map((r, i) => renderGoalRow(r, unit, i === shown.length - 1, sel === r.name)).join("");
+}
+
+/* the same list rebuilt off state alone, for the keystroke path: handleBind
+   patches this card in place rather than calling render(), which would throw
+   away the field the search is being typed into. */
+function progressLiftsHTML() {
+  const rows = dashboardRows(state.log, state.library, state.goals);
+  const selected = ui.progressSelected;
+  const sel = selected && rows.some((r) => r.name === selected) ? selected : rows[0]?.name || null;
+  return progressLiftRows(rows, sel, state.settings.units);
 }
 
 function renderGoalRow(r, unit, last, active) {
@@ -6939,18 +7046,39 @@ function exWindowProgress(ex, hist) {
    before any of the numbers do.
 
    Shown from the parent AND from every variation, always listing the whole
-   family, so there is no wrong end to come in from. */
+   family, so there is no wrong end to come in from.
+
+   TWO WAYS TO GAIN A FAMILY AND ONE WAY OUT, all three on this panel. Add a
+   variation branches a NEW row off this one. File under another lift takes
+   THIS row, history and all, and puts it under a base that already exists,
+   which is the only answer to a family whose base is simply whichever end
+   somebody started logging first (see reparentUnder). And a row that is
+   already a variation can leave, because a move you cannot undo is a move
+   most people will not make. */
 function exWindowVariations(ex) {
   if (!ex || ex.missing) return "";
   const rootId = variantRootId(ex);
   const root = ex.variantOf ? variantParent(ex) : ex;
   const kids = variantsOf(rootId, state.library);
+  /* nothing to move it under, so the button would only ever say no */
+  const canAttach = state.library.some((x) => !x.variantOf && x.id !== ex.id && x.id !== rootId);
+  const attachBtn = canAttach
+    ? `<button data-action="ex-attach-start" data-id="${esc(ex.id)}" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;font-size:13.5px;margin-top:6px;border-style:dashed;color:var(--steel);border-color:rgba(93,138,168,.45)">
+        ${icon("corner-down-right", 15)} ${T(ex.variantOf ? "ex.moveFamily" : "ex.attachTo")}
+      </button>`
+    : "";
+  const detachBtn = ex.variantOf
+    ? `<button data-action="ex-detach" data-id="${esc(ex.id)}" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;font-size:13.5px;margin-top:6px;color:var(--muted)">
+        ${icon("unlink", 15)} ${T("ex.detach")}
+      </button>`
+    : "";
   if (!kids.length && !ex.variantOf) {
     /* nothing to list yet, so this is just the way in */
-    return `<button data-action="ex-add-variation" data-id="${esc(rootId)}" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;font-size:13.5px;margin-bottom:6px;border-style:dashed;color:var(--gold);border-color:rgba(233,185,73,.45)">
+    return `<button data-action="ex-add-variation" data-id="${esc(rootId)}" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;font-size:13.5px;border-style:dashed;color:var(--gold);border-color:rgba(233,185,73,.45)">
       ${icon("git-branch", 15)} ${T("ex.addVariation")}
     </button>
-    <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:0 2px 18px">${T("ex.variationHint")}</div>`;
+    ${attachBtn}
+    <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:10px 2px 18px">${T("ex.variationHint")}</div>`;
   }
 
   const family = [...(root ? [root] : []), ...kids];
@@ -6973,7 +7101,105 @@ function exWindowVariations(ex) {
     <button data-action="ex-add-variation" data-id="${esc(rootId)}" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;font-size:13.5px;border-style:dashed;color:var(--gold);border-color:rgba(233,185,73,.45)">
       ${icon("git-branch", 15)} ${T("ex.addVariation")}
     </button>
-    <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:8px 2px 18px">${T("ex.variationHistoryNote")}</div>`;
+    ${attachBtn}
+    ${detachBtn}
+    <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:10px 2px 18px">${T("ex.variationHistoryNote")}</div>`;
+}
+
+/* ── PICKING THE LIFT THIS ONE BELONGS UNDER ──────────────────────────
+   Two steps in one window, because they are two different questions and
+   answering the second well needs the first one answered.
+
+   WHICH LIFT: only BASES are offered. A variation is never a parent (a
+   family is one level deep), and this row and its own root are left out
+   because neither is a move. The list is searched the same way every other
+   exercise list in the app is, over both readings of a name.
+
+   WHAT TO CALL IT: the short part it will wear under that base, guessed by
+   shortUnder and shown in a field rather than applied quietly, because the
+   guess is arithmetic on a string and the person reading it knows what the
+   lift is. The line under it spells out the whole move — the new label, and
+   what happens to the variations coming along — before anything is
+   written, since this renames rows the log points at. */
+function attachBasesHTML() {
+  const a = ui.exWinAttach;
+  const ex = a && state.library.find((x) => x.id === a.id);
+  if (!ex) return "";
+  const bases = state.library
+    .filter((x) => !x.variantOf && x.id !== ex.id && x.id !== variantRootId(ex))
+    .filter((x) => exMatches(x, a.q));
+  if (!bases.length)
+    return `<div class="pb-card" style="padding:24px;text-align:center;color:var(--muted);font-size:13px;line-height:1.6">${T("ex.attachNoMatch")}</div>`;
+  return `<div class="pb-card" style="overflow:hidden">
+    ${bases.map((x, i, arr) => {
+      const n = variantsOf(x.id, state.library).length;
+      return `<button data-action="ex-attach-pick" data-id="${esc(x.id)}" style="width:100%;display:flex;align-items:center;gap:10px;padding:12px 14px;text-align:left;color:var(--text);border-bottom:${i < arr.length - 1 ? "1px solid var(--border-soft)" : "none"}">
+        <span style="width:8px;height:8px;border-radius:4px;flex-shrink:0;background:${colorFor(x.muscle)}"></span>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(exLabelOf(x))}</div>
+          <div style="font-size:11.5px;color:var(--faint)">${esc(groupLabel(x.muscle))}${n ? " · " + TN("variation", n) : ""}</div>
+        </div>
+        ${icon("chevron-right", 15, 'style="color:var(--faint);flex-shrink:0"')}
+      </button>`;
+    }).join("")}
+  </div>`;
+}
+
+function renderAttachVariation() {
+  const a = ui.exWinAttach;
+  if (!a) return "";
+  const ex = state.library.find((x) => x.id === a.id);
+  if (!ex) return "";
+  const root = a.parentId ? state.library.find((x) => x.id === a.parentId) : null;
+
+  if (!root) {
+    return fullScreen(100, `
+      <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px;border-bottom:1px solid var(--border-soft)">
+        <button data-action="ex-attach-close" style="color:var(--muted);padding:4px">${icon("arrow-left", 21)}</button>
+        <div style="flex:1;min-width:0">
+          <div class="pb-num" style="font-size:17px;font-weight:700;line-height:1.15">${T("ex.attachTitle")}</div>
+          <div style="font-size:11.5px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(exLabelOf(ex))}</div>
+        </div>
+      </div>
+      <div style="padding:12px 16px 0">
+        <div style="position:relative">
+          ${icon("search", 16, 'style="position:absolute;left:12px;top:12px;color:var(--faint)"')}
+          <input class="pb-input" style="padding-left:36px" placeholder="${T("ex.attachSearch")}" data-bind="attachq" value="${esc(a.q)}" data-autofocus>
+        </div>
+      </div>
+      <div class="pb-scroll" data-scrollkey="attachPick" style="flex:1;overflow-y:auto;padding:12px 16px calc(30px + var(--pb-sab))">
+        <div id="attachList">${attachBasesHTML()}</div>
+        <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:12px 2px 0">${T("ex.attachHint")}</div>
+      </div>
+    `, "exWinAttach");
+  }
+
+  const short = (a.short || "").trim();
+  const followers = variantsOf(ex.id, state.library);
+  const ok = !!short;
+  return fullScreen(100, `
+    <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px;border-bottom:1px solid var(--border-soft)">
+      <button data-action="ex-attach-back" style="color:var(--muted);padding:4px">${icon("arrow-left", 21)}</button>
+      <div class="pb-num" style="font-size:17px;font-weight:700;flex:1;min-width:0">${T("ex.attachTitle")}</div>
+      <button data-action="ex-attach-save" id="attachSaveBtn" class="pb-btn pb-gold" style="padding:8px 16px;font-size:13.5px;opacity:${ok ? 1 : 0.45}" ${ok ? "" : "disabled"}>${icon("check", 15)} ${T("common.save")}</button>
+    </div>
+    <div class="pb-scroll" data-scrollkey="attachName" style="flex:1;overflow-y:auto;padding:16px 16px calc(40px + var(--pb-sab))">
+      ${sectionTitle(T("ex.variationOf", { name: esc(exLabelOf(root)) }))}
+      ${field(T("ex.variationName"), `<input class="pb-input" data-bind="attach.short" value="${esc(a.short || "")}" placeholder="${esc(T("ex.variationPlaceholder"))}" data-autofocus>`, T("ex.variationNameHint"))}
+      <div class="pb-card" style="padding:13px 14px;margin-bottom:10px">
+        <div class="pb-label" style="margin-bottom:6px">${T("ex.attachPreview")}</div>
+        <div id="attachPreview" style="font-weight:700;font-size:15px">${esc(exLabelOf(root))} · ${esc(short || T("ex.variationName"))}</div>
+        ${followers.length ? `<div style="font-size:12px;color:var(--muted);line-height:1.5;margin-top:8px">
+          ${T("ex.attachCarries", { n: TN("variation", followers.length) })}
+          <div style="margin-top:6px">${followers.map((k) => `<div style="display:flex;align-items:center;gap:7px;padding:2px 0;font-size:12.5px;color:var(--text)">
+            ${icon("corner-down-right", 12, 'style="color:var(--faint);flex-shrink:0"')}
+            <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(exLabelOf(root))} · ${esc(shortUnder(k, ex.name))}</span>
+          </div>`).join("")}</div>
+        </div>` : ""}
+      </div>
+      <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 2px 18px">${T("ex.attachNote")}</div>
+    </div>
+  `, "exWinAttach");
 }
 
 /* ── the ledger under the graph ───────────────────────────────────────
@@ -7218,6 +7444,10 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
       ${planning && draft.planId ? `<button data-action="plan-delete" data-id="${esc(draft.planId)}" title="${T("plan.deletePlan")}" style="color:var(--red);padding:4px">${icon("trash-2", 19)}</button>` : ""}
     </div>
 
+    ${/* the bottom padding here is only what the first paint uses: fitScrollFooters
+         measures the real footer and writes the clearance over it, so don't tune
+         this number when the footer grows a line, and don't remove the footer's
+         data-footer-for either. */""}
     <div class="pb-scroll" data-scrollkey="worksheet" style="flex:1;overflow-y:auto;padding:14px 16px calc(120px + var(--pb-sab))">
       ${planning ? `<div style="display:flex;gap:10px">
         <div style="flex:1.2">${field(T("wo.date"), `<input type="date" class="pb-input" data-bind="draft.date" value="${esc(draft.date)}">`)}</div>
@@ -7238,7 +7468,7 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
       ${planning ? "" : renderTimerList()}
     </div>
 
-    <div style="position:absolute;bottom:0;left:0;right:0;padding:12px 16px calc(18px + var(--pb-sab));background:linear-gradient(transparent, var(--bg) 30%)">
+    <div data-footer-for="worksheet" style="position:absolute;bottom:0;left:0;right:0;padding:12px 16px calc(18px + var(--pb-sab));background:linear-gradient(transparent, var(--bg) 30%)">
       ${!planning && emptyCount ? `<div style="font-size:11.5px;color:var(--faint);text-align:center;margin-bottom:8px;line-height:1.45">${emptyCount === 1 ? T("wo.stillNeedOne") : T("wo.stillNeed", { n: TN("exercise", emptyCount) })}</div>` : ""}
       ${planning && draft.entries.length ? `<div style="font-size:11.5px;color:var(--faint);text-align:center;margin-bottom:8px;line-height:1.45">${T("plan.footNote")}</div>` : ""}
       ${!planning && !draft.editing && draft.entries.length ? `<div style="font-size:11.5px;color:var(--faint);text-align:center;margin-bottom:8px;line-height:1.45">${T("wo.draftNote")}</div>` : ""}
@@ -7959,6 +8189,7 @@ function renderEntryFields(form, unit) {
       <button data-action="delete-entry-form" style="color:var(--red);padding:6px">${icon("trash-2", 18)}</button>
     </div>
 
+    ${/* first-paint clearance only; fitScrollFooters measures the footer below */""}
     <div class="pb-scroll" data-scrollkey="entryform" style="flex:1;overflow-y:auto;padding:10px 16px calc(120px + var(--pb-sab))">
       ${!isDraft ? field("Date", `<input type="date" class="pb-input" data-bind="entry.date" value="${esc(f.date)}">`) : ""}
       ${convert}
@@ -7989,7 +8220,7 @@ function renderEntryFields(form, unit) {
       ${planning ? "" : renderTimerList()}
     </div>
 
-    <div style="position:absolute;bottom:0;left:0;right:0;padding:12px 16px calc(18px + var(--pb-sab));background:linear-gradient(transparent, var(--bg) 30%)">
+    <div data-footer-for="entryform" style="position:absolute;bottom:0;left:0;right:0;padding:12px 16px calc(18px + var(--pb-sab));background:linear-gradient(transparent, var(--bg) 30%)">
       <button id="entrySaveBtn" data-action="save-entry-form" ${valid ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:15px 0;font-size:16px;opacity:${valid ? 1 : 0.45}">
         ${icon(lineUp ? "clock" : "check", 18)} ${planning ? T("plan.addToPlan")
           : lineUp ? T("entry.lineUp")
@@ -10136,9 +10367,32 @@ const planResultOf = (draft, sum) => ({
 
    Plan-linked blanks are deliberately NOT in here. prunePlans already
    leaves those on the plan and edit-day hydrates them from there, so
-   storing them twice would deal the same lift into the sheet twice. */
+   storing them twice would deal the same lift into the sheet twice.
+
+   NEITHER IS A LIFT THE DAY ALREADY HAS A ROW FOR. "Waiting" means still
+   outstanding, and a blank Hack Squat beside the Hack Squat you logged is
+   not outstanding, it is the same lift twice: edit-day deals the logged row
+   into the sheet anyway, so the waiting twin can only ever arrive as a
+   duplicate card under a lift the day says you did. Deleting the twin and
+   backing out without saving used to leave it exactly where it was — right,
+   as a rule about unsaved edits, and wrong here, because there was nothing
+   left for it to be waiting on. So the rule is not about who pressed save:
+   stillOutstanding drops it on the way OUT of the store as well as on the
+   way in, which is what makes a day saved before any of this open clean. */
+const stillOutstanding = (entries, logged) =>
+  logged.size ? entries.filter((e) => !logged.has(e.exercise)) : entries;
+
+/* every lift the day has a row for, filled in or not: a not-done row is
+   still a row in the sheet, and a second blank beside it is still a
+   duplicate. See entryOnRecord for why the log holds rows with no
+   numbers on them. */
+const loggedNamesOn = (date) =>
+  new Set(state.log.filter((e) => e.date === date).map((e) => e.exercise));
+
 const unloggedOn = (date) =>
-  ((state.unlogged || []).find((u) => u.date === date) || {}).entries || [];
+  stillOutstanding(
+    ((state.unlogged || []).find((u) => u.date === date) || {}).entries || [],
+    loggedNamesOn(date));
 
 /* The whole list with one date's waiting lifts replaced, or that date dropped
    out of it entirely when nothing is left waiting. `alsoDrop` is the date a
@@ -10181,7 +10435,12 @@ function commitWorkout(draft) {
      the way in, so what it holds now is the whole answer, scraps included. */
   const already = draft.editing ? [] : unloggedOn(draft.date);
   const named = new Set(waiting.map((e) => e.exercise));
-  const stillWaiting = [...waiting, ...already.filter((e) => !named.has(e.exercise))];
+  /* …and nothing waits on a lift this save is putting ON the day. The rows
+     about to be written are not in state.log yet, so unloggedOn cannot see
+     them and the same rule is applied here against the sheet's own answer. */
+  const stillWaiting = stillOutstanding(
+    [...waiting, ...already.filter((e) => !named.has(e.exercise))],
+    new Set(filled.map((e) => e.exercise)));
   /* …unless the day has just been emptied out, which is its owner saying it
      did not happen after all: with no row left in the log there is no day to
      reopen, and so nothing for these to be waiting on. */
@@ -10221,6 +10480,105 @@ function commitWorkout(draft) {
     plans,
     unlogged,
   });
+}
+
+/* ── RENAMING AN EXERCISE IS A CASCADE, IN ONE PLACE ──────────────────
+   The stored name IS the identity: the log, the plans, the parked days,
+   the lifts waiting on a saved day, the presets and the goals all point at
+   a lift by name, as do the sheet and the entry form that may be open
+   right now. Writing a new name into the library alone leaves every one of
+   them aimed at a lift that no longer exists — the session still renders
+   in the day, and opening it finds nothing to edit.
+
+   So the sweep lives here and nowhere else, and anything added later that
+   stores an exercise name is added HERE rather than at each call site.
+   It folds into a patch object instead of committing, because re-parenting
+   a family renames several rows in one go and each has to read what the
+   one before it left behind. */
+function renameExerciseIn(p, from, to) {
+  if (!from || !to || from === to) return p;
+  const swap = (e) => (e.exercise === from ? { ...e, exercise: to } : e);
+  p.log = (p.log || state.log).map(swap);
+  p.plans = (p.plans || state.plans || []).map((pl) => ({ ...pl, entries: (pl.entries || []).map(swap) }));
+  p.dayDrafts = (p.dayDrafts || state.dayDrafts || []).map((d) => ({ ...d, entries: (d.entries || []).map(swap) }));
+  p.unlogged = (p.unlogged || state.unlogged || []).map((u) => ({ ...u, entries: (u.entries || []).map(swap) }));
+  p.presets = (p.presets || state.presets || []).map((pr) => ({ ...pr, exercises: (pr.exercises || []).map(swap) }));
+  const goals = p.goals || state.goals;
+  if (goals && goals[from] != null) {
+    const g = { ...goals };
+    g[to] = g[from]; delete g[from];
+    p.goals = g;
+  }
+  /* whatever is open right now points at it too, and an unsaved day is
+     not on record yet for the sweep above to have reached */
+  if (ui.workoutSheet) ui.workoutSheet.entries = (ui.workoutSheet.entries || []).map(swap);
+  if (ui.entryForm) ui.entryForm.f = swap(ui.entryForm.f);
+  if (ui.progressSelected === from) ui.progressSelected = to;
+  return p;
+}
+
+/* ── FILING A LIFT UNDER ANOTHER ONE, AFTER THE FACT ──────────────────
+   See the VARIATIONS block at the top of the file for why the base of a
+   family is an accident of what was logged first, and shortUnder for where
+   the short name comes from.
+
+   Two things travel with the move and neither is optional. The row's own
+   VARIATIONS come with it, re-attached to the new base beside it, since a
+   family is one level deep and leaving them pointing at a row that is now
+   itself a variation would build the tree of grips nobody wants. And every
+   moved row's STORED NAME is recomposed from the new parent's, which is a
+   rename and goes through the cascade above — except where that name is
+   already taken, where the row keeps the one it has: a unique name it
+   already answers to is worth more than a tidy one, and two rows under a
+   single name is the desync the clash check exists to prevent.
+
+   Passing a null parent is the other direction: the row stops being a
+   variation and goes back to being a lift of its own, under the name it is
+   already wearing, which is exactly what deleting a parent has always done
+   to the variations it leaves behind.
+
+   It hands back a patch rather than committing one, because patch() renders
+   and the window this is called from is looking at the row by its OLD name:
+   commit in the middle and one frame is drawn hunting for a lift that has
+   just been renamed out from under it. The caller points the window at the
+   name that comes back, then writes. */
+function reparentUnder(exId, parentId, shortTyped) {
+  const ex = state.library.find((x) => x.id === exId);
+  if (!ex) return null;
+
+  if (!parentId) {
+    if (!ex.variantOf) return null;
+    return { p: { library: state.library.map((x) => (x.id === ex.id
+      ? { ...x, variantOf: undefined, variantName: undefined } : x)) }, name: ex.name };
+  }
+
+  const parent = state.library.find((x) => x.id === parentId);
+  /* a variation is never a parent: picking one files the row under its root,
+     beside it, which is the rule exLabelOf and ex-add-variation already keep */
+  const root = parent && parent.variantOf ? variantParent(parent) : parent;
+  if (!root || root.id === ex.id) return null;
+
+  const moving = [
+    { row: ex, short: (shortTyped || "").trim() || shortUnder(ex, root.name) },
+    ...variantsOf(ex.id, state.library).map((k) => ({ row: k, short: shortUnder(k, ex.name) })),
+  ];
+  const ids = new Set(moving.map((m) => m.row.id));
+  const taken = new Set(state.library.filter((x) => !ids.has(x.id)).map((x) => x.name.toLowerCase()));
+
+  const p = {};
+  let lib = state.library;
+  let landed = ex.name;
+  for (const m of moving) {
+    const want = `${root.name} (${m.short})`.trim();
+    const name = taken.has(want.toLowerCase()) ? m.row.name : want;
+    taken.add(name.toLowerCase());
+    if (name !== m.row.name) renameExerciseIn(p, m.row.name, name);
+    if (m.row.id === ex.id) landed = name;
+    lib = lib.map((x) => (x.id === m.row.id
+      ? { ...x, name, variantOf: root.id, variantName: m.short } : x));
+  }
+  p.library = lib;
+  return { p, name: landed };
 }
 
 
@@ -11267,6 +11625,55 @@ const actions = {
     ui.exWinDraft = { id: uid(), name: "", muscle: "", equipment: "", alternatives: "", note: "", image: "", video: "", custom: true };
     ui.exWin = { isNew: true }; ui.exWinEdit = true; render();
   },
+
+  /* ── moving a lift into somebody else's family ─────────────────────
+     The other half of ex-add-variation: that one branches a NEW row off a
+     lift, this one takes a lift that already exists, with a year of
+     sessions behind it, and files it under another. See reparentUnder. */
+  "ex-attach-start": (el) => {
+    const ex = state.library.find((x) => x.id === el.dataset.id);
+    if (!ex) return;
+    ui.exWinAttach = { id: ex.id, q: "", parentId: null, short: "" };
+    render();
+  },
+  "ex-attach-close": () => { ui.exWinAttach = null; render(); },
+  /* picking a parent does not move anything: it fills in the name the row
+     will wear and shows it, because the guess is a guess and this is the
+     one moment anybody can correct it */
+  "ex-attach-pick": (el) => {
+    const a = ui.exWinAttach;
+    if (!a) return;
+    const ex = state.library.find((x) => x.id === a.id);
+    const root = state.library.find((x) => x.id === el.dataset.id);
+    if (!ex || !root) return;
+    a.parentId = root.id;
+    a.short = shortUnder(ex, root.name);
+    render();
+  },
+  "ex-attach-back": () => {
+    if (!ui.exWinAttach) return;
+    ui.exWinAttach.parentId = null; ui.exWinAttach.short = "";
+    render();
+  },
+  "ex-attach-save": () => {
+    const a = ui.exWinAttach;
+    if (!a || !a.parentId || !(a.short || "").trim()) return;
+    const res = reparentUnder(a.id, a.parentId, a.short);
+    ui.exWinAttach = null;
+    if (!res) { render(); return; }
+    ui.exWin = { name: res.name }; ui.exWinEdit = false; ui.exWinDraft = null;
+    patch(res.p);
+  },
+  /* out of the family and back to being a lift of its own, keeping the name
+     it already answers to — the same thing deleting a parent does to what it
+     leaves behind, which is why it needs no rename and no confirm: nothing
+     is lost, and doing it again re-files it. */
+  "ex-detach": (el) => {
+    const res = reparentUnder(el.dataset.id, null, "");
+    if (!res) return;
+    ui.exWin = { name: res.name }; ui.exWinEdit = false; ui.exWinDraft = null;
+    patch(res.p);
+  },
   /* open the detail window (read-only). Every "info" button lands here.
      Exercises are keyed by name across the app, so we look up by name. */
   "open-exercise-window": (el) => {
@@ -11332,7 +11739,7 @@ const actions = {
     ui.setForm = null;
     render();
   },
-  "exwin-close": () => { ui.exWin = null; ui.exWinEdit = false; ui.exWinDraft = null; render(); },
+  "exwin-close": () => { ui.exWin = null; ui.exWinEdit = false; ui.exWinDraft = null; ui.exWinAttach = null; render(); },
   "exwin-edit": () => {
     const ex = state.library.find((x) => x.name === ui.exWin.name);
     if (!ex) return;
@@ -11403,24 +11810,7 @@ const actions = {
     const ex = withKind({ ...f, name, muscle }, f.kind);
     const p = { library: orig ? state.library.map((x) => (x.id === ex.id ? ex : x)) : [...state.library, ex] };
 
-    if (was && was !== name) {
-      const swap = (e) => (e.exercise === was ? { ...e, exercise: name } : e);
-      p.log = state.log.map(swap);
-      p.plans = (state.plans || []).map((pl) => ({ ...pl, entries: (pl.entries || []).map(swap) }));
-      p.dayDrafts = (state.dayDrafts || []).map((d) => ({ ...d, entries: (d.entries || []).map(swap) }));
-      p.unlogged = (state.unlogged || []).map((u) => ({ ...u, entries: (u.entries || []).map(swap) }));
-      p.presets = (state.presets || []).map((pr) => ({ ...pr, exercises: (pr.exercises || []).map(swap) }));
-      if (state.goals && state.goals[was] != null) {
-        const g = { ...state.goals };
-        g[name] = g[was]; delete g[was];
-        p.goals = g;
-      }
-      /* whatever is open right now points at it too, and an unsaved day is
-         not on record yet for the sweep above to have reached */
-      if (ui.workoutSheet) ui.workoutSheet.entries = (ui.workoutSheet.entries || []).map(swap);
-      if (ui.entryForm) ui.entryForm.f = swap(ui.entryForm.f);
-      if (ui.progressSelected === was) ui.progressSelected = name;
-    }
+    if (was && was !== name) renameExerciseIn(p, was, name);
 
     ui.exWin = { name }; ui.exWinEdit = false; ui.exWinDraft = null;
     patch(p);
@@ -12030,10 +12420,31 @@ function handleBind(el) {
     ui.libraryQ = v;
     const list = document.getElementById("libList");
     if (list) { list.innerHTML = renderLibraryList(state.library); if (window.lucide) lucide.createIcons(); }
+  } else if (bind === "progq") {
+    ui.progressQ = v;
+    const list = document.getElementById("progLifts");
+    if (list) { list.innerHTML = progressLiftsHTML(); if (window.lucide) lucide.createIcons(); }
   } else if (bind === "pickq") {
     ui.pickerQ = v;
     const list = document.getElementById("pickList");
     if (list) { list.innerHTML = renderPickerList(state.library); if (window.lucide) lucide.createIcons(); }
+  } else if (bind === "attachq") {
+    if (ui.exWinAttach) {
+      ui.exWinAttach.q = v;
+      const list = document.getElementById("attachList");
+      if (list) { list.innerHTML = attachBasesHTML(); if (window.lucide) lucide.createIcons(); }
+    }
+  } else if (bind === "attach.short") {
+    /* the composed label under the field and the Save button both answer to
+       this one string, and neither is worth a full render per keystroke */
+    if (ui.exWinAttach) {
+      ui.exWinAttach.short = v;
+      const prev = document.getElementById("attachPreview");
+      const root = state.library.find((x) => x.id === ui.exWinAttach.parentId);
+      if (prev && root) prev.textContent = `${exLabelOf(root)} · ${v.trim() || T("ex.variationName")}`;
+      const btn = document.getElementById("attachSaveBtn");
+      if (btn) { const ok = !!v.trim(); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
+    }
   } else if (bind === "stdq") {
     ui.stdQ = v;
     const list = document.getElementById("stdPickList");

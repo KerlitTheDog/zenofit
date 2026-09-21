@@ -720,6 +720,50 @@ function linkMarks(list, linked) {
 const dropMarks = (sets) => linkMarks(sets, isDrop);
 const superMarks = (entries) => linkMarks(entries, isSuper);
 
+/* ── WHERE A SET SITS, WHICH IS NOT THE SAME AS ITS NUMBER ────────────
+   Everything that measures today against last time used to match by
+   POSITION: set three against last session's set three. That is right
+   until one of the two is a DROPSET, and then it is not merely wrong, it
+   is wrong in the direction that flatters you. Last week: 8 x 80, 9 x 70,
+   then a drop to 6 x 60. Today: 8 x 80, 9 x 70, 6 x 60 as a third real
+   set. The third rows line up, the app calls it a match, and it is
+   comparing a full set against a burnout set taken at the end of a drop
+   with no rest. A drop is a lighter set done tired, on purpose; it is not
+   the same act as the set that shares its number and it cannot be the bar
+   that one is held to, in either direction.
+
+   So a set is addressed by WHERE IT SITS IN THE ORDER OF EFFORTS instead:
+   `chain` counts the real sets (a drop does not open one), `pos` counts
+   how deep into a drop chain it is, and `chain.pos` is the key the two
+   sessions are matched on. A normal set is always pos 0, so it can only
+   ever meet another normal set; the first drop off your second set is
+   `1.1` and can only ever meet the first drop off last week's second set.
+   Anything with no counterpart is simply UNJUDGED, the same answer the
+   app already gives a fourth set on a day that had three.
+
+   Read upward from the order, exactly as linkMarks reads it, so a mark on
+   the first set means nothing and rearranging the list reshapes the keys
+   rather than leaving a stale id behind. */
+function chainKeys(list) {
+  const out = [];
+  let chain = -1, pos = 0;
+  (list || []).forEach((s, i) => {
+    if (i > 0 && isDrop(s)) pos += 1;
+    else { chain += 1; pos = 0; }
+    out.push(chain + "." + pos);
+  });
+  return out;
+}
+
+/* The key the set at `index` carries — or the one it WOULD carry if it were
+   added now, which is what the two Add buttons need before there is a set
+   to ask about. */
+const chainKeyAt = (list, index, asDrop) => {
+  const rows = (list || []).slice(0, index);
+  rows.push(rows.length === index && index < (list || []).length ? list[index] : { drop: !!asDrop });
+  return chainKeys(rows)[index];
+};
+
 function syncEntry(e) {
   const k = kindOf(e);
   if (!isDetailed(e) || k === "cardio") return e;
@@ -977,6 +1021,10 @@ function outingRows(entries) {
         m: setScore(st, k), drop: i > 0 && isDrop(st) });
     });
   }
+  /* computed on the MERGED list, so two entries of the same lift on one day
+     go on numbering rather than both starting again at chain 0 */
+  const keys = chainKeys(rows);
+  rows.forEach((r, i) => { r.key = keys[i]; });
   let best = null;
   for (const r of rows) if (r.m != null && (best == null || r.m > best.m)) best = r;
   return { rows, note, best };
@@ -1028,11 +1076,15 @@ function lastOuting(f, isDraft) {
    typed into today's log, and it has to be in today's units to mean
    anything. Nothing is written until the set is saved: this is a starting
    point in an editor, not an entry in the log. */
-function openingSetFor(f, isDraft, index) {
+function openingSetFor(f, isDraft, index, asDrop) {
   const eUnit = unitOf(f), k = kindOf(f);
   const last = lastOuting(f, isDraft);
+  /* by chain coordinate, not by row number: a third set opens on last
+     week's third SET, never on the drop that happened to be third in the
+     list, and a drop opens on last week's drop off the same set */
+  const key = chainKeyAt(f.setList, index, asDrop);
   const rows = last ? last.rows.filter((r) => r.kind === k && setHasData(r, k)) : [];
-  const r = rows[index];
+  const r = rows.find((x) => x.key === key);
   if (r) {
     if (k === "bodyweight") return newSet(String(r.reps), "", r.rpe || "");
     if (k === "hold") return newSet("", "", r.rpe || "", String(r.secs));
@@ -1419,10 +1471,12 @@ function lastTimeSets(f, isDraft) {
   const rows = last.rows
     .filter((r) => r.kind === k && setHasData(r, k))
     /* reps and seconds are unitless and pass straight through; only a
-       weight has to be brought into the unit being typed in today */
+       weight has to be brought into the unit being typed in today. `key`
+       rides along because it, not the row number, is what today's sets are
+       matched on: see chainKeys. */
     .map((r) => (k === "strength"
-      ? { reps: +r.reps, weight: weightAs(r.weight, r.unit || eUnit, eUnit) }
-      : { reps: r.reps, secs: r.secs }));
+      ? { key: r.key, reps: +r.reps, weight: weightAs(r.weight, r.unit || eUnit, eUnit) }
+      : { key: r.key, reps: r.reps, secs: r.secs }));
   return rows.length ? { date: last.date, rows } : null;
 }
 
@@ -1436,13 +1490,24 @@ function entryLastResult(f, isDraft) {
   if (!prev) return null;
   const list = f.setList || [];
   const k = kindOf(f);
-  const verdicts = list.map((s, i) => (prev.rows[i] ? setProgress(s, prev.rows[i], k) : null));
+  /* One row of last session per set of this one, matched on chain
+     coordinate, so a drop can only ever answer to a drop. `rows` stays on
+     the result for anything that wants the session itself; `prev` is the
+     part the set list reads, already lined up with `list`. */
+  const byKey = new Map(prev.rows.map((r) => [r.key, r]));
+  const keys = chainKeys(list);
+  const pairs = list.map((s, i) => byKey.get(keys[i]) || null);
+  const verdicts = list.map((s, i) => (pairs[i] ? setProgress(s, pairs[i], k) : null));
   return {
-    date: prev.date, rows: prev.rows, verdicts,
+    date: prev.date, rows: prev.rows, prev: pairs, verdicts,
     beat: verdicts.filter((v) => v === "beat").length,
     hit: verdicts.filter((v) => v === "hit").length,
     under: verdicts.filter((v) => v === "under").length,
-    extra: Math.max(0, list.filter(setHasData).length - prev.rows.length),
+    /* a set with nothing in its place is a bonus, whether that is because
+       the session ran longer or because you dropped where you did not
+       before. (This counted `list.length - prev.rows.length` and passed the
+       INDEX to setHasData as a kind, which read every kind as strength.) */
+    extra: list.filter((x, i) => setHasData(x, k) && !pairs[i]).length,
   };
 }
 
@@ -8163,7 +8228,7 @@ function renderSetList(f, unit, planning, isDraft) {
     const blank = !setHasData(s, k);
     /* a plan outranks last time: it is the thing you decided to do */
     const t = targets[i];
-    const prev = !t && lastRes ? lastRes.rows[i] : null;
+    const prev = !t && lastRes ? lastRes.prev[i] : null;
     const ref = t || prev;
     /* and it is judged by a different rule, because it is a different
        question: setVerdict keeps a plan's two axes, setProgress asks the
@@ -8559,10 +8624,13 @@ function renderEntryFields(form, unit) {
    the best set is how this went wrong in the first place. The card says so
    in a faint line rather than going blank, because a card that silently
    drops its comparison reads like a bug. */
-function lastSetMetric(f, isDraft, index) {
+function lastSetMetric(f, isDraft, index, set) {
   const prev = lastTimeSets(f, isDraft);
   if (!prev) return null;
-  const r = prev.rows[index];
+  /* the same coordinate the set list matches on, so this card and the row
+     behind it can never disagree about what today's set is answering to */
+  const key = chainKeyAt(f.setList, index, set && set.drop);
+  const r = prev.rows.find((x) => x.key === key);
   /* the position existed but the session ended before it: `m` null says
      "nothing to compare with", `ran` says which of the two reasons it is */
   if (!r) return { m: null, date: prev.date, index, ran: false };
@@ -8658,7 +8726,7 @@ function renderSetForm(form, unit) {
      write to the log, and the one control that could change them, the unit
      select, does a full render), and each one otherwise costs a sort of the
      whole log on every character typed into the weight box. */
-  const vsRef = ui.entryForm ? lastSetMetric(ui.entryForm.f, ui.entryForm.isDraft, index) : null;
+  const vsRef = ui.entryForm ? lastSetMetric(ui.entryForm.f, ui.entryForm.isDraft, index, s) : null;
   const bestRef = ui.entryForm ? bestEverMetric(ui.entryForm.f, ui.entryForm.isDraft) : null;
   setRefs = { vs: vsRef, best: bestRef, unit };
   /* One box or two, and never a box for a number this kind does not have.
@@ -12543,14 +12611,14 @@ const actions = {
     ui.setForm = { s: openingSetFor(f, ui.entryForm.isDraft, i), isNew: true, index: i };
     render();
   },
-  /* the same new set as any other, marked as continuing the one above. The
-     positional pre-fill in openingSetFor already does the right thing here:
-     if you dropped last week, last week's drop is what it offers. */
+  /* the same new set as any other, marked as continuing the one above — and
+     it has to SAY so on the way in, or openingSetFor works out the key of a
+     normal set and offers last week's normal set for a drop */
   "add-drop": () => {
     const f = ui.entryForm && ui.entryForm.f;
     if (!f || !isDetailed(f) || !f.setList.length) return;
     const i = f.setList.length;
-    ui.setForm = { s: { ...openingSetFor(f, ui.entryForm.isDraft, i), drop: true }, isNew: true, index: i };
+    ui.setForm = { s: { ...openingSetFor(f, ui.entryForm.isDraft, i, true), drop: true }, isNew: true, index: i };
     render();
   },
   "entry-super-toggle": () => {

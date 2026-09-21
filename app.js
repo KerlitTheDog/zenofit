@@ -612,6 +612,23 @@ const metricLabel = (k, unit) =>
    about CARDIO: a cardio session is minutes × effort and has no sets, so
    it is the one kind that legitimately has no list. */
 
+/* -- A FUNCTION DECLARATION, AND ABOVE ITS FIRST USER, ON PURPOSE -----
+   This lived four thousand lines down as `const uid = () => ...` beside the
+   UI state, which was fine for exactly as long as nothing called it while
+   the file was still being evaluated. `migrate()` then needed one, through
+   `newSet` below -- and `let state = loadState()` runs at module level,
+   ABOVE the old declaration, so every save carrying a row that needed an
+   id hit the const's temporal dead zone: `Cannot access 'uid' before
+   initialization`, thrown inside migrate, caught by readProfileState, and
+   reported to the user as a save that would not open. A whole training
+   history reading as damaged because a helper was declared too far down.
+
+   A `function` is hoisted, so where it sits can never mean that again.
+   Anything else a migration reaches for belongs above this line too. */
+function uid() {
+  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+}
+
 const newSet = (reps = "", weight = "", rpe = "", secs = "") => ({ id: uid(), reps, weight, rpe, secs });
 const isDetailed = (e) => Array.isArray(e && e.setList);
 
@@ -1785,11 +1802,21 @@ function migrate(s) {
       out.sets = has ? 1 : "";
       return out;
     };
-    const crossAll = (list) => (Array.isArray(list) ? list.map(cross) : list);
+    /* ── A MIGRATION CANNOT THROW, AND CANNOT PASS RUBBISH ON ────────
+       Each of these lists is somebody's whole history if it goes wrong, and
+       a migration is the one place in the app with no user watching it and
+       nothing to fall back on: an exception here does not surface as a
+       failed upgrade, it surfaces as "the training saved on this device
+       will not open". So nothing is assumed. A value that is not a list at
+       all, and a row inside one that is not an object, are not recoverable
+       data in any case — every screen in the app reads these as arrays of
+       records — so they are dropped rather than either thrown over or
+       handed onward to a renderer that will trip on them next. */
+    const rows = (list) => (Array.isArray(list) ? list.filter((r) => r && typeof r === "object") : []);
+    const crossAll = (list) => rows(list).map(cross);
     s.log = crossAll(s.log);
-    s.plans = (s.plans || []).map((p) => ({ ...p, entries: crossAll(p.entries) }));
-    s.dayDrafts = (s.dayDrafts || []).map((d) => ({ ...d, entries: crossAll(d.entries) }));
-    s.unlogged = (s.unlogged || []).map((u) => ({ ...u, entries: crossAll(u.entries) }));
+    for (const k of ["plans", "dayDrafts", "unlogged"])
+      s[k] = rows(s[k]).map((r) => ({ ...r, entries: crossAll(r.entries) }));
     if (s.drafts && typeof s.drafts === "object") {
       if (s.drafts.entry && s.drafts.entry.f) s.drafts.entry.f = cross(s.drafts.entry.f);
       if (s.drafts.workout && Array.isArray(s.drafts.workout.entries))
@@ -1903,24 +1930,45 @@ const profileLabel = (p, i) => (p && p.name) || T("profiles.nth", { n: i + 1 });
    Reset all data both lift it (allowOverwrite), because both are the
    user saying "replace what is there", out loud, behind a confirm. What
    is forbidden is the app deciding that quietly on their behalf. */
-let unreadable = null;            // profile id whose stored save will not parse
+let unreadable = null;            // profile id whose stored save will not open
+
+/* ── AND WHICH OF THE TWO WAYS IT DID NOT OPEN ────────────────────────
+   Holding the writes is right for both of them, and telling the user the
+   same sentence about both is not. "damaged" means the stored TEXT is not
+   JSON any more, which is a real loss and a job for Storage check. But a
+   save whose bytes are perfect and whose MIGRATION threw landed in the
+   same catch and wore the same words, and that is the app blaming a
+   person's data for a bug in its own upgrade code — which is exactly what
+   v15 did the day it shipped, over a helper declared too far down the
+   file (see uid). Nothing about the training was wrong; every one of
+   those entries was sitting there intact, being described as damaged.
+
+   So the cause is kept, the writes are still held (a half-migrated state
+   is not something to write back either), and the message says which of
+   the two it is. `console.error` keeps the exception itself, because that
+   names the line and is the only thing that actually fixes it. */
+let unreadableWhy = null;         // "parse" (the bytes) | "migrate" (us)
 
 function readProfileState(id) {
   let raw = null;
   try { raw = localStorage.getItem(stateKeyFor(id)); }
   catch (e) { console.error("profile load failed", e); }
   if (raw) {
+    let parsed, why = "parse";
     try {
-      const loaded = hydrate(JSON.parse(raw));
-      if (unreadable === id) unreadable = null;
+      parsed = JSON.parse(raw);
+      why = "migrate";            // past here the bytes are fine and we are not
+      const loaded = hydrate(parsed);
+      if (unreadable === id) { unreadable = null; unreadableWhy = null; }
       return loaded;
     } catch (e) {
-      console.error("profile unreadable, holding writes", e);
+      console.error("profile unreadable (" + why + "), holding writes", e);
       unreadable = id;
+      unreadableWhy = why;
       return defaultState();
     }
   }
-  if (unreadable === id) unreadable = null;   // nothing there to protect
+  if (unreadable === id) { unreadable = null; unreadableWhy = null; }   // nothing there to protect
   return defaultState();
 }
 
@@ -1957,7 +2005,7 @@ let unreadableWarned = false;
    This is the difference between the app inferring a wipe and the user
    asking for one, which is the whole distinction that block is drawing. */
 function allowOverwrite() {
-  unreadable = null; unreadableWarned = false;
+  unreadable = null; unreadableWhy = null; unreadableWarned = false;
   syncWipeOk = true;                  // declared below; only ever called from a tap
 }
 
@@ -2012,7 +2060,7 @@ function writeNow() {
   if (unreadable === profiles.active) {
     if (!unreadableWarned) {
       unreadableWarned = true;
-      try { alert(T("profiles.unreadable")); } catch { /* no UI here */ }
+      try { alert(T(unreadableWhy === "migrate" ? "profiles.unmigratable" : "profiles.unreadable")); } catch { /* no UI here */ }
     }
     return false;
   }
@@ -3916,13 +3964,12 @@ function applyTheme(theme) {
   document.documentElement.setAttribute("data-theme", theme === "light" ? "light" : "dark");
 }
 
-const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
-
 /* ─────────────────────────── UI STATE ──────────────────────────────── */
 
 const ui = {
   tab: "home",
   logSeg: "history",   // history | calendar
+  timerSeg: "timers",  // timers | stopwatch, the Timer tab's two halves
   /* the day the Log tab has been sent to by a jump from somewhere else, held
      only until the frame that lands on it has scrolled to it, see flashLogDay */
   logJump: null,
@@ -4497,7 +4544,7 @@ function render() {
     ["library", "book-open", T("nav.library")],
   ];
   /* a running timer puts a live dot on its nav icon from anywhere in the app */
-  const timersRunning = (state.timers || []).some((t) => t.endsAt || t.doneAt);
+  const timersRunning = (state.timers || []).some((t) => t.endsAt || t.doneAt) || swRunning();
   html += `<div style="position:absolute;bottom:0;left:0;right:0;background:var(--nav-bg);backdrop-filter:blur(10px);border-top:1px solid var(--border-soft);display:flex;padding:8px 2px calc(14px + var(--pb-sab));z-index:25">`;
   for (const [id, ic, label] of NAV) {
     const active = tab === id;
@@ -4864,17 +4911,12 @@ function renderHome(settings, currentWeek, unit) {
 
 function renderLog(log, library, badges, settings, unit, currentWeek) {
   const seg = ui.logSeg;
-  /* a stopwatch left running two mini tabs away says so on its own tab, or
-     the only way to find out is to go and look */
-  const ticking = swRunning();
-  const segs = [["history", T("log.history")], ["calendar", T("log.calendar")], ["stopwatch", T("log.stopwatch")]].map(([id, label]) =>
-    `<button data-action="log-seg" data-id="${id}" class="pb-btn" style="flex:1;padding:8px 0;font-size:13px;border-radius:8px;gap:5px;background:${seg === id ? "var(--raise)" : "transparent"};color:${seg === id ? "var(--text)" : "var(--muted)"};border:${seg === id ? "1px solid var(--border)" : "1px solid transparent"}">${label}${id === "stopwatch" && ticking ? `<span style="width:6px;height:6px;border-radius:3px;background:var(--gold);flex-shrink:0"></span>` : ""}</button>`).join("");
+  const segs = [["history", T("log.history")], ["calendar", T("log.calendar")]].map(([id, label]) =>
+    `<button data-action="log-seg" data-id="${id}" class="pb-btn" style="flex:1;padding:8px 0;font-size:13px;border-radius:8px;background:${seg === id ? "var(--raise)" : "transparent"};color:${seg === id ? "var(--text)" : "var(--muted)"};border:${seg === id ? "1px solid var(--border)" : "1px solid transparent"}">${label}</button>`).join("");
 
   return `<div class="" style="padding:12px 16px 0">
     <div style="display:flex;background:var(--surface2);border-radius:11px;padding:3px;margin-bottom:14px;border:1px solid var(--border-soft)">${segs}</div>
-    ${seg === "stopwatch" ? renderStopwatch()
-      : seg === "calendar" ? renderCalendarTab(log, library, settings, currentWeek)
-      : renderHistory(log, library, badges, settings, unit)}
+    ${seg === "history" ? renderHistory(log, library, badges, settings, unit) : renderCalendarTab(log, library, settings, currentWeek)}
   </div>`;
 }
 
@@ -9166,12 +9208,30 @@ function timerIdleRow(t, last) {
    lengths the app ships with are ordinary rows you can rename, re-time,
    pin or delete, exactly like the ones you build yourself. Running timers
    float to the top as full dials so the countdown is the first thing you see. */
+/* The Timer tab is two: the countdowns, and the one that counts up. They are
+   the same question asked in opposite directions and belong behind the same
+   icon — a stopwatch filed under the workout log would be a clock kept in
+   the filing cabinet. The running dot sits on whichever one is not in front
+   of you, and on the nav icon, so neither can be left ticking unseen. */
 function renderTimers() {
+  const seg = ui.timerSeg === "stopwatch" ? "stopwatch" : "timers";
+  const running = (state.timers || []).some((t) => t.endsAt || t.doneAt);
+  const segs = [["timers", T("timers.segTimers"), running], ["stopwatch", T("timers.segStopwatch"), swRunning()]]
+    .map(([id, label, dot]) =>
+      `<button data-action="timer-seg" data-id="${id}" class="pb-btn" style="flex:1;padding:8px 0;font-size:13px;border-radius:8px;gap:5px;background:${seg === id ? "var(--raise)" : "transparent"};color:${seg === id ? "var(--text)" : "var(--muted)"};border:${seg === id ? "1px solid var(--border)" : "1px solid transparent"}">${label}${dot && seg !== id ? `<span style="width:6px;height:6px;border-radius:3px;background:var(--gold);flex-shrink:0"></span>` : ""}</button>`).join("");
+
+  return `<div class="" style="padding:12px 16px 0">
+    <div style="display:flex;background:var(--surface2);border-radius:11px;padding:3px;margin-bottom:${seg === "stopwatch" ? 0 : 2}px;border:1px solid var(--border-soft)">${segs}</div>
+    ${seg === "stopwatch" ? `<div style="height:12px"></div>${renderStopwatch()}` : timersBody()}
+  </div>`;
+}
+
+function timersBody() {
   const timers = state.timers || [];
   const active = timers.filter((t) => timerPhase(t) !== "idle");
   const idle = timers.filter((t) => timerPhase(t) === "idle");
 
-  return `<div class="" style="padding:14px 16px 0">
+  return `<div>
     ${active.map(timerActiveCard).join("")}
 
     ${idle.length
@@ -11515,6 +11575,7 @@ const actions = {
     if (card) setAccordion(card, ui.accordions[id]);
     else render();
   },
+  "timer-seg": (el) => { ui.timerSeg = el.dataset.id; render(); },
   "log-seg": (el) => {
     ui.logSeg = el.dataset.id;
     /* opening the tab always lands on now, whichever way "now" is counted */
@@ -12808,7 +12869,7 @@ const actions = {
    synced and a local change to one would be quietly reverted by the next
    pull — the one outcome this whole list exists to prevent.           */
 const READ_OK = new Set([
-  "nav", "fab", "log-seg", "library-seg", "prog-seg", "picker-seg", "lib-filter",
+  "nav", "fab", "log-seg", "timer-seg", "library-seg", "prog-seg", "picker-seg", "lib-filter",
   "cal-day", "cal-next", "cal-prev", "vol-next", "vol-prev", "toggle-accordion",
   "open-exercise-window", "exwin-close", "exwin-cancel", "open-log-day", "log-day",
   "open-picker", "close-picker", "overlay-close", "close-worksheet", "close-entry",

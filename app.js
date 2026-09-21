@@ -596,22 +596,21 @@ const metricLabel = (k, unit) =>
     : T("entry.est1rm", { unit: unit || state.settings.units });
 
 /* ─────────────────────── PER-SET LOGGING ────────────────────────────
-   Every new entry carries a `setList`: one row per set, each with its own
-   reps / weight / RPE. It is the only way the app logs now.
+   Every entry of a set-shaped kind carries a `setList`: one row per set,
+   each with its own reps / weight / RPE. It is the only way the app logs,
+   and — since migration v15 brought the last of the old first-set-best-set
+   rows across — the only shape on record. There is no second way to write
+   a set down and no branch anywhere that reads one.
 
-   A handful of entries on record predate that: they were logged as a
-   total-set count plus the numbers of one top set, and they have no
-   setList. They are left exactly as they were rather than rewritten
-   (guessing four sets out of one would invent history), so `isDetailed`
-   still asks the question and the entry form still offers to convert one
-   on demand.
+   The entry still keeps the four headline fields filled in (sets / reps /
+   weight / rpe), DERIVED from its best set, the one with the highest
+   estimated 1RM: that is what lets weekly volume, PR badges, the dashboard
+   and the charts read the fields they have always read. Nothing is thrown
+   away, the setList stays on the entry.
 
-   Either shape keeps the same four headline fields filled in (sets / reps
-   / weight / rpe). For an entry with a set list those are DERIVED from its
-   best set, the one with the highest estimated 1RM, which is what lets
-   weekly volume, PR badges, the dashboard and the charts all keep reading
-   the fields they always read. Nothing is ever thrown away, the setList
-   stays on the entry. */
+   `isDetailed` survives as the one question worth still asking, and it is
+   about CARDIO: a cardio session is minutes × effort and has no sets, so
+   it is the one kind that legitimately has no list. */
 
 const newSet = (reps = "", weight = "", rpe = "", secs = "") => ({ id: uid(), reps, weight, rpe, secs });
 const isDetailed = (e) => Array.isArray(e && e.setList);
@@ -718,9 +717,7 @@ function syncEntry(e) {
 const entryHasData = (e) => {
   const k = kindOf(e);
   if (k === "cardio") return +e.minutes > 0 && +e.intensity > 0;
-  if (isDetailed(e)) return filledSets(e).length > 0;
-  /* the legacy top-set shape, which only strength entries were ever in */
-  return +e.sets > 0 && setHasData(e, k);
+  return filledSets(e).length > 0;
 };
 
 /* Is this entry already on record somewhere, a row in the open sheet, or a
@@ -736,13 +733,12 @@ const entryOnRecord = (e, isDraft) => isDraft
   ? !!(ui.workoutSheet && ui.workoutSheet.entries.some((x) => x.id === e.id))
   : (state.log || []).some((x) => x.id === e.id);
 
-/* One-line summary of an entry, shared by the history list and the draft cards.
-   "top" for a single logged top set, "best" when it's the pick of a full set
-   list, same number either way, but the word tells you where it came from. */
+/* One-line summary of an entry, shared by the history list and the draft
+   cards: how many sets, and the best of them. */
 function entrySummary(e, unit, withRpe = false) {
   const k = kindOf(e);
   if (k === "cardio") return T("sug.cardioSet", { min: esc(e.minutes), rpe: esc(e.intensity) });
-  const label = T(isDetailed(e) ? "sets.summaryBest" : "sets.summaryTop");
+  const label = T("sets.summaryBest");
   /* always in the unit the set was actually logged in, never converted:
      what you typed is what you read back */
   return `${TN("set", +e.sets || 0)} · ${label} ${setLine(e, k, unitOf(e))}` +
@@ -847,14 +843,11 @@ function entryBest(f) {
   if (!f) return null;
   const k = kindOf(f);
   if (k === "cardio") return cardioScore(+f.minutes, +f.intensity);
-  if (k !== "strength") {
-    const b = isDetailed(f) ? bestSet(filledSets(f), k) : f;
-    return b && setHasData(b, k) ? setScore(b, k) : null;
-  }
+  const b = bestSet(filledSets(f), k);
+  if (!b || !setHasData(b, k)) return null;
   /* strength alone has to be converted, since the bar it is measured
      against is in the default unit */
-  const b = isDetailed(f) ? bestSet(filledSets(f), k) : f;
-  return b && setHasData(b, k) ? metricFor(+b.weight, +b.reps, unitOf(f)) : null;
+  return k === "strength" ? metricFor(+b.weight, +b.reps, unitOf(f)) : setScore(b, k);
 }
 
 /* Rank two ways over the bar by how far each one moves the estimate, and
@@ -939,8 +932,7 @@ function setSuggestion(f, isDraft) {
    which is the rule the rest of the history reads back under.
 
    Takes one DAY'S entries for the lift, because two entries of the same
-   exercise on one day are one session's work. A legacy top-set row says so
-   (`topOf`) rather than passing one set off as the lot.
+   exercise on one day are one session's work.
 
    Shared by "Last time" in the entry form and by the history list in the
    exercise window, since that is one question asked from two places, and
@@ -957,15 +949,16 @@ function outingRows(entries) {
       continue;
     }
     const u = unitOf(e), k = kindOf(e);
-    if (isDetailed(e)) {
-      for (const st of filledSets(e))
-        rows.push({ kind: k, reps: st.reps, weight: st.weight, secs: st.secs, rpe: st.rpe, unit: u, m: setScore(st, k) });
-    } else if (setHasData(e, k)) {
-      /* a top-set row from before per-set logging: one set is all that was
-         ever written down, and saying so beats showing it as if it were the lot */
-      rows.push({ kind: k, reps: e.reps, weight: e.weight, secs: e.secs, rpe: e.rpe, unit: u,
-        m: setScore(e, k), topOf: +e.sets > 0 ? +e.sets : null });
-    }
+    /* `drop` rides along because a dropset is part of WHAT HAPPENED, not a
+       decoration on the editor: the same three sets read as three separate
+       efforts in the history and as one long one in the day they were
+       logged, and only one of those is true. Read upward from the order,
+       exactly as renderSetList reads it, so a set that opened an entry
+       cannot continue the last set of the entry before it. */
+    filledSets(e).forEach((st, i) => {
+      rows.push({ kind: k, reps: st.reps, weight: st.weight, secs: st.secs, rpe: st.rpe, unit: u,
+        m: setScore(st, k), drop: i > 0 && isDrop(st) });
+    });
   }
   let best = null;
   for (const r of rows) if (r.m != null && (best == null || r.m > best.m)) best = r;
@@ -1420,7 +1413,7 @@ function lastTimeSets(f, isDraft) {
    compare with: a plan already answers the question, cardio is not sets, and
    a first outing has no yesterday. */
 function entryLastResult(f, isDraft) {
-  if (!f || f.plan || !isSetKind(kindOf(f)) || !isDetailed(f)) return null;
+  if (!f || f.plan || !isSetKind(kindOf(f))) return null;
   if (!filledSets(f).length) return null;
   const prev = lastTimeSets(f, isDraft);
   if (!prev) return null;
@@ -1536,8 +1529,20 @@ const seedTimers = () =>
     sound: DEFAULT_SOUND, volume: DEFAULT_VOLUME,
   }));
 
+/* A stopwatch is `{startedAt, acc, laps}` and the clock is ARITHMETIC, never
+   a ticking number: `acc` is what was banked by the last pause and
+   `startedAt` is when the current run began, so the reading survives a
+   re-render, a backgrounded tab, and the app being closed and reopened —
+   the same trick `endsAt` plays for the countdown timers, pointed the other
+   way. Nothing is written to disk while it RUNS (a save per frame for a
+   number the paint can work out for itself), only when it starts, stops,
+   takes a lap or is reset. `laps` holds the cumulative reading at each lap,
+   so a split is the difference with the one before it and no lap can ever
+   disagree with the total above it. */
+function newStopwatch() { return { startedAt: null, acc: 0, laps: [] }; }
+
 const defaultState = () => ({
-  version: 14,
+  version: 15,
   /* `sex` is "" until asked, and it is only ever asked by the strength
      standards, whose tables are split male/female. It sits in settings so it
      is remembered and travels in a backup, not because the app wants a
@@ -1551,6 +1556,7 @@ const defaultState = () => ({
   volumeGoals: {},// { [muscleGroup]: target sets per period }, user's own volume target
   presets: [],    // [{id,name,description,pinned,exercises:[{exercise,muscle,kind}],createdAt}]
   timers: seedTimers(), // [{id,name,duration,endsAt,remaining,doneAt,pinned,createdAt}]
+  stopwatch: newStopwatch(), // {startedAt,acc,laps}, the Log tab's third mini tab, see STOPWATCH
   dayDrafts: [],  // [{id,date,entries,savedAt}], workout days you backed out of, see closeWorksheet()
   unlogged: [],   // [{date,entries,savedAt}], lifts left unlogged on a day you DID save, see commitWorkout()
   plans: [],      // [{id,date,name,entries,createdAt}], days you intend to train, see planTargetOf()
@@ -1749,6 +1755,47 @@ function migrate(s) {
       return out;
     });
     s.version = 14;
+  }
+  if (v < 15) {
+    /* ── THE LAST OF FIRST-SET-BEST-SET ─────────────────────────────────
+       v5 took the SETTING away and left the SHAPE: an entry logged in that
+       mode is a total-set count plus the numbers of one top set, with no
+       setList, and every screen that could meet one carried a second branch
+       for it — a second set of form fields, a Convert button, a "top set of
+       4" caption, its own word in the summary line. Ten code paths and eight
+       strings kept alive for a prototype nobody chose and nothing has
+       written to since v5.
+
+       So the shape goes too, and the rows that are in it are brought across
+       rather than left behind: the recorded top set becomes set 1 and the
+       entry is re-derived from it. **The count of sets that were never
+       written down is NOT invented** — four sets of which one was recorded
+       come back as the one that was recorded. That is the same claim the
+       old row made in words ("top set of 4") said as data instead, and it
+       is the only honest way to read it: repeating the top set four times
+       would put three sets in somebody's history that nobody logged.
+
+       Weekly volume for those weeks therefore counts what was recorded
+       rather than what was claimed. Nothing else moves: est. 1RM, PRs and
+       the graph all read the best set, which is the set that came across. */
+    const cross = (e) => {
+      if (!e || kindOf(e) === "cardio" || Array.isArray(e.setList)) return e;
+      const has = +e.reps > 0 || +e.secs > 0;
+      const out = { ...e, setList: has ? [newSet(e.reps, e.weight, e.rpe, e.secs)] : [] };
+      out.sets = has ? 1 : "";
+      return out;
+    };
+    const crossAll = (list) => (Array.isArray(list) ? list.map(cross) : list);
+    s.log = crossAll(s.log);
+    s.plans = (s.plans || []).map((p) => ({ ...p, entries: crossAll(p.entries) }));
+    s.dayDrafts = (s.dayDrafts || []).map((d) => ({ ...d, entries: crossAll(d.entries) }));
+    s.unlogged = (s.unlogged || []).map((u) => ({ ...u, entries: crossAll(u.entries) }));
+    if (s.drafts && typeof s.drafts === "object") {
+      if (s.drafts.entry && s.drafts.entry.f) s.drafts.entry.f = cross(s.drafts.entry.f);
+      if (s.drafts.workout && Array.isArray(s.drafts.workout.entries))
+        s.drafts.workout.entries = crossAll(s.drafts.workout.entries);
+    }
+    s.version = 15;
   }
   return s;
 }
@@ -2009,7 +2056,8 @@ function closeEverything() {
   ui.groupSheet = false; ui.groupForm = null;
   ui.presetForm = null; ui.presetView = null;
   ui.timerForm = null; ui.deloadForm = null; ui.planResult = null;
-  ui.stdPick = false; ui.std = null; ui.stdResult = null;
+  /* `std` is rebuilt from the profile being switched INTO, see stdForm */
+  ui.stdPick = false; ui.std = null; ui.stdResult = null; ui.stdJump = false;
   ui.profilesWin = false; ui.profileForm = null; ui.profileOrder = false;
   /* the sync sheets name a profile by id, so leaving one open across a
      switch would point them at somebody else's */
@@ -2248,6 +2296,21 @@ const syncFor = (localId) => syncAll()[localId] || null;
    profile straight back on its next pass. Everything asking "is this
    profile in the cloud" has to ask for the remoteId, not for the record. */
 const syncLinked = (localId) => { const r = syncFor(localId); return r && r.remoteId ? r : null; };
+/* ── WHICH PROFILES ARE IN THE CLOUD, SAID IN THE LIST ────────────────
+   Sync is per profile and the only place that said so was inside one:
+   open it, rename-sheet, Sharing and sync, read the word, back out, next
+   one. That is four taps to answer a question about the list you were
+   already looking at. The same three states the sync sheet names are
+   drawn on the row instead — and OFF draws nothing at all, because the
+   question people ask is which ones are on, and a column of cloud-off
+   icons answers it by making every row look like it has a setting. */
+function syncState(localId) {
+  const rec = syncLinked(localId);
+  if (!rec) return { icon: null, color: "var(--faint)", label: T("sync.stateOff") };
+  const read = rec.level === "read";
+  return { icon: "cloud", color: read ? "var(--steel)" : "var(--gold)",
+           label: T(read ? "sync.stateRead" : "sync.stateOn") };
+}
 const syncedActive = () => syncFor(activeProfileId());
 /* a read grant: all of it visible, none of it ours to change */
 const syncReadOnly = () => { const r = syncedActive(); return !!(r && r.level === "read"); };
@@ -3935,7 +3998,11 @@ const ui = {
   std: null,            // {slug, sex, bw, bwFrom, mode, lift, liftFromLog, setReps, setWeight}
   stdResult: null,      // the last check, see stdCheck()
   showStorage: false,   // Settings -> Data -> Storage check is open, see renderStorage
-  stdPick: false,       // the standards' own exercise picker is open
+  stdPick: false,       // the standards' own exercise picker is open, or {ex} to link one
+  /* one-shot: the next frame scrolls the rank card into view, set by the
+     shortcut from an exercise's window, which exists to put somebody in
+     front of an answer rather than in front of a filled-in form */
+  stdJump: false,
   stdQ: "",             // …and its search box
   /* the progress graph is an instrument, not a picture: chartView is the
      slice of the series on screen (float index bounds), chartSel the entry
@@ -4267,6 +4334,19 @@ const app = document.getElementById("app");
    the node rather than into the HTML for the same reason, since render()
    rebuilds `#app` wholesale and would replay the flash on every keystroke
    afterwards. */
+/* The rank card, brought to where the eye is. The shortcut's whole promise
+   is one press from a lift to an answer, and an answer that lands below the
+   fold is an answer somebody has to go looking for. Same shape as
+   flashLogDay: the marker is spent on this frame and the class goes on the
+   node rather than into the HTML, or every later keystroke would replay it. */
+function flashStdResult() {
+  ui.stdJump = false;
+  const card = app.querySelector("[data-stdresult]");
+  if (!card) return;
+  card.scrollIntoView({ block: "center" });
+  card.classList.add("pb-flash");
+}
+
 function flashLogDay() {
   const date = ui.logJump;
   ui.logJump = null;
@@ -4433,12 +4513,15 @@ function render() {
   /* overlays */
   if (ui.workoutSheet) html += renderWorkoutSheet(ui.workoutSheet, library, log, settings, unit);
   if (ui.picking) html += renderExercisePicker(library);
-  if (ui.stdPick) html += renderStdPicker();
   if (ui.entryForm) html += renderEntryFields(ui.entryForm, unit);
   /* the set editor speaks the unit of the exercise it belongs to, not the default */
   if (ui.setForm) html += renderSetForm(ui.setForm, ui.entryForm ? unitOf(ui.entryForm.f) : unit);
   if (ui.timerForm) html += renderTimerForm(ui.timerForm);
   if (ui.exWin) html += renderExerciseWindow(library);
+  /* after the exercise window, never before it: the picker is opened from
+     inside that window to tie the lift to a standard, and an overlay drawn
+     first is an overlay drawn underneath */
+  if (ui.stdPick) html += renderStdPicker();
   if (ui.exWinAttach) html += renderAttachVariation();
   if (ui.presetForm) html += renderPresetForm();
   if (ui.presetView) html += renderPresetView();
@@ -4472,6 +4555,7 @@ function render() {
      scroll is measured against */
   fitScrollFooters();
   if (ui.logJump) flashLogDay();
+  if (ui.stdJump) flashStdResult();
 
   /* ── play transitions between the old frame and this one ───────────── */
   const root = app.querySelector(".pb-root");
@@ -4502,6 +4586,7 @@ function render() {
   if (af) af.focus();
 
   paintTimers();   // put the freshly mounted rings/digits at the right position
+  startStopwatchEngine();   // …and pick the stopwatch back up if this frame drew one
   persist();       // every frame is a save point, see snapshotDrafts()
 }
 
@@ -4779,12 +4864,17 @@ function renderHome(settings, currentWeek, unit) {
 
 function renderLog(log, library, badges, settings, unit, currentWeek) {
   const seg = ui.logSeg;
-  const segs = [["history", T("log.history")], ["calendar", T("log.calendar")]].map(([id, label]) =>
-    `<button data-action="log-seg" data-id="${id}" class="pb-btn" style="flex:1;padding:8px 0;font-size:13px;border-radius:8px;background:${seg === id ? "var(--raise)" : "transparent"};color:${seg === id ? "var(--text)" : "var(--muted)"};border:${seg === id ? "1px solid var(--border)" : "1px solid transparent"}">${label}</button>`).join("");
+  /* a stopwatch left running two mini tabs away says so on its own tab, or
+     the only way to find out is to go and look */
+  const ticking = swRunning();
+  const segs = [["history", T("log.history")], ["calendar", T("log.calendar")], ["stopwatch", T("log.stopwatch")]].map(([id, label]) =>
+    `<button data-action="log-seg" data-id="${id}" class="pb-btn" style="flex:1;padding:8px 0;font-size:13px;border-radius:8px;gap:5px;background:${seg === id ? "var(--raise)" : "transparent"};color:${seg === id ? "var(--text)" : "var(--muted)"};border:${seg === id ? "1px solid var(--border)" : "1px solid transparent"}">${label}${id === "stopwatch" && ticking ? `<span style="width:6px;height:6px;border-radius:3px;background:var(--gold);flex-shrink:0"></span>` : ""}</button>`).join("");
 
   return `<div class="" style="padding:12px 16px 0">
     <div style="display:flex;background:var(--surface2);border-radius:11px;padding:3px;margin-bottom:14px;border:1px solid var(--border-soft)">${segs}</div>
-    ${seg === "history" ? renderHistory(log, library, badges, settings, unit) : renderCalendarTab(log, library, settings, currentWeek)}
+    ${seg === "stopwatch" ? renderStopwatch()
+      : seg === "calendar" ? renderCalendarTab(log, library, settings, currentWeek)
+      : renderHistory(log, library, badges, settings, unit)}
   </div>`;
 }
 
@@ -5655,14 +5745,66 @@ function stdCheck(f, unit) {
   };
 }
 
-/* What the log already knows about this lift, offered as a pre-fill. Only the
-   built-ins STD_MATCH ties to this slug count, matched by their stable id, so
-   a built-in the user renamed still resolves, and only their est. 1RM, which
-   is the number these tables are written in. */
+/* ── WHICH STANDARD A LIFT IN YOUR LIBRARY ANSWERS TO ─────────────────
+   `STD_MATCH` ties the app's own built-ins to a slug and can never reach
+   any further: it is keyed by the shipped `default-N` ids, so a custom
+   exercise, a variation, and a built-in somebody rebuilt by hand are all
+   invisible to it — and those are exactly the rows people care most about.
+   Somebody whose whole leg day is custom rows had a standards tab that
+   knew nothing about any of it.
+
+   So the tie can also be made BY HAND, and the manual answer wins. It is
+   stored on the library row (`ex.std`) rather than in a table of its own,
+   which is what makes it per PROFILE without a line of code saying so: a
+   library belongs to one profile, exercises are not shared between them
+   and do not even carry the same names, so a link made in one profile is
+   meaningless in another and never travels to one. It rides along in sync
+   and in a backup because it is part of the row, and needs no collection
+   of its own on the wire.
+
+   `""` is a real answer and means NOT THIS ONE: a built-in that STD_MATCH
+   ties to a lift you do not do it as can be untied, and stays untied. */
+const stdSlugFor = (ex) => {
+  if (!ex) return null;
+  if (typeof ex.std === "string") return ex.std || null;
+  return STD_MATCH[ex.id] || null;
+};
+
+/* ── YOUR BEST SET EVER ON ONE LIFT, IN THE TABLES' OWN TERMS ─────────
+   The single best set on record for THIS row of the library — not the best
+   of everything tied to the same standard — because it is read from that
+   lift's own page and is an answer about that lift.
+
+   Best means the highest estimated 1RM, the same measure `bestSet` and the
+   graph rank by, which is also the number the weight tables are written
+   in: the strongest set is the one that puts you highest, so there is no
+   second opinion to have. A rep-count standard is ranked on reps instead,
+   and reads only a BODYWEIGHT-kind exercise, where the log stores a set as
+   a number of reps and nothing else — a set of reps × weight cannot answer
+   "your best set of pull-ups at bodyweight" and never could. */
+function stdBestSetFor(ex, sEx) {
+  if (!ex || !sEx) return null;
+  const want = sEx.reps ? "bodyweight" : "strength";
+  let best = null;
+  for (const e of state.log || []) {
+    if (e.exercise !== ex.name || kindOf(e) !== want) continue;
+    const u = unitOf(e);
+    for (const s of filledSets(e)) {
+      const m = want === "strength" ? metricFor(+s.weight, +s.reps, u) : setScore(s, want);
+      if (m == null || (best && m <= best.m)) continue;
+      best = { m, reps: s.reps, weight: s.weight, unit: u, date: e.date };
+    }
+  }
+  return best;
+}
+
+/* What the log already knows about this lift, offered as a pre-fill: every
+   library row tied to this slug, by STD_MATCH or by hand, and only their
+   est. 1RM, which is the number these tables are written in. */
 function stdBestFromLog(slug, log, library) {
   const ex = STD_BY_SLUG[slug];
   if (!ex || ex.reps) return null;
-  const names = new Set(library.filter((x) => STD_MATCH[x.id] === slug).map((x) => x.name));
+  const names = new Set(library.filter((x) => stdSlugFor(x) === slug).map((x) => x.name));
   if (!names.size) return null;
   let best = null;
   for (const e of log) {
@@ -5675,26 +5817,57 @@ function stdBestFromLog(slug, log, library) {
   return best;
 }
 
-/* The form is built the first time it is looked at and then left alone, so a
-   number typed over a pre-fill survives every re-render and every trip to
-   another tab. Bodyweight starts at the most recent Body check-in that
-   recorded one: the app already knows what you weigh, and asking again would
-   be asking you to keep a second copy of it. Typing over it is a what-if,
-   not a correction, so it is never written back. */
+/* the most recent Body check-in that recorded a weight, or null */
+const stdLatestBw = () => [...(state.body || [])]
+  .sort((a, b) => (a.date < b.date ? 1 : -1))
+  .find((r) => +decimalize(r.weight) > 0) || null;
+
+/* ── THE FORM REMEMBERS ITSELF, PER PROFILE ──────────────────────────
+   It used to live only in `ui`, which meant every visit started from
+   nothing: pick the lift again, answer the sex question again, type the
+   bodyweight again, and only then ask the question. Nothing about that
+   was a what-if — a person's sex does not change between two checks and
+   their bodyweight barely does — so the form is now kept in
+   `settings.std`, and `ui.std` IS that object rather than a copy of it:
+   every keystroke is therefore already in `state` and the next save writes
+   it, with no second place for the two to drift apart.
+
+   It is per profile because `settings` is, and it is deliberately NOT one
+   of the settings keys that sync (see SYNC_COLLECTIONS): it is the state of
+   a question box, not part of anybody's training.
+
+   ── AND THE BODYWEIGHT IS WHICHEVER IS NEWER ──────────────────────────
+   Two places in the app know what you weigh: this box, and the Body tab.
+   The rule is simply the later of the two. A value that CAME from a
+   check-in always follows the newest check-in, so logging a new one is
+   enough to make every rank current. A value TYPED here is a what-if and
+   holds against check-ins already on record — but a check-in logged on a
+   later day is the newer fact and takes the box back. `bwOn` is the day
+   the figure in the box is true for, which is what lets those two cases be
+   one comparison instead of a special case each. */
 function stdForm() {
   if (!ui.std) {
-    const last = [...(state.body || [])].sort((a, b) => (a.date < b.date ? 1 : -1))
-      .find((r) => +decimalize(r.weight) > 0);
+    const saved = state.settings.std;
     ui.std = {
-      slug: null, sex: state.settings.sex || "",
-      bw: last ? String(last.weight) : "", bwFrom: last ? last.date : null,
+      slug: null, sex: "",
+      bw: "", bwFrom: null, bwOn: null,
       lift: "", liftFromLog: false,
       /* the set route's own two boxes, kept clear of `lift` so that flipping
          the switch is never a decision about a number somebody typed */
       mode: "1rm", setReps: "", setWeight: "",
+      ...(saved && typeof saved === "object" ? saved : {}),
     };
+    /* sex has a home of its own in settings and has done since before this
+       form was remembered; that one stays the record */
+    ui.std.sex = state.settings.sex || "";
+    state.settings.std = ui.std;
   }
-  return ui.std;
+  const f = ui.std;
+  const last = stdLatestBw();
+  if (last && (!f.bw || f.bwFrom != null || !f.bwOn || last.date > f.bwOn)) {
+    f.bw = String(last.weight); f.bwFrom = last.date; f.bwOn = last.date;
+  }
+  return f;
 }
 
 /* one threshold as it is printed. "<1" is the tables' own word for a level
@@ -5807,7 +5980,7 @@ function renderProgStandards(log, library, unit) {
     ${intro}
     ${form}
 
-    <div class="pb-card" style="padding:16px 15px;margin-bottom:16px;border-color:${lvl ? color : "var(--border)"}">
+    <div data-stdresult class="pb-card" style="padding:16px 15px;margin-bottom:16px;border-color:${lvl ? color : "var(--border)"}">
       <div class="pb-label" style="margin-bottom:5px">${T("std.youAre")}</div>
       <div class="pb-num" style="font-size:${lvl ? 34 : 22}px;font-weight:700;line-height:1.05;letter-spacing:.02em;color:${color}">
         ${lvl ? stdLevelLabel(lvl) : T("std.underFirst", { level: stdLevelLabel(STD_LEVELS[0]) })}
@@ -5846,9 +6019,21 @@ function renderProgStandards(log, library, unit) {
    nothing here can be added to, renamed, or filed somewhere else: the
    category headings are the app's own words (T("group.…")) painted in the
    user's group colours, which is what lets a renamed group keep its colour
-   without lending its name to somebody else's list. */
+   without lending its name to somebody else's list.
+
+   It opens for two different questions and the mode is `ui.stdPick`: `true`
+   is "which lift am I asking about", from the standards form itself, and
+   `{ex: "<stored name>"}` is "which standard does THIS lift of mine answer
+   to", from the exercise window. Same list, same search; only where the
+   answer is written down differs. */
+const stdPickFor = () => (ui.stdPick && ui.stdPick.ex) || null;
+
 function renderStdPicker() {
-  return fullScreen(60, `
+  const forName = stdPickFor();
+  const row = forName ? (state.library || []).find((x) => x.name === forName) : null;
+  /* over the exercise window (90) when it was opened from inside one, and
+     at its own quiet height when it was opened from the standards form */
+  return fullScreen(forName ? 100 : 60, `
     <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px">
       <button data-action="std-pick-close" style="color:var(--muted);padding:4px">${icon("arrow-left", 21)}</button>
       <div style="position:relative;flex:1">
@@ -5856,7 +6041,15 @@ function renderStdPicker() {
         <input class="pb-input" style="padding-left:34px" placeholder="${T("std.search")}" data-bind="stdq" value="${esc(ui.stdQ)}" data-autofocus>
       </div>
     </div>
+    ${forName ? `<div style="padding:2px 16px 8px;font-size:11.5px;color:var(--faint);line-height:1.5">
+      ${T("std.linkFor", { name: esc(row ? exLabelOf(row) : exLabel(forName)) })}
+    </div>` : ""}
     <div class="pb-scroll" data-scrollkey="stdPicker" style="flex:1;overflow-y:auto;padding:8px 16px calc(30px + var(--pb-sab))">
+      ${forName ? `<button data-action="std-pick" data-slug="" class="pb-btn pb-ghost" style="width:100%;justify-content:flex-start;gap:9px;padding:12px 13px;margin-bottom:14px;text-align:left;color:${stdSlugFor(row) ? "var(--muted)" : "var(--text)"}">
+        ${icon("link-2-off", 15, 'style="flex-shrink:0"')}
+        <span style="flex:1;min-width:0;font-size:14px">${T("std.linkNone")}</span>
+        ${stdSlugFor(row) ? "" : icon("check", 16, 'style="color:var(--gold);flex-shrink:0"')}
+      </button>` : ""}
       <div id="stdPickList">${renderStdPickerList()}</div>
     </div>
   `, "stdPick");
@@ -5871,7 +6064,10 @@ function renderStdPickerList() {
   if (!match.length)
     return `<div class="pb-card" style="padding:24px;text-align:center;color:var(--muted);font-size:13px;line-height:1.6">${T("std.noMatch")}</div>`;
 
-  const chosen = ui.std && ui.std.slug;
+  const forName = stdPickFor();
+  const chosen = forName
+    ? stdSlugFor((state.library || []).find((x) => x.name === forName))
+    : (ui.std && ui.std.slug);
   return DEFAULT_GROUPS.map((g) => g.name).filter((g) => match.some((e) => e.group === g)).map((g) => `<div style="margin-bottom:14px">
     ${sectionTitle(`<span style="color:${colorFor(g)}">${T("group." + g)}</span>`)}
     <div class="pb-card" style="overflow:hidden">
@@ -5917,7 +6113,7 @@ function renderPointDetail(scope = "main") {
   const e = p.e;
   const eUnit = unitOf(e);
   const ek = kindOf(e);
-  const sets = isDetailed(e) ? filledSets(e) : [];
+  const sets = filledSets(e);
   return `<div class="pb-card2" style="margin:6px 4px 2px;padding:12px 13px">
     <div style="display:flex;align-items:baseline;gap:8px">
       <div style="font-weight:700;font-size:14px;flex:1;min-width:0">${fmtDate(e.date, { weekday: "short", day: "numeric", month: "short", year: "numeric" })}</div>
@@ -5926,7 +6122,16 @@ function renderPointDetail(scope = "main") {
     </div>
     <div style="font-size:12.5px;color:var(--muted);margin-top:3px">${entrySummary(e, eUnit, true)}</div>
     ${sets.length ? `<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:9px">
-      ${sets.map((s, i) => chip(`${i + 1} · ${setLine(s, ek, eUnit)}${s.rpe ? ` @${esc(s.rpe)}` : ""}`)).join("")}
+      ${(() => {
+        const drops = dropMarks(sets);
+        return sets.map((s, i) => {
+          const cont = drops.cont[i];
+          const head = cont
+            ? `<span style="color:var(--steel)" title="${T("sets.dropset")}">${icon("corner-down-right", 10)}</span>`
+            : `${i + 1} ·`;
+          return chip(`${head} ${setLine(s, ek, eUnit)}${s.rpe ? ` @${esc(s.rpe)}` : ""}`, cont ? "var(--steel)" : "");
+        }).join("");
+      })()}
     </div>` : ""}
     ${e.notes
       ? `<div style="font-size:12.5px;color:var(--text);margin-top:9px;line-height:1.5">“${esc(e.notes)}”</div>`
@@ -6980,9 +7185,54 @@ function exWindowViewBody(ex, hist) {
     ${detailField(T("ex.alternatives"), exFieldOf(ex, "alternatives"), T("ex.notFilled"))}
 
     ${exWindowVariations(ex)}
+    ${exWindowStandard(ex)}
     ${exWindowProgress(ex, hist)}
     ${exWindowHistory(hist)}
   `;
+}
+
+/* ── HOW STRONG IS THAT, THOUGH ──────────────────────────────────────
+   The standards tab answers one question about one lift, and getting an
+   answer out of it was five steps: go to Progress, switch segment, find
+   the lift in a list of seventy-one, remember your best set, type it in.
+   Every one of those five is something the app already knows while you are
+   stood on the lift's own page, so from here it is one press.
+
+   What it CANNOT know is which of the seventy-one a lift of yours is, for
+   anything the built-in table does not cover — so that is the one thing
+   this panel asks, once, and remembers on the row (see stdSlugFor). Until
+   it is answered the button is disabled rather than hidden: a control that
+   is not there teaches nothing, and the line under it says which of the two
+   things is missing.
+
+   Disabled is also the honest answer with no sets logged. The standards
+   tab is still there for a set you are only thinking about; this button is
+   about a set you actually did. */
+function exWindowStandard(ex) {
+  if (ex.missing) return "";
+  const slug = stdSlugFor(ex);
+  const sEx = slug ? STD_BY_SLUG[slug] : null;
+  const best = sEx ? stdBestSetFor(ex, sEx) : null;
+  const ready = !!best;
+  const bestLine = !sEx ? T("std.exNoLink")
+    : !best ? T("std.exNoSets")
+    : sEx.reps ? T("std.exBestReps", { n: TN("rep", +best.reps), date: fmtShort(best.date) })
+    : T("std.exBestSet", { reps: esc(best.reps), weight: esc(trimNum(best.weight, 2)), unit: best.unit, date: fmtShort(best.date) });
+
+  return `
+    ${sectionTitle(T("std.exTitle"))}
+    <button data-action="ex-std-check" ${ready ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:14px 0;font-size:15.5px;border-radius:13px;opacity:${ready ? 1 : 0.4}">
+      ${icon("gauge", 17)} ${T("std.exCheck")}
+    </button>
+    <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:8px 2px 10px">${bestLine}</div>
+    <button data-action="ex-std-link" class="pb-btn pb-ghost" style="width:100%;justify-content:flex-start;gap:9px;padding:11px 13px;margin-bottom:18px;text-align:left">
+      ${icon(sEx ? "link-2" : "link-2-off", 15, `style="color:${sEx ? "var(--gold)" : "var(--faint)"};flex-shrink:0"`)}
+      <span style="flex:1;min-width:0">
+        <span class="pb-label" style="display:block;margin-bottom:2px">${T("std.exLinkLabel")}</span>
+        <span style="display:block;font-size:13.5px;font-weight:600;color:${sEx ? "var(--text)" : "var(--faint)"};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${sEx ? esc(stdName(sEx)) : T("std.exLinkNone")}</span>
+      </span>
+      ${icon("chevron-right", 15, 'style="color:var(--faint);flex-shrink:0"')}
+    </button>`;
 }
 
 /* ── the lift's own progress panel ────────────────────────────────────
@@ -7227,13 +7477,22 @@ function exWindowHistory(hist) {
   const rest = hist.sessions.length - shown.length;
 
   const rows = shown.map((ses, i) => {
+    /* chips wrap, so a drop cannot be drawn indented here the way the set
+       list and Last time draw it. It gets the chain's arrow in place of its
+       number and the chain's colour, which is the same sentence in the
+       space a chip has: this one continued the one before it. */
+    const drops = dropMarks(ses.rows);
     const sets = ses.rows.map((r, n) => {
       const rk = r.kind || DEFAULT_KIND;
       const line = rk === "cardio"
         ? T("sug.cardioSet", { min: esc(r.minutes), rpe: esc(r.intensity) })
         : setLine(r, rk, r.unit);
-      const tail = [r.rpe ? `@${esc(r.rpe)}` : "", r.topOf ? T("last.topOf", { n: r.topOf }) : ""].filter(Boolean).join(" · ");
-      return chip(`<span style="color:var(--faint)">${n + 1} ·</span> ${line}${tail ? ` · ${tail}` : ""}`);
+      const tail = r.rpe ? `@${esc(r.rpe)}` : "";
+      const cont = drops.cont[n];
+      const head = cont
+        ? `<span style="color:var(--steel)" title="${T("sets.dropset")}">${icon("corner-down-right", 10)}</span>`
+        : `<span style="color:var(--faint)">${n + 1} ·</span>`;
+      return chip(`${head} ${line}${tail ? ` · ${tail}` : ""}`, cont ? "var(--steel)" : "");
     }).join("");
 
     return `<button data-action="open-log-day" data-date="${esc(ses.date)}" style="width:100%;display:block;text-align:left;padding:11px 12px;color:var(--text);${i ? "border-top:1px solid var(--border-soft)" : ""}">
@@ -7414,8 +7673,7 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
               : empty
               ? (res ? T("plan.toDo", { target: planTargetLine(e.plan, unitOf(e)) })
                 : kindOf(e) === "cardio" ? T("wo.noDataCardio")
-                : isDetailed(e) ? T("wo.noDataSets")
-                : T("wo.noData"))
+                : T("wo.noDataSets"))
               : entrySummary(e, unit)}
           </div>
           ${planning ? "" : planLine}
@@ -8043,18 +8301,23 @@ function renderLastTime(form) {
   const last = lastOuting(f, isDraft);
   if (!last) return "";
 
+  /* the same chain the set list draws, read back: a drop hangs off the set
+     above it rather than standing in the column as another equal set */
+  const drops = dropMarks(last.rows);
+
   const rows = last.rows.map((r, i) => {
     const rk = r.kind || DEFAULT_KIND;
     const line = rk === "cardio"
       ? T("sug.cardioSet", { min: esc(r.minutes), rpe: esc(r.intensity) })
       : setLine(r, rk, r.unit);
     const side = [
-      r.topOf ? T("last.topOf", { n: r.topOf }) : "",
       r.rpe ? `RPE ${esc(r.rpe)}` : "",
       r.m != null && scoreWorthShowing(rk) ? T("sets.score", { n: r.m, unit: metricUnit(rk, r.unit) }) : "",
     ].filter(Boolean).join(" · ");
-    return `<div style="display:flex;align-items:baseline;gap:9px;min-width:0">
-      <span class="pb-num" style="width:13px;flex-shrink:0;text-align:right;font-size:11.5px;color:var(--faint)">${i + 1}</span>
+    const cont = drops.cont[i];
+    return `${drops.head[i] ? `<div style="display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;letter-spacing:.07em;color:var(--steel);margin-left:22px">${icon("chevrons-down", 11)} ${T("sets.dropset")}</div>` : ""}
+    <div style="display:flex;align-items:baseline;gap:9px;min-width:0${cont ? ";margin-left:14px;padding-left:8px;border-left:2px solid var(--steel)" : ""}">
+      <span class="pb-num" style="width:13px;flex-shrink:0;text-align:right;font-size:11.5px;color:var(--faint)">${cont ? icon("corner-down-right", 11, 'style="color:var(--steel)"') : i + 1}</span>
       <span class="pb-num" style="font-size:13.5px;font-weight:600;color:var(--text);white-space:nowrap">${line}</span>
       ${last.rows.length > 1 && r === last.best ? chip(T("sets.best"), "var(--gold)") : ""}
       <span style="flex:1"></span>
@@ -8123,7 +8386,6 @@ function renderPlanTarget(f, unit) {
 function renderEntryFields(form, unit) {
   const { f, isDraft } = form;
   const { cardio, metric, lastMetric, bestMetric, valid, onRecord, lineUp } = entryComputed();
-  const detailed = isDetailed(f);
   const eUnit = unitOf(f);
   /* the form doesn't need a flag of its own: an entry being drafted always
      belongs to the sheet that is open behind it, and that sheet knows
@@ -8156,27 +8418,7 @@ function renderEntryFields(form, unit) {
         <div style="flex:1">${field(T("entry.minutes"), `<input class="pb-input" ${NUM} data-bind="entry.minutes" value="${esc(f.minutes)}" placeholder="—">`)}</div>
         <div style="flex:1">${field(T("entry.intensity"), `<input class="pb-input" ${NUM} data-bind="entry.intensity" value="${esc(f.intensity)}" placeholder="—">`)}</div>
       </div>`
-    : detailed
-    ? renderSetList(f, eUnit, planning, isDraft)
-    : `<div style="display:flex;gap:10px">
-        <div style="flex:1">${field(T("entry.totalSets"), `<input class="pb-input" ${NUM} data-bind="entry.sets" value="${esc(f.sets)}" placeholder="—">`)}</div>
-        <div style="flex:1">${field(T("entry.topReps"), `<input class="pb-input" ${NUM} data-bind="entry.reps" value="${esc(f.reps)}" placeholder="—">`)}</div>
-      </div>
-      <div style="display:flex;gap:10px">
-        <div style="flex:1">${field(labelWith(T("entry.topWeight"), unitSelect(eUnit)), `<input class="pb-input" ${NUM} data-bind="entry.weight" value="${esc(f.weight)}" placeholder="—">`,
-          T("entry.weightHint"))}</div>
-        <div style="flex:1">${field(labelWith(T("entry.rpe")), `<input class="pb-input" ${NUM} data-bind="entry.rpe" value="${esc(f.rpe)}" placeholder="—">`, T("entry.rpeHint"))}</div>
-      </div>`;
-
-  /* Entries logged before per-set logging existed have no setList and are left
-     exactly as they were. This is the opt-in door across: it keeps the recorded
-     top set as set 1 and lets the rest be filled in. */
-  const convert = !cardio && !detailed
-    ? `<button data-action="entry-to-detailed" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;font-size:13.5px;margin-bottom:14px;border-style:dashed;color:var(--gold);border-color:rgba(233,185,73,.45)">
-        ${icon("list-plus", 15)} ${T("entry.convert")}
-      </button>
-      <div style="font-size:11.5px;color:var(--faint);margin:-8px 2px 14px;line-height:1.5">${T("entry.convertHint")}</div>`
-    : "";
+    : renderSetList(f, eUnit, planning, isDraft);
 
   return fullScreen(70, `
     <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 6px">
@@ -8184,7 +8426,7 @@ function renderEntryFields(form, unit) {
       <div style="flex:1">
         <div class="pb-num" style="font-size:18px;font-weight:700;line-height:1.15">${esc(exLabel(f.exercise))}</div>
         <div style="font-size:11.5px;color:var(--faint)">${planning ? T("plan.entrySub")
-          : `${T("kind." + kindOf(f))} · ${T(cardio ? "entry.subCardio" : detailed ? "entry.subSets" : "entry.subTop")}`}</div>
+          : `${T("kind." + kindOf(f))} · ${T(cardio ? "entry.subCardio" : "entry.subSets")}`}</div>
       </div>
       <button data-action="delete-entry-form" style="color:var(--red);padding:6px">${icon("trash-2", 18)}</button>
     </div>
@@ -8192,18 +8434,17 @@ function renderEntryFields(form, unit) {
     ${/* first-paint clearance only; fitScrollFooters measures the footer below */""}
     <div class="pb-scroll" data-scrollkey="entryform" style="flex:1;overflow-y:auto;padding:10px 16px calc(120px + var(--pb-sab))">
       ${!isDraft ? field("Date", `<input type="date" class="pb-input" data-bind="entry.date" value="${esc(f.date)}">`) : ""}
-      ${convert}
       ${f.plan ? renderPlanTarget(f, eUnit) : renderSuggestion(form, unit)}
       ${renderLastTime(form)}
       ${inputs}
       ${superRow}
       ${field(T("entry.notes"), `<textarea class="pb-input" rows="2" data-bind="entry.notes" placeholder="—" style="resize:none">${esc(f.notes)}</textarea>`,
-        detailed ? T("entry.notesHint") : "")}
+        cardio ? "" : T("entry.notesHint"))}
 
       <!-- live computed row: the sheet's Est. 1RM, against last time and against the best ever -->
       <div class="pb-card2" style="padding:12px 14px;display:flex;align-items:flex-end;gap:12px;margin-top:4px">
         <div style="flex:1;min-width:0">
-          <div class="pb-label">${detailed && kindOf(f) === "strength" ? T("entry.bestSet1rm", { unit }) : metricLabel(kindOf(f), unit)}</div>
+          <div class="pb-label">${kindOf(f) === "strength" ? T("entry.bestSet1rm", { unit }) : metricLabel(kindOf(f), unit)}</div>
           <div id="entryMetric" class="pb-num" style="font-size:30px;font-weight:700;color:var(--gold);line-height:1.05">${metric ?? "—"}</div>
         </div>
         <div id="entryBadge" style="flex-shrink:0;display:flex;justify-content:flex-end;gap:15px;text-align:right">
@@ -8213,9 +8454,9 @@ function renderEntryFields(form, unit) {
       ${kindOf(f) === "strength" && eUnit !== unit ? `<div style="font-size:11.5px;color:var(--faint);margin:8px 2px 0;line-height:1.5">
         ${T("entry.converted", { from: eUnit, to: unit })}
       </div>` : ""}
-      ${detailed ? `<div style="font-size:11.5px;color:var(--faint);margin:8px 2px 0;line-height:1.5">
+      ${cardio ? "" : `<div style="font-size:11.5px;color:var(--faint);margin:8px 2px 0;line-height:1.5">
         ${T("entry.highestNote")}
-      </div>` : ""}
+      </div>`}
 
       ${planning ? "" : renderTimerList()}
     </div>
@@ -9072,6 +9313,135 @@ function updateTimerPreview() {
   if (off) off.style.display = vol === 0 ? "inline-flex" : "none";
 }
 
+/* ══════════════════════════ STOPWATCH ══════════════════════════════
+   The Log tab's third mini tab, beside History and Calendar. The timers
+   already in the app all count DOWN to something — a rest, a hold — and
+   there was nothing that counted up, which is what you want for the other
+   half of a session: how long a circuit took, how long the whole workout
+   ran, how long a walk was before anybody decided whether to log it.
+
+   IT WRITES NOTHING TO THE LOG, deliberately, and is the same kind of thing
+   a rest timer is: a tool belonging to the phone rather than a record of
+   training. A number it produces reaches the log only by somebody reading
+   it and typing it in, exactly as the 1RM calculator's does.
+
+   Laps are the one feature past start/stop worth having, and they are a
+   real one: the split is what you are actually timing when you time
+   something repeatedly. Fastest and slowest are marked once there are
+   three, because with two the marks say nothing the two numbers do not. */
+
+const swOf = () => {
+  if (!state.stopwatch || typeof state.stopwatch !== "object" || !Array.isArray(state.stopwatch.laps))
+    state.stopwatch = newStopwatch();
+  return state.stopwatch;
+};
+const swRunning = (w) => !!(w || swOf()).startedAt;
+const swElapsed = (w) => {
+  const s = w || swOf();
+  return (+s.acc || 0) + (s.startedAt ? Date.now() - s.startedAt : 0);
+};
+/* the reading the current lap started from: everything before it is banked */
+const swLapBase = (w) => { const s = w || swOf(); return s.laps.length ? s.laps[s.laps.length - 1] : 0; };
+
+/* Hundredths, because a stopwatch that does not show them is a clock. The
+   minutes field is not padded under an hour, for the same reason fmtClock
+   does not pad it: "7:04.20" is how it is read aloud. */
+function fmtStopwatch(ms) {
+  const t = Math.max(0, Math.floor(ms));
+  const two = (n) => String(n).padStart(2, "0");
+  const cs = Math.floor((t % 1000) / 10), s = Math.floor(t / 1000) % 60;
+  const m = Math.floor(t / 60000) % 60, h = Math.floor(t / 3600000);
+  return `${h ? h + ":" + two(m) : m}:${two(s)}.${two(cs)}`;
+}
+
+/* ── the engine ──────────────────────────────────────────────────────
+   Its own loop rather than a passenger on the 250ms timer engine: at four
+   frames a second the hundredths column would flicker through values it
+   never showed. It paints in place like paintTimers does and for the same
+   reason — a render() per frame would throw away whatever field had the
+   caret — and it stops the moment the digits leave the screen, so a
+   stopwatch left running in the background costs one arithmetic per
+   start/stop and nothing in between. */
+let swRaf = null;
+function paintStopwatch() {
+  const el = document.querySelector("[data-sw-time]");
+  if (!el) return false;                       // not on screen
+  const w = swOf(), now = swElapsed(w);
+  el.textContent = fmtStopwatch(now);
+  const lap = document.querySelector("[data-sw-lap]");
+  if (lap) lap.textContent = fmtStopwatch(now - swLapBase(w));
+  return true;
+}
+function startStopwatchEngine() {
+  if (swRaf != null) return;
+  const tick = () => {
+    /* off screen or stopped: let the loop end rather than idle */
+    if (!swRunning() || !paintStopwatch()) { swRaf = null; return; }
+    swRaf = requestAnimationFrame(tick);
+  };
+  swRaf = requestAnimationFrame(tick);
+}
+
+function renderStopwatch() {
+  const w = swOf();
+  const running = swRunning(w);
+  const now = swElapsed(w);
+  const laps = w.laps;
+  const idle = !running && now === 0;
+
+  /* splits, newest first, which is the end a lap list is read from */
+  const splits = laps.map((t, i) => t - (i ? laps[i - 1] : 0));
+  const marks = splits.length >= 3
+    ? { fast: Math.min(...splits), slow: Math.max(...splits) }
+    : null;
+
+  const lapRows = laps.map((t, i) => {
+    const sp = splits[i];
+    const c = !marks ? "" : sp === marks.fast ? "var(--green)" : sp === marks.slow ? "var(--red)" : "";
+    return `<div style="display:flex;align-items:baseline;gap:10px;padding:9px 13px;border-bottom:${i ? "1px solid var(--border-soft)" : "none"}">
+      <span class="pb-num" style="width:26px;flex-shrink:0;font-size:11.5px;font-weight:700;color:var(--faint)">${i + 1}</span>
+      <span class="pb-num" style="flex:1;font-size:15px;font-weight:700;color:${c || "var(--text)"}">${fmtStopwatch(sp)}</span>
+      ${c ? `<span style="font-size:10px;font-weight:700;letter-spacing:.06em;color:${c}">${T(sp === marks.fast ? "sw.fastest" : "sw.slowest")}</span>` : ""}
+      <span class="pb-num" style="font-size:11.5px;color:var(--faint);flex-shrink:0">${fmtStopwatch(t)}</span>
+    </div>`;
+  }).reverse().join("");
+
+  const btn = (action, label, ic, tone, off) =>
+    `<button data-action="${action}" ${off ? "disabled" : ""} class="pb-btn${tone === "gold" ? " pb-gold" : " pb-ghost"}" style="flex:1;padding:15px 0;font-size:15.5px;border-radius:13px;opacity:${off ? 0.4 : 1}${tone === "red" ? ";color:var(--red);border-color:rgba(208,90,80,.4)" : ""}">
+      ${icon(ic, 17)} ${label}
+    </button>`;
+
+  return `<div>
+    <div class="pb-card" style="padding:22px 16px 18px;margin-bottom:12px;text-align:center">
+      <div data-sw-time class="pb-num" style="font-size:52px;font-weight:700;line-height:1;letter-spacing:.01em;color:${running ? "var(--gold)" : "var(--text)"};font-variant-numeric:tabular-nums">${fmtStopwatch(now)}</div>
+      ${/* the running lap, where the eye already is, so taking a lap does
+            not mean working out what the last one cost */""}
+      <div style="font-size:12.5px;color:var(--faint);margin-top:8px;height:16px">
+        ${laps.length ? `${T("sw.lapN", { n: laps.length + 1 })} · <span data-sw-lap class="pb-num">${fmtStopwatch(now - swLapBase(w))}</span>` : T(running ? "sw.running" : idle ? "sw.ready" : "sw.paused")}
+      </div>
+    </div>
+
+    <div style="display:flex;gap:9px;margin-bottom:14px">
+      ${running
+        ? btn("sw-lap", T("sw.lap"), "flag", "ghost", false)
+        : btn("sw-reset", T("sw.reset"), "rotate-ccw", "red", idle)}
+      ${running
+        ? btn("sw-stop", T("sw.pause"), "pause", "ghost", false)
+        : btn("sw-start", T(idle ? "sw.start" : "sw.resume"), "play", "gold", false)}
+    </div>
+
+    ${laps.length ? `${sectionTitle(T("sw.laps"), `<span style="font-size:11px;color:var(--faint)">${T("sw.avg", { t: fmtStopwatch(laps[laps.length - 1] / laps.length) })}</span>`)}
+      <div class="pb-card" style="overflow:hidden;margin-bottom:12px">${lapRows}</div>`
+      : `<div class="pb-card" style="padding:22px;text-align:center;color:var(--faint);font-size:13px;line-height:1.6">
+          ${icon("flag", 22, 'style="margin:0 auto 9px;display:block"')}
+          ${T("sw.lapsEmpty")}
+        </div>`}
+
+    <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:12px 4px 10px">${T("sw.hint")}</div>
+    <div style="height:10px"></div>
+  </div>`;
+}
+
 /* ─────────────────────────── PROFILE ──────────────────────────────── */
 
 function renderProfile(f) {
@@ -9099,11 +9469,15 @@ function renderProfile(f) {
         })()}
       ${(() => {
         const list = profileList(), i = list.findIndex((p) => p.id === activeProfileId());
+        const sy = syncState(activeProfileId());
         return `<button data-action="open-profiles" class="pb-card" style="width:100%;display:flex;align-items:center;gap:11px;padding:12px 14px;margin-bottom:16px;text-align:left;color:var(--text)">
           ${icon("users", 18, 'style="color:var(--gold);flex-shrink:0"')}
           <span style="flex:1;min-width:0">
             <span class="pb-label" style="display:block;margin-bottom:2px">${T("profiles.title")}</span>
-            <span style="display:block;font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(profileLabel(list[i], i))}</span>
+            <span style="display:flex;align-items:center;gap:6px;min-width:0">
+              <span style="min-width:0;font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(profileLabel(list[i], i))}</span>
+              ${sy.icon ? icon(sy.icon, 13, `style="color:${sy.color};flex-shrink:0" aria-label="${esc(sy.label)}"`) : ""}
+            </span>
           </span>
           <span style="font-size:11.5px;color:var(--faint);flex-shrink:0">${TN("profile", list.length)}</span>
           ${icon("chevron-right", 15, 'style="color:var(--faint);flex-shrink:0"')}
@@ -9211,12 +9585,16 @@ function renderProfilesWindow() {
     : list.map((p, i) => {
       const on = p.id === active;
       const st = stats[p.id] || { days: 0, entries: 0 };
+      const sy = syncState(p.id);
       return `<div style="display:flex;align-items:center;border-bottom:${i < list.length - 1 ? "1px solid var(--border-soft)" : "none"};background:${on ? "rgba(233,185,73,.06)" : "transparent"}">
         <button ${on ? "" : `data-action="profile-switch" data-id="${esc(p.id)}"`} style="flex:1;min-width:0;display:flex;align-items:center;gap:11px;padding:13px 4px 13px 14px;text-align:left;color:var(--text)">
           <span style="width:9px;height:9px;border-radius:5px;flex-shrink:0;background:${on ? "var(--gold)" : "var(--border)"}"></span>
           <span style="flex:1;min-width:0">
-            <span style="display:block;font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(profileLabel(p, i))}</span>
-            <span style="display:block;font-size:11.5px;color:var(--faint)">${on ? T("profiles.current") + " · " : ""}${TN("day", st.days)} · ${TN("logEntry", st.entries)}</span>
+            <span style="display:flex;align-items:center;gap:6px;min-width:0">
+              <span style="min-width:0;font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(profileLabel(p, i))}</span>
+              ${sy.icon ? icon(sy.icon, 13, `style="color:${sy.color};flex-shrink:0" aria-label="${esc(sy.label)}"`) : ""}
+            </span>
+            <span style="display:block;font-size:11.5px;color:var(--faint)">${on ? T("profiles.current") + " · " : ""}${TN("day", st.days)} · ${TN("logEntry", st.entries)}${sy.icon ? ` · <span style="color:${sy.color}">${esc(sy.label)}</span>` : ""}</span>
           </span>
         </button>
         <button data-action="profile-menu" data-id="${esc(p.id)}" title="${T("common.edit")}" style="flex-shrink:0;padding:13px 14px;color:var(--faint);align-self:stretch">${icon("pencil", 16)}</button>
@@ -11367,6 +11745,19 @@ const actions = {
   "std-pick-open": () => { ui.stdQ = ""; ui.stdPick = true; render(); },
   "std-pick-close": () => { ui.stdPick = false; render(); },
   "std-pick": (el) => {
+    /* ── the picker's other question ───────────────────────────────────
+       Opened from an exercise's own window it is asking which standard
+       that lift answers to, and the answer is written on the library row.
+       An empty slug is the deliberate "none of these", which is why it is
+       stored as "" rather than by deleting the field: deleting it would
+       hand the row straight back to STD_MATCH. */
+    const forName = stdPickFor();
+    if (forName) {
+      const slug = el.dataset.slug || "";
+      ui.stdPick = false;
+      patch({ library: state.library.map((x) => (x.name === forName ? { ...x, std: slug } : x)) });
+      return;
+    }
     const f = stdForm();
     f.slug = el.dataset.slug;
     /* offered, never imposed: the field is a plain input over the top of it */
@@ -11604,6 +11995,53 @@ const actions = {
   "dismiss-new": (el) => {
     const name = el.dataset.name;
     patch({ library: state.library.map((x) => (x.name === name ? { ...x, dismissedNew: true } : x)) });
+  },
+
+  /* ── ONE PRESS, FROM A LIFT TO A RANK ─────────────────────────────
+     Everything the standards form would have asked for is already known
+     here, so all of it is filled in and the check is RUN, rather than
+     leaving somebody on a filled-in form with one more button to find.
+
+     The set goes in by the set route, never as a max: the rank then names
+     the set it came from (std.fromSet) and can be checked by hand, where a
+     pre-computed 1RM would have it quoting a number nobody ever lifted.
+
+     The one thing that can still stop it is a profile that has never
+     answered the sex question and has no bodyweight anywhere — stdCheck
+     returns null, the form is left filled in, and the two boxes that are
+     missing are the only two things left to do. */
+  "ex-std-check": () => {
+    const ex = (state.library || []).find((x) => x.name === (ui.exWin && ui.exWin.name));
+    const slug = stdSlugFor(ex);
+    const sEx = slug ? STD_BY_SLUG[slug] : null;
+    const best = sEx ? stdBestSetFor(ex, sEx) : null;
+    if (!best) return;                     // the button is disabled, but never trust that alone
+    const unit = state.settings.units;
+    const f = stdForm();
+    f.slug = slug;
+    if (sEx.reps) {
+      f.mode = "1rm";
+      f.lift = String(best.reps);
+      f.liftFromLog = true;
+    } else {
+      f.mode = "set";
+      /* into the unit the form is read in, at the precision a weight off the
+         log is allowed to claim: see weightAs */
+      f.setReps = String(best.reps);
+      f.setWeight = String(weightAs(best.weight, best.unit, unit));
+      f.lift = ""; f.liftFromLog = false;
+    }
+    ui.stdResult = stdCheck(f, unit);
+    ui.stdJump = !!ui.stdResult;           // land on the answer, not on the form
+    ui.exWin = null; ui.exWinEdit = false; ui.exWinDraft = null; ui.exWinAttach = null;
+    ui.tab = "progress"; ui.progSeg = "standards";
+    render();
+  },
+  "ex-std-link": () => {
+    const name = ui.exWin && ui.exWin.name;
+    if (!name) return;
+    ui.stdQ = ""; ui.stdPick = { ex: name };
+    render();
   },
 
   /* A branch, not a blank: it opens on everything the parent knows (group,
@@ -12019,13 +12457,7 @@ const actions = {
       ui.entryForm.f = { ...f, minutes: d.min, intensity: d.rpe };
       render(); return;
     }
-    if (isDetailed(f)) {
-      ui.setForm = { s: newSet(d.reps || "", d.weight || "", "", d.secs || ""), isNew: true, index: (f.setList || []).length };
-    } else {
-      /* an older top-set entry has no set list to open, so fill its fields,
-         and give it a set count if it hasn't got one yet */
-      ui.entryForm.f = { ...f, reps: d.reps, weight: d.weight, sets: +f.sets > 0 ? f.sets : "1" };
-    }
+    ui.setForm = { s: newSet(d.reps || "", d.weight || "", "", d.secs || ""), isNew: true, index: (f.setList || []).length };
     render();
   },
   /* from the line inside the set editor: fill the set that is already open */
@@ -12102,15 +12534,6 @@ const actions = {
     ui.entryForm.f = syncEntry({ ...f, setList: f.setList.filter((x) => x.id !== el.dataset.id) });
     render();
   },
-  /* one-way, opt-in upgrade of an older single-top-set entry */
-  "entry-to-detailed": () => {
-    const f = ui.entryForm && ui.entryForm.f;
-    if (!f || isDetailed(f) || kindOf(f) !== "strength") return;
-    const seed = +f.reps > 0 && +f.weight > 0 ? [newSet(f.reps, f.weight, f.rpe)] : [];
-    ui.entryForm.f = syncEntry({ ...f, setList: seed });
-    render();
-  },
-
   /* ── timers ───────────────────────────────────────────────────────── */
   /* pinning from the list, the cap is enforced here, once, for every route in */
   "timer-pin": (el) => {
@@ -12223,6 +12646,37 @@ const actions = {
     if (ui.timerToast && ui.timerToast.id === t.id) ui.timerToast = null;
     writeNow(); render();
   },
+  /* ── the stopwatch ────────────────────────────────────────────────
+     Every one of these is a state TRANSITION and writes once; the running
+     clock itself is painted out of `startedAt` and costs no writes at all.
+     `writeNow` rather than `patch`, because the object is mutated in place
+     exactly as the timers' handlers above mutate theirs. */
+  "sw-start": () => {
+    const w = swOf();
+    if (w.startedAt) return;
+    w.startedAt = Date.now();
+    writeNow(); render();
+  },
+  "sw-stop": () => {
+    const w = swOf();
+    if (!w.startedAt) return;
+    w.acc = swElapsed(w); w.startedAt = null;
+    writeNow(); render();
+  },
+  /* A lap banks the reading, so the split under the clock restarts and the
+     total above it does not move: one is the difference of the other. */
+  "sw-lap": () => {
+    const w = swOf();
+    if (!w.startedAt) return;
+    w.laps = [...w.laps, swElapsed(w)];
+    writeNow(); render();
+  },
+  /* No confirm: it holds no record of anything, which is the whole point of
+     it not being in the log. */
+  "sw-reset": () => {
+    state.stopwatch = newStopwatch();
+    writeNow(); render();
+  },
   "toast-dismiss": () => {
     const id = ui.timerToast && ui.timerToast.id;
     const t = (state.timers || []).find((x) => x.id === id);
@@ -12258,9 +12712,8 @@ const actions = {
     const planning = isDraft && !!(ui.workoutSheet && ui.workoutSheet.planning);
     /* drop half-typed placeholder sets and refresh the headline numbers before
        anything leaves the form */
-    const f = syncEntry(isDetailed(ui.entryForm.f)
-      ? { ...ui.entryForm.f, setList: filledSets(ui.entryForm.f) }
-      : ui.entryForm.f);
+    const f0 = ui.entryForm.f;
+    const f = syncEntry(isSetKind(kindOf(f0)) ? { ...f0, setList: filledSets(f0) } : f0);
     const exists = entryOnRecord(f, isDraft);
     /* Nothing is turned away any more. An emptied row already on record goes
        back empty, which is the whole point of unticking it, and a brand-new
@@ -12371,10 +12824,16 @@ const READ_OK = new Set([
   "chart-zoom-in", "chart-zoom-out", "chart-reset", "chart-full", "chart-exit-full", "chart-pick",
   "select-progress", "ex-hist-all", "open-preset", "plan-open", "plan-result-close",
   "calc-run", "std-check", "std-mode", "std-pick", "std-pick-open", "std-pick-close", "std-sex",
+  /* reading a rank is looking; ex-std-link writes to the library and is
+     deliberately not here */
+  "ex-std-check",
   "export-data", "share-data", "dismiss-new", "toast-dismiss", "toast-open",
   "timer-start", "timer-pause", "timer-reset", "timer-sound-test", "timer-add", "timer-edit",
   "timer-save", "timer-delete", "timer-pin", "timer-form-pin", "timer-reorder", "timer-preset",
   "timer-sound",
+  /* the stopwatch is on the same footing as the timers: a tool belonging to
+     the phone, writing nothing that syncs and nothing that is a record */
+  "sw-start", "sw-stop", "sw-lap", "sw-reset",
 ]);
 
 function toastReadOnly() {
@@ -12462,7 +12921,13 @@ function handleBind(el) {
       const ex = STD_BY_SLUG[f.slug];
       setHint("stdLiftHint", ex && ex.reps ? T("std.repsHint") : T("std.liftHint"));
     }
-    if (key === "bw" && f.bwFrom) { f.bwFrom = null; setHint("stdBwHint", ""); }
+    /* A typed bodyweight is true as of TODAY, which is what keeps it from
+       being taken straight back by a check-in already on record while still
+       giving way to one logged after it. See stdForm. */
+    if (key === "bw") {
+      f.bwOn = todayStr();
+      if (f.bwFrom) { f.bwFrom = null; setHint("stdBwHint", ""); }
+    }
     /* the max beside the two set boxes is the whole reason the set route
        exists, so it answers the keystroke rather than waiting for a render */
     if (key === "setReps" || key === "setWeight") {

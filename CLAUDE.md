@@ -4,15 +4,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 # Git workflow
 
-This folder is a git repo connected to https://github.com/KerlitTheDog/zenofit (branch `main`).
+This folder is a git repo connected to https://github.com/KerlitTheDog/zenofit (branch `main`). The backend is a separate deploy: a Cloudflare Worker in `api/`, with its own D1 database.
 
-**Never push automatically. Always ask first.**
+**"Push" means SHIP IT — all of it, with nothing to come back and ask about.** When the user says push (or ship, or deploy), that is the whole release: commit, apply any new D1 migrations to the REMOTE database, deploy the Worker, run the smoke suites against production, and `git push` the front end. Do not stop in the middle of that to confirm the next step, and do not hand back a list of commands for the user to run. They said push; the job is done when the thing is live and verified.
 
-After editing files, stage and commit them if useful, but stop and ask the user before running `git push`. Summarize what's about to go up (which files, what changed) so they can decide. Wait for a clear yes.
+**THE ORDER IS NOT ARBITRARY, and getting it wrong ships a broken app:**
 
-This applies even to small or routine changes, and the user wants a say in what reaches GitHub every time.
+1. `git commit` — local, so a failure below leaves nothing published.
+2. `cd api && npm run migrate` — `wrangler d1 migrations apply zenofit --remote`. **Before the Worker**, because a Worker deployed against a table that does not exist yet is a 500 on every request that touches it.
+3. `npm run deploy` — the Worker.
+4. `python3 test/*.py` — all five suites, against the live API (that is their default target). They create throwaway accounts and profiles in production and leave a few rows behind, which is the accepted trade for testing the real thing; see `api/test/README.md`.
+5. `git push` — **last**, because this is what publishes the front end to GitHub Pages, and the app it publishes calls the endpoints that steps 2 and 3 just put there. Pushing first leaves a window where the live app calls routes that do not exist. This happened once, with chat, and it is the whole reason the order is written down.
 
-Also always ask first for anything destructive to git history (force-push, `rebase`, `reset --hard`), and never force-push over a rejected push.
+Bump `VERSION` in `sw.js` whenever a shell file changes, or the deploy reaches phones on their *second* launch instead of their first (see the update-banner comment in `index.html`).
+
+**What still stops and asks**, because neither is routine shipping:
+
+- Anything destructive to git history — force-push, `rebase`, `reset --hard` — and never force-push over a rejected push.
+- A migration that **destroys** data: a `DROP`, a `DELETE`, or an `ALTER` that loses a column. An additive one (new table, new column, new index) goes up without asking, which is nearly all of them. The distinction is the same one the rest of this file is built on: this app does not quietly overwrite somebody's training.
+
+**What the suites cannot prove, so say so rather than implying it is covered:** push notification DELIVERY. `VAPID_PRIVATE_KEY` is a Wrangler secret and is absent from `wrangler dev`, so neither a local run nor the smoke tests ever send a real push — they exercise the routes around it. A change to the push path (`api/src/push.js`, the `push` handler in `sw.js`, `enablePush`) needs a real phone, installed to the home screen, with the app backgrounded.
 
 Note: this local folder is the source of truth. Editing files directly on the GitHub website risks those edits being overwritten by the next push from here.
 

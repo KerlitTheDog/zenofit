@@ -530,6 +530,12 @@
   const uploadChatPhoto = (threadId, data) =>
     call("POST", "/v1/chats/" + threadId + "/photos", { data });
 
+  /* A photo uploaded for a message that then failed and was discarded:
+     "delete" on the phone has to mean gone from the server too. Refused
+     (409) while a message still shows it -- that is what unsending is for. */
+  const discardChatPhoto = (threadId, photoId) =>
+    call("DELETE", "/v1/chats/" + threadId + "/photos/" + encodeURIComponent(photoId));
+
   const markChatRead = (threadId, at) =>
     call("POST", "/v1/chats/" + threadId + "/read", Number.isFinite(at) ? { at } : {});
 
@@ -556,7 +562,7 @@
     listProfiles, createProfile, renameProfile, deleteProfile, setProfileOrder,
     listSeeds, createSeed, rotateSeeds, revokeSeed, joinWithSeed,
     listGrants, revokeGrant, setGrantLevel, leaveProfile,
-    searchUsers, listChats, openChat, fetchMessages, sendMessage, unsendMessage, uploadChatPhoto,
+    searchUsers, listChats, openChat, fetchMessages, sendMessage, unsendMessage, uploadChatPhoto, discardChatPhoto,
     markChatRead, muteChat, leaveChat, listBlocks, blockUser, unblockUser,
     _call: call,
   };

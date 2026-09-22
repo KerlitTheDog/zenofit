@@ -21,7 +21,7 @@
  */
 
 import { limited } from "./limits.js";
-import { cleanDataUrl, sha256Hex, storePhoto } from "./photos.js";
+import { cleanDataUrl, sha256Hex, storePhoto, setHoldings, msgHolder, payloadPhotoIds, isPhotoId } from "./photos.js";
 
 /* Long enough for anything anybody types into a gym app, short enough that
    a thread is never a payload problem. */
@@ -40,7 +40,7 @@ export const MAX_BODY = 2000;
    message at a photo from somebody else's conversation. Everything else
    about a payload is the app's business, and the app treats one arriving
    from somebody else as data to be escaped, never as markup. */
-export const KINDS = new Set(["text", "image", "exercise", "preset", "workout", "record", "rank"]);
+export const KINDS = new Set(["text", "image", "exercise", "preset", "workout", "plan", "record", "rank"]);
 export const MAX_PAYLOAD = 32 * 1024;
 
 /* A photo sent in a conversation lives in the photo store with its thread
@@ -496,6 +496,15 @@ export async function chatRoute(ctx) {
         throw e;
       }
 
+      /* A card showing a library photo HOLDS it (photos.js): the person it
+         was sent to can still open the card after the sender has deleted
+         the exercise, and the picture has to still be there when they do. */
+      const shown = kind !== "text" && kind !== "image" ? payloadPhotoIds(body.payload) : [];
+      if (shown.length) {
+        try { await setHoldings(env, { [msgHolder(id)]: shown }); }
+        catch (e) { console.error("photo holdings failed; the message is stored", e && e.message ? e.message : e); }
+      }
+
       /* Sending is reading: a message of your own must not come back as
          something you have not seen. */
       await env.DB.batch([
@@ -582,18 +591,49 @@ export async function chatRoute(ctx) {
         ).bind(threadId, threadId),
       ]);
 
+      /* a card lets go of the library photos it was showing */
+      try { await setHoldings(env, { [msgHolder(row.id)]: [] }); }
+      catch (e) { console.error("photo holdings failed; the message is unsent", e && e.message ? e.message : e); }
+
       const pid = row.kind === "image" ? (parsePayload(row.payload) || {}).photo : null;
       if (typeof pid === "string") {
         /* unless another live message in the same thread still shows it,
            which only a retry that landed twice could have produced */
+        /* an exact match on the photo the payload names: D1 refuses a LIKE
+           pattern longer than 50 characters, and a photo id is 64 */
         const still = await env.DB.prepare(
-          "SELECT 1 AS ok FROM chat_messages WHERE thread_id = ? AND deleted = 0 AND kind = 'image' AND payload LIKE ? LIMIT 1"
-        ).bind(threadId, "%" + pid + "%").first();
+          "SELECT 1 AS ok FROM chat_messages WHERE thread_id = ? AND deleted = 0 AND kind = 'image' " +
+          "AND json_extract(payload, '$.photo') = ? LIMIT 1"
+        ).bind(threadId, pid).first();
         if (!still) {
           await env.DB.prepare("DELETE FROM photos WHERE id = ? AND thread_id = ?").bind(pid, threadId).run();
         }
       }
       return json({ threadId, messageId: row.id, unsent: true, deletedAt: now });
+    }
+
+    /* ---- a photo whose message never went -------------------------------
+     * The app uploads a photo before the message that shows it. If the
+     * message then fails and is discarded, the photo is in the thread with
+     * nothing showing it, and "delete" on the phone has to mean deleted
+     * here too. Only its uploader may, and never while a live message in
+     * the thread still shows it.
+     */
+    if (seg[3] === "photos" && seg.length === 5 && method === "DELETE") {
+      const pid = seg[4];
+      if (!isPhotoId(pid)) return fail(404, "not_found", "No such photo.");
+      const row = await env.DB.prepare(
+        "SELECT id, owner_id FROM photos WHERE id = ? AND thread_id = ?"
+      ).bind(pid, threadId).first();
+      if (!row) return json({ photoId: pid, deleted: false });
+      if (row.owner_id !== user.id) return fail(403, "not_yours", "Only the person who uploaded a photo can delete it.");
+      const shown = await env.DB.prepare(
+        "SELECT 1 AS ok FROM chat_messages WHERE thread_id = ? AND deleted = 0 AND kind = 'image' " +
+        "AND json_extract(payload, '$.photo') = ? LIMIT 1"
+      ).bind(threadId, pid).first();
+      if (shown) return fail(409, "in_use", "A message still shows this photo. Unsend the message instead.");
+      await env.DB.prepare("DELETE FROM photos WHERE id = ? AND thread_id = ?").bind(pid, threadId).run();
+      return json({ photoId: pid, deleted: true });
     }
 
     /* ---- how far I have read --------------------------------------------

@@ -345,9 +345,27 @@ check("somebody outside the thread cannot, and is told it does not exist", s == 
 s, pm = call("POST", "/v1/chats/%s/messages" % qtid, token=quiet_a["token"],
              body={"body": "Photo", "clientId": "q5", "kind": "image", "payload": {"photo": pid, "w": 1, "h": 1}})
 check("and a message can show it", s == 201 and pm["message"]["payload"]["photo"] == pid, (s, pm))
+# a SECOND photo in the same thread, so the unsend below has another live
+# photo message to look past -- the case that once failed, because the check
+# used a LIKE pattern longer than D1 allows
+second = tiny.replace("AAAABJRU5ErkJggg==", "AAAABJRU5ErkJggh==")
+s, up2 = call("POST", "/v1/chats/%s/photos" % qtid, token=quiet_a["token"], body={"data": second})
+keep_pid = up2["photoId"]
+s, keep_m = call("POST", "/v1/chats/%s/messages" % qtid, token=quiet_a["token"],
+                 body={"body": "Photo", "clientId": "q6", "kind": "image", "payload": {"photo": keep_pid, "w": 1, "h": 1}})
 s, r = call("DELETE", "/v1/chats/%s/messages/%s" % (qtid, pm["message"]["messageId"]), token=quiet_a["token"])
+check("unsending a photo in a thread that shows another photo works", s == 200 and r.get("unsent") is True, (s, r))
 s, r = call("GET", "/v1/photos/" + pid, token=quiet_b["token"])
 check("unsending the message deletes the photo with it", s == 404, (s, r))
+s, r = call("GET", "/v1/photos/" + keep_pid, token=quiet_b["token"])
+check("and leaves the other message's photo alone", s == 200, (s, r))
+
+print("\n== a planned day ==")
+s, r = call("POST", "/v1/chats/%s/messages" % qtid, token=quiet_a["token"], body={
+    "body": "Planned day: Thu 2 Jan", "clientId": "q7", "kind": "plan",
+    "payload": {"v": 1, "plan": {"date": "2031-01-02", "name": "Legs", "entries": [{"exercise": "Leg Press", "kind": "strength", "sets": [{"reps": "10", "weight": "150"}]}]}, "lib": []}})
+check("a planned day can be sent", s == 201 and r["message"]["kind"] == "plan", (s, r))
+check("with its lifts and targets intact", r["message"]["payload"]["plan"]["entries"][0]["sets"][0]["weight"] == "150", r)
 
 print("\n== unauthenticated ==")
 s, r = call("GET", "/v1/chats")

@@ -24,6 +24,19 @@
  * the members of its thread, and it goes when the message is unsent. See
  * chat.js for that half.
  *
+ * WHEN ONE GOES. A photo is deleted once nothing holds it any more. The
+ * holders are written down in `photo_refs` (migration 0008): every library
+ * row that names the photo, in every profile, and every chat card that
+ * shows it. A row that lets go of its photo, a deleted exercise, a deleted
+ * profile and an unsent card each remove their holding, and a photo left
+ * with none is MARKED (`orphaned_at`) rather than deleted there and then:
+ * the daily sweep (sweepPhotos, the Worker's `scheduled` handler) deletes
+ * it once PHOTO_GRACE_MS has passed. The grace is for the one ordinary
+ * moment a photo has no holder at all -- the app uploads a picture BEFORE
+ * it pushes the row that names it -- and a push that names a photo the
+ * server no longer has is told so (`missingPhotos`), so the phone that
+ * still holds the picture puts it back. Nobody is left pointing at nothing.
+ *
  * WHY A DATA URL AND NOT BYTES. The app stores and draws data URLs, the
  * id is a hash of the string, and a Worker on the free plan has ten
  * milliseconds of CPU per request. Keeping the string as it is means the
@@ -46,6 +59,31 @@ export const MAX_ACCOUNT_PHOTO_CHARS = 150 * 1024 * 1024;
 const UPLOAD_WINDOW_MS = 10 * 60_000;
 const UPLOAD_MAX_PER_WINDOW = 150;
 
+/* How long a library photo nobody holds is kept before the sweep takes it.
+   Long enough for a phone that uploaded a picture and then lost its signal
+   before pushing the row to come back, short enough that a photo somebody
+   deleted is really gone within days. A chat photo that never made it into
+   a message (a send that failed and was never retried) gets a week. The
+   environment can shorten both, which is only ever done for a local test. */
+export const PHOTO_GRACE_MS = 3 * 24 * 60 * 60 * 1000;
+export const CHAT_PHOTO_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
+const graceOf = (env, fallback) => {
+  const v = env.PHOTO_GRACE_MS;
+  return v != null && v !== "" && Number.isFinite(Number(v)) ? Number(v) : fallback;
+};
+
+export const itemHolder = (profileId, itemId) => "item:" + profileId + ":" + itemId;
+export const msgHolder = (messageId) => "msg:" + messageId;
+
+/* D1 takes at most 100 bound parameters, so anything with an IN list goes
+   through here in pieces */
+const chunks = (list, n = 90) => {
+  const out = [];
+  for (let i = 0; i < list.length; i += n) out.push(list.slice(i, i + n));
+  return out;
+};
+const marks = (list) => list.map(() => "?").join(",");
+
 export const isPhotoId = (v) => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
 
 /* The three formats the app writes (WebP where the browser can encode it,
@@ -67,7 +105,13 @@ export async function sha256Hex(s) {
    the whole point of a content id is that asking twice is free. */
 export async function storePhoto(env, user, id, data, threadId) {
   const have = await env.DB.prepare("SELECT id FROM photos WHERE id = ?").bind(id).first();
-  if (have) return { status: 200, body: { photoId: id, stored: false } };
+  if (have) {
+    /* asked for again, so about to be named again: an orphan's clock starts
+       over rather than letting the sweep take it between here and the push */
+    await env.DB.prepare("UPDATE photos SET orphaned_at = ? WHERE id = ? AND orphaned_at IS NOT NULL")
+      .bind(Date.now(), id).run();
+    return { status: 200, body: { photoId: id, stored: false } };
+  }
 
   if (await limited(env, "photo:up:" + user.id, UPLOAD_WINDOW_MS, UPLOAD_MAX_PER_WINDOW)) {
     return { status: 429, body: { error: "too_fast", message: "Too many photos at once. Wait a few minutes." } };
@@ -80,11 +124,134 @@ export async function storePhoto(env, user, id, data, threadId) {
   }
 
   /* OR IGNORE, because two devices uploading the same picture at the same
-     moment are both right, and whichever lands second has nothing to add */
+     moment are both right, and whichever lands second has nothing to add.
+     A library photo arrives UNHELD — the row naming it comes after — so its
+     grace period starts now and the push that names it stops the clock. */
+  const now = Date.now();
   await env.DB.prepare(
-    "INSERT OR IGNORE INTO photos (id, data, size, owner_id, thread_id, created_at) VALUES (?, ?, ?, ?, ?, ?)"
-  ).bind(id, data, data.length, user.id, threadId || null, Date.now()).run();
+    "INSERT OR IGNORE INTO photos (id, data, size, owner_id, thread_id, created_at, orphaned_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+  ).bind(id, data, data.length, user.id, threadId || null, now, threadId ? null : now).run();
   return { status: 201, body: { photoId: id, stored: true } };
+}
+
+/* ── WHO HOLDS WHAT ──────────────────────────────────────────────────────
+   Point each holder at exactly the photos given for it (an empty list lets
+   go of everything it held), then settle the photos that changed hands:
+   anything newly held stops being an orphan, anything let go of with no
+   other holder left becomes one. Returns the newly held ids the store does
+   not have, so the caller can tell the phone that sent them.
+
+   `want` maps holder -> array of photo ids. Holders not in it are untouched. */
+export async function setHoldings(env, want) {
+  const holders = Object.keys(want);
+  if (!holders.length) return { missing: [] };
+  const had = new Map(holders.map((h) => [h, new Set()]));
+  for (const part of chunks(holders)) {
+    const rows = await env.DB.prepare(
+      "SELECT photo_id, holder FROM photo_refs WHERE holder IN (" + marks(part) + ")"
+    ).bind(...part).all();
+    for (const r of rows.results || []) had.get(r.holder).add(r.photo_id);
+  }
+
+  const stmts = [];
+  const added = new Set(), dropped = new Set();
+  for (const h of holders) {
+    const next = new Set((want[h] || []).filter(isPhotoId));
+    const prev = had.get(h);
+    for (const id of prev) if (!next.has(id)) {
+      stmts.push(env.DB.prepare("DELETE FROM photo_refs WHERE photo_id = ? AND holder = ?").bind(id, h));
+      dropped.add(id);
+    }
+    for (const id of next) if (!prev.has(id)) {
+      stmts.push(env.DB.prepare("INSERT OR IGNORE INTO photo_refs (photo_id, holder) VALUES (?, ?)").bind(id, h));
+      added.add(id);
+    }
+  }
+  for (const part of chunks(stmts, 50)) await env.DB.batch(part);
+
+  const now = Date.now();
+  for (const part of chunks([...added])) {
+    await env.DB.prepare(
+      "UPDATE photos SET orphaned_at = NULL WHERE id IN (" + marks(part) + ") AND orphaned_at IS NOT NULL"
+    ).bind(...part).run();
+  }
+  /* Every photo named in this call is checked, not only the newly held
+     ones: the sweep never takes a held photo, so a named one that is not
+     here was lost some other way, and the phone naming it is the one that
+     can put it back. */
+  const missing = [];
+  const named = [...new Set(Object.values(want).flat().filter(isPhotoId))];
+  for (const part of chunks(named)) {
+    const found = await env.DB.prepare("SELECT id FROM photos WHERE id IN (" + marks(part) + ")").bind(...part).all();
+    const have = new Set((found.results || []).map((r) => r.id));
+    for (const id of part) if (!have.has(id)) missing.push(id);
+  }
+  await markOrphans(env, [...dropped], now);
+  return { missing };
+}
+
+/* Everything one holder prefix holds -- every row of a profile being
+   deleted -- let go of at once. A range rather than LIKE, so the holder
+   index answers it. */
+export async function dropHoldingsUnder(env, prefix) {
+  const hi = prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
+  const rows = await env.DB.prepare(
+    "SELECT photo_id FROM photo_refs WHERE holder >= ? AND holder < ?"
+  ).bind(prefix, hi).all();
+  const ids = [...new Set((rows.results || []).map((r) => r.photo_id))];
+  if (!ids.length) return 0;
+  await env.DB.prepare("DELETE FROM photo_refs WHERE holder >= ? AND holder < ?").bind(prefix, hi).run();
+  await markOrphans(env, ids, Date.now());
+  return ids.length;
+}
+
+async function markOrphans(env, ids, now) {
+  for (const part of chunks(ids)) {
+    await env.DB.prepare(
+      "UPDATE photos SET orphaned_at = ? WHERE id IN (" + marks(part) + ") AND thread_id IS NULL AND orphaned_at IS NULL " +
+      "AND NOT EXISTS (SELECT 1 FROM photo_refs r WHERE r.photo_id = photos.id)"
+    ).bind(now, ...part).run();
+  }
+}
+
+/* The library photos a chat card shows: an exercise or a record's own, its
+   parent's when it is a variation, and every lift of a preset, a logged
+   day or a planned day. Read loosely, because a payload is the sending
+   app's shape and the server only needs the ids out of it. */
+export function payloadPhotoIds(payload) {
+  const out = new Set();
+  const take = (snap) => {
+    if (!snap || typeof snap !== "object") return;
+    if (isPhotoId(snap.photo)) out.add(snap.photo);
+    if (snap.parent && typeof snap.parent === "object" && isPhotoId(snap.parent.photo)) out.add(snap.parent.photo);
+  };
+  if (payload && typeof payload === "object") {
+    take(payload.ex);
+    if (Array.isArray(payload.lib)) payload.lib.slice(0, 200).forEach(take);
+  }
+  return [...out];
+}
+
+/* ── THE SWEEP ───────────────────────────────────────────────────────────
+   Once a day, from the Worker's `scheduled` handler. A library photo goes
+   when it has been unheld for the whole grace period AND is still unheld
+   now; a chat photo goes when no live message in its thread shows it, a
+   week after it was uploaded. Both conditions are re-checked in the DELETE
+   itself, so a holder that turned up since the photo was marked saves it. */
+export async function sweepPhotos(env, now = Date.now()) {
+  const lib = await env.DB.prepare(
+    "DELETE FROM photos WHERE thread_id IS NULL AND orphaned_at IS NOT NULL AND orphaned_at <= ? " +
+    "AND NOT EXISTS (SELECT 1 FROM photo_refs r WHERE r.photo_id = photos.id)"
+  ).bind(now - graceOf(env, PHOTO_GRACE_MS)).run();
+  const chat = await env.DB.prepare(
+    "DELETE FROM photos WHERE thread_id IS NOT NULL AND created_at <= ? AND NOT EXISTS (" +
+    "  SELECT 1 FROM chat_messages m WHERE m.thread_id = photos.thread_id AND m.deleted = 0 AND m.kind = 'image' " +
+    "  AND json_extract(m.payload, '$.photo') = photos.id)"
+  ).bind(now - graceOf(env, CHAT_PHOTO_GRACE_MS)).run();
+  return {
+    library: (lib.meta && lib.meta.changes) || 0,
+    chat: (chat.meta && chat.meta.changes) || 0,
+  };
 }
 
 /* Returns a Response, or null when the path is not one of ours. */
@@ -103,7 +270,15 @@ export async function photoRoute(ctx) {
     const rows = await env.DB.prepare(
       "SELECT id FROM photos WHERE id IN (" + ids.map(() => "?").join(",") + ")"
     ).bind(...ids).all();
-    return json({ have: (rows.results || []).map((r) => r.id) });
+    const have = (rows.results || []).map((r) => r.id);
+    /* a phone asking about an id is about to name it in a row: an orphan's
+       clock starts over, as it does for an upload of one already here */
+    if (have.length) {
+      await env.DB.prepare(
+        "UPDATE photos SET orphaned_at = ? WHERE id IN (" + have.map(() => "?").join(",") + ") AND orphaned_at IS NOT NULL"
+      ).bind(Date.now(), ...have).run();
+    }
+    return json({ have });
   }
 
   if (seg.length !== 3 || !isPhotoId(seg[2])) return null;

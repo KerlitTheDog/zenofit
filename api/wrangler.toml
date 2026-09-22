@@ -20,6 +20,12 @@ class_name = "TimerAlarm"
 tag = "v1"
 new_sqlite_classes = ["TimerAlarm"]
 
+# The daily photo sweep (see sweepPhotos in src/photos.js): a photo nothing
+# has held for the grace period is deleted. Minute and hour are arbitrary,
+# picked to be nobody's workout.
+[triggers]
+crons = ["23 3 * * *"]
+
 [vars]
 # Browsers that are allowed to call this API. Comma separated, no spaces.
 ALLOWED_ORIGINS = "https://kerlitthedog.github.io,http://localhost:8080,http://127.0.0.1:8080"

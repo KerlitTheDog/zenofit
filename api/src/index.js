@@ -26,7 +26,7 @@ import { newSeed, normalizeSeed } from "./seeds.js";
 import { accessFor, canRead, canWrite, canAdmin } from "./access.js";
 import { sendToUser } from "./push.js";
 import { chatRoute } from "./chat.js";
-import { photoRoute } from "./photos.js";
+import { photoRoute, setHoldings, dropHoldingsUnder, itemHolder, sweepPhotos } from "./photos.js";
 import {
   validateItem, encodeCursor, decodeCursor,
   MAX_ITEMS_PER_PUSH, MAX_PUSH_BODY_BYTES,
@@ -518,6 +518,9 @@ async function route(request, env, url, ctx) {
       const now = Date.now();
       await env.DB.prepare("UPDATE profiles SET deleted_at = ?, updated_at = ? WHERE id = ?")
         .bind(now, now, profile.id).run();
+      /* its rows are gone for everybody, so nothing of it holds a photo any
+         more: whatever only it held is left for the sweep (photos.js) */
+      await dropHoldingsUnder(env, itemHolder(profile.id, ""));
       return json({ profileId: profile.id, deletedAt: now });
     }
   }
@@ -1054,10 +1057,29 @@ async function route(request, env, url, ctx) {
         .bind(now, profile.id).run().catch(() => {});
     }
 
+    /* ── A LIBRARY ROW HOLDS THE PHOTO IT NAMES, AND ONLY THAT ONE ───────
+       Every library row written here is pointed at the photo it names now,
+       which lets go of the one it named before: a photo replaced, removed,
+       or left behind by a deleted exercise. What nothing holds any more is
+       left for the sweep (photos.js). And a row naming a photo this server
+       does not have is reported back, so the phone that pushed it -- which
+       uploads before it pushes, and remembers what it uploaded -- forgets
+       that and sends the picture again: nothing is left pointing at a hole. */
+    const holdings = {};
+    for (const item of toWrite) {
+      if (item.collection !== "library") continue;
+      const pid = !item.deleted && item.json && typeof item.json.photoId === "string" ? item.json.photoId : null;
+      holdings[itemHolder(profile.id, item.itemId)] = pid ? [pid] : [];
+    }
+    let missingPhotos = [];
+    try { missingPhotos = (await setHoldings(env, holdings)).missing; }
+    catch (e) { console.error("photo holdings failed; the rows are written", e && e.message ? e.message : e); }
+
     return json({
       accepted: toWrite.length,
       skipped: stale.length,
       staleItems: stale,
+      missingPhotos,
       updatedAt: now,
       serverNow: now,
     });
@@ -1067,6 +1089,16 @@ async function route(request, env, url, ctx) {
 }
 
 export default {
+  /* Once a day (the cron in wrangler.toml): photos nothing has held for the
+     whole grace period, and chat photos no message shows. See photos.js. */
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(
+      sweepPhotos(env)
+        .then((r) => console.log("photo sweep", JSON.stringify(r)))
+        .catch((e) => console.error("photo sweep failed", e && e.message ? e.message : e))
+    );
+  },
+
   async fetch(request, env, ctx) {
     const cors = corsHeaders(request, env);
 

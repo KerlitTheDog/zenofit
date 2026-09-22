@@ -3054,10 +3054,14 @@ async function syncPush(localId) {
   if (!queue.length) { syncSet(localId, { lastPushedAt: Date.now() }); return { ok: true, sent: 0, stale: 0, tooBig, heldPhotos }; }
 
   let sent = 0, stale = 0;
+  const missingPhotos = [];
   for (let i = 0; i < queue.length; i += SYNC_PAGE) {
     const batch = queue.slice(i, i + SYNC_PAGE);
     const res = await C.pushChanges(rec.remoteId, batch, { allowWipe });
     sent += res.accepted || 0;
+    /* rows naming a photo the server does not have (swept after nothing
+       held it for days, or an upload that never landed): see below */
+    if (Array.isArray(res.missingPhotos)) missingPhotos.push(...res.missingPhotos);
     const staleKeys = new Set((res.staleItems || []).map((s) => s.collection + "/" + s.itemId));
     stale += staleKeys.size;
     for (const b of batch) {
@@ -3071,6 +3075,20 @@ async function syncPush(localId) {
       else if (pending.has(key)) marks[key] = [pending.get(key), now];
     }
     syncSet(localId, { marks, lastPushedAt: Date.now() });
+  }
+  /* ── A PHOTO THE SERVER NO LONGER HAS GOES BACK UP ─────────────────────
+     This phone remembers which photos it has uploaded (PHOTO_UP_KEY) so it
+     never asks twice. The server deletes a photo nothing has held for days
+     (the sweep in photos.js), and a row naming one can still come along
+     afterwards — a backup restored, a photo put back, a phone that uploaded
+     and then lost its signal for a week. The push says so, the memory of
+     having sent it is dropped, and the next pass sends it again from the
+     picture this phone still holds. */
+  if (missingPhotos.length) {
+    const up = photoUpRead();
+    for (const id of missingPhotos) up.delete(id);
+    photoUpWrite(up);
+    setTimeout(photoPass, 0);
   }
   return { ok: true, sent, stale, tooBig, heldPhotos };
 }
@@ -7068,6 +7086,7 @@ function renderDayCard(log, library, settings) {
               ${icon("play", 15)} ${T("plan.start")}
             </button>
             <button data-action="plan-edit" data-id="${esc(plan.id)}" title="${T("plan.editPlan")}" class="pb-btn pb-ghost" style="flex-shrink:0;padding:11px 13px">${icon("pencil", 15)}</button>`}
+        ${chatSignedIn() ? `<button data-action="share-open" data-kinds="plan" data-ref="${esc(plan.id)}" title="${esc(T("chat.sendToChat"))}" class="pb-btn pb-ghost" style="flex-shrink:0;padding:11px 13px">${icon("send", 15)}</button>` : ""}
         <button data-action="plan-delete" data-id="${esc(plan.id)}" title="${T("plan.deletePlan")}" class="pb-btn pb-ghost" style="flex-shrink:0;padding:11px 13px;color:var(--red)">${icon("trash-2", 15)}</button>
       </div>
 
@@ -8596,11 +8615,11 @@ function renderChatMenu() {
 
 const CHAT_THING_ICON = {
   image: "image", exercise: "dumbbell", preset: "layers",
-  workout: "calendar-check", record: "trophy", rank: "medal",
+  workout: "calendar-check", plan: "calendar-clock", record: "trophy", rank: "medal",
 };
 const CHAT_THING_INK = {
   image: "#7ea0b8", exercise: "#5d8bcc", preset: "#e9b949",
-  workout: "#6aa465", record: "#c98f5a", rank: "#a07ec2",
+  workout: "#6aa465", plan: "#b0a06a", record: "#c98f5a", rank: "#a07ec2",
 };
 const chatIsThing = (m) => !!(m && CHAT_THING_ICON[m.kind]);
 
@@ -8608,13 +8627,42 @@ const pStr = (v, max = 300) => (typeof v === "string" ? v.slice(0, max) : "");
 const pNum = (v) => (typeof v === "number" && isFinite(v) ? v : null);
 const pColor = (v) => (typeof v === "string" && /^#[0-9a-fA-F]{6}$/.test(v) ? v : null);
 const pList = (v, max = 80) => (Array.isArray(v) ? v.slice(0, max).filter((x) => x && typeof x === "object") : []);
+/* a number as the app stores one (a string), or "" — which is also what
+   keeps a payload's "minutes" from reaching a template unescaped */
+const pNumStr = (v) => {
+  const n = parseFloat(String(v ?? "").replace(",", "."));
+  return Number.isFinite(n) && n >= 0 && n < 100000 ? String(n) : "";
+};
+const pUnit = (v) => (UNITS.includes(v) ? v : state.settings.units);
+/* a standards slug the tables really have: STD_BY_SLUG is a plain object,
+   and a slug from somebody else's message could be "constructor" */
+const stdOf = (slug) =>
+  (typeof slug === "string" && Object.prototype.hasOwnProperty.call(STD_BY_SLUG, slug) ? STD_BY_SLUG[slug] : null);
 
 /* ── snapshots of your own things, on the way out ─────────────────────── */
 
-/* One library row as it travels. The STORED fields, not the labels: a
-   built-in carries its id so the other phone can show it in ITS language
-   (snapLabel), exactly as its own library would, and anything the user
-   wrote is sent as they wrote it. */
+/* One library row as it travels, with EVERYTHING it depends on, because
+   the other library has none of it:
+
+   - its GROUP, with the colour and the kind it is logged in, and the key
+     the app shipped it under, so "Chest" lands in their chest group even
+     if they renamed it and a "Forearms" they have never had is made for
+     them (chatGroupFor);
+   - its KIND, which the other side stores as an exception only where it
+     differs from the group it lands in (withKind);
+   - its PARENT, when it is a variation: a wide-grip pulldown is a lift of
+     its own filed under the pulldown, and arriving without the pulldown
+     would strand it as a lift named "Lat Pulldown (Wide grip)" with no
+     family (chatAddEx files it under theirs, or brings the parent along);
+   - its STRENGTH STANDARD link, made by hand (`ex.std`), which says which
+     of the seventy-one lifts the ranks read it as — a property of the
+     movement that would otherwise have to be worked out twice;
+   - its PHOTO, by id (chatSnapPhoto).
+
+   The STORED fields, not the labels: a built-in carries its id whatever it
+   is called, so the other phone can match it to its own copy of the same
+   built-in even if either side renamed theirs, and show it in its own
+   language (snapLabel); anything the user wrote is sent as they wrote it. */
 function chatExSnap(ex) {
   const g = groupList().find((x) => x.name === ex.muscle) || null;
   const snap = {
@@ -8624,8 +8672,22 @@ function chatExSnap(ex) {
     equipment: ex.equipment || "", alternatives: ex.alternatives || "", note: ex.note || "",
     video: ex.video || "", photo: null,
   };
-  const i = !ex.custom ? DEFAULT_INDEX[ex.id] : undefined;
-  if (i != null && ex.name === DEFAULT_LIBRARY[i].name) snap.builtin = ex.id;
+  if (!ex.custom && DEFAULT_INDEX[ex.id] != null) snap.builtin = ex.id;
+  if (typeof ex.std === "string") snap.std = ex.std;
+  return snap;
+}
+
+/* The snapshot, its photo, and its parent's, in one: what every builder
+   below actually wants. */
+async function chatSnapOf(ex, ups) {
+  const snap = chatExSnap(ex);
+  await chatSnapPhoto(ex, snap, ups);
+  const parent = variantParent(ex);
+  if (parent) {
+    snap.parent = chatExSnap(parent);
+    snap.variantName = ex.variantName || shortUnder(ex, parent.name);
+    await chatSnapPhoto(parent, snap.parent, ups);
+  }
   return snap;
 }
 
@@ -8685,10 +8747,7 @@ async function chatBuildThing(kind, ref) {
     const out = [];
     for (const name of [...new Set(names)]) {
       const ex = findEx(name);
-      if (!ex) continue;
-      const snap = chatExSnap(ex);
-      await chatSnapPhoto(ex, snap, ups);
-      out.push(snap);
+      if (ex) out.push(await chatSnapOf(ex, ups));
     }
     return out;
   };
@@ -8696,9 +8755,28 @@ async function chatBuildThing(kind, ref) {
   if (kind === "exercise") {
     const ex = findEx(ref);
     if (!ex) return null;
-    const snap = chatExSnap(ex);
-    await chatSnapPhoto(ex, snap, ups);
-    return { body: T("chat.kind.exercise") + ": " + exLabelOf(ex), payload: { v: 1, ex: snap }, ups };
+    return { body: T("chat.kind.exercise") + ": " + exLabelOf(ex), payload: { v: 1, ex: await chatSnapOf(ex, ups) }, ups };
+  }
+
+  /* A PLANNED DAY: the lifts, and the targets on them, set by set. What
+     travels is exactly what the plan holds — a lift planned with no
+     numbers ("weights on the day") travels with none. */
+  if (kind === "plan") {
+    const pl = (state.plans || []).find((x) => x.id === ref);
+    if (!pl || !(pl.entries || []).length) return null;
+    const rows = pl.entries.map((e) => {
+      const k = kindOf(e);
+      const row = { exercise: e.exercise, muscle: groupOfEntry(e), kind: k, unit: unitOf(e) };
+      if (k === "cardio") { row.minutes = e.minutes || ""; row.intensity = e.intensity || ""; }
+      else row.sets = filledSets(e).map((st) => ({ reps: st.reps, weight: st.weight, secs: st.secs, drop: isDrop(st) }));
+      if (e.notes) row.notes = e.notes;
+      return row;
+    });
+    return {
+      body: T("chat.kind.plan") + ": " + (pl.name ? pl.name + " · " : "") + fmtShort(pl.date),
+      payload: { v: 1, plan: { date: pl.date, name: pl.name || "", entries: rows }, lib: await snapsFor(rows.map((r) => r.exercise)) },
+      ups,
+    };
   }
 
   if (kind === "preset") {
@@ -8739,8 +8817,7 @@ async function chatBuildThing(kind, ref) {
     const set = k === "cardio" ? { minutes: b.minutes, intensity: b.intensity } : (bestSet(filledSets(b), k) || {});
     const series = chatThin(hist.chart.map((pt) => [pt.e.date, Math.round(pt.y * 10) / 10]));
     const value = Math.round(b.m * 10) / 10;
-    const snap = ex ? chatExSnap(ex) : { name: ref };
-    if (ex) await chatSnapPhoto(ex, snap, ups);
+    const snap = ex ? await chatSnapOf(ex, ups) : { name: ref };
     return {
       body: T("chat.kind.record") + ": " + (ex ? exLabelOf(ex) : ref) + " · " + trimNum(value) + " " + metricUnit(k, units),
       payload: {
@@ -8799,8 +8876,12 @@ function snapBuiltinIx(snap) {
 }
 /* the name in YOUR language when it is a built-in still wearing the name
    the app shipped it under, and exactly as its owner typed it otherwise —
-   exLabelOf's rule, applied to a row that is not in your library */
+   exLabelOf's rule, applied to a row that is not in your library, down to
+   a variation reading as its parent plus what makes it one */
 function snapLabel(snap) {
+  const short = pStr(snap && snap.variantName, 60);
+  /* one level: a family is a base and its variations, never deeper */
+  if (short && snap.parent && typeof snap.parent === "object") return `${snapLabel({ ...snap.parent, parent: null, variantName: "" })} · ${short}`;
   const name = pStr(snap && snap.name, 120);
   const i = snapBuiltinIx(snap);
   const row = i != null && EX[langCode()] ? EX[langCode()][i] : null;
@@ -8911,6 +8992,20 @@ function chatThingCard(m) {
       TN("exercise", rows.length) + (sets ? " · " + TN("set", sets) : "")) + lifts(names, names.length) + foot;
   }
 
+  if (m.kind === "plan") {
+    const pl = p.plan && typeof p.plan === "object" ? p.plan : {};
+    const rows = pList(pl.entries, 60);
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(pStr(pl.date, 10)) ? pl.date : null;
+    const sets = rows.reduce((n, r) => n + pList(r.sets, 40).length, 0);
+    const names = rows.map((r) => {
+      const snap = snapOf(p, r.exercise);
+      return { label: snap ? snapLabel(snap) : pStr(r.exercise, 120), color: snap ? snapColor(snap) : (groupColor(pStr(r.muscle, 60)) || "#8a8f97") };
+    });
+    const title = pStr(pl.name, 80) || (date ? fmtDate(date) : T("chat.kind.plan"));
+    const sub = [pl.name && date ? fmtDate(date) : "", TN("exercise", rows.length), sets ? TN("set", sets) : ""].filter(Boolean).join(" · ");
+    return head(tile("calendar-clock", ink), esc(title), sub) + lifts(names, names.length) + foot;
+  }
+
   if (m.kind === "record") {
     const snap = p.ex && typeof p.ex === "object" ? p.ex : {};
     const k = snapKind({ kind: p.kind });
@@ -8931,7 +9026,7 @@ function chatThingCard(m) {
     const rank = pNum(p.rank);
     const lvl = rank != null && rank >= 0 && rank < STD_LEVELS.length ? STD_LEVELS[Math.floor(rank)] : null;
     const color = lvl ? STD_COLORS[lvl] : "var(--muted)";
-    const sEx = STD_BY_SLUG[pStr(p.slug, 60)] || null;
+    const sEx = stdOf(pStr(p.slug, 60));
     const prog = Math.max(0, Math.min(1, pNum(p.progress) || 0));
     return `<div style="display:flex;gap:11px;align-items:center;padding:11px 12px 8px">
         <span style="width:50px;height:50px;border-radius:12px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:var(--surface2);color:${color}">${icon("medal", 22)}</span>
@@ -8948,9 +9043,17 @@ function chatThingCard(m) {
 
 /* ── the thing in full ────────────────────────────────────────────────── */
 
+/* "profileId", or "profileId@date" for a planned day, which is added on a
+   day of the recipient's choosing and says which */
 function chatImportedHere(messageId) {
-  return chatRead().imported[messageId] === activeProfileId();
+  const v = chatRead().imported[messageId];
+  const me = activeProfileId();
+  return typeof v === "string" && (v === me || v.startsWith(me + "@"));
 }
+const chatImportedOn = (messageId) => {
+  const v = chatRead().imported[messageId];
+  return typeof v === "string" && v.includes("@") ? v.split("@")[1] : null;
+};
 
 function renderChatView() {
   const v = ui.chatView;
@@ -8983,7 +9086,9 @@ function renderChatView() {
     <div style="font-size:14px;color:${val ? "var(--text)" : "var(--faint)"};line-height:1.55;white-space:pre-wrap;word-break:break-word">${val ? esc(val) : empty}</div>
   </div>`;
   const lib = state.library || [];
-  const have = (name) => lib.find((x) => x.name.toLowerCase() === String(name).toLowerCase()) || null;
+  /* the same matching the import does (chatFind), so what this screen
+     calls "new to you" is exactly what adding it would add */
+  const have = (ref) => chatFind(snapOf(p, ref) || { name: ref }, lib);
   const done = (line, action, label, attrs = "") => `<div class="pb-card" style="padding:13px 14px;margin-bottom:10px;border-color:rgba(106,164,101,.45)">
       <div style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--green);margin-bottom:10px">${icon("check-circle-2", 16)} ${line}</div>
       <button data-action="${action}" ${attrs} class="pb-btn pb-ghost" style="width:100%;padding:11px 0;font-size:13.5px">${label}</button>
@@ -8996,7 +9101,7 @@ function renderChatView() {
     const k = snapKind(snap);
     const vid = youtubeId(pStr(snap.video, 500));
     const link = !vid && /^https?:\/\//i.test(pStr(snap.video, 500)) ? pStr(snap.video, 500) : "";
-    const mineRow = have(snap.name);
+    const mineRow = chatFind(snap, lib);
     const added = v.done ? lib.find((x) => x.name === v.done) : null;
 
     const imp = added
@@ -9085,6 +9190,60 @@ function renderChatView() {
     `);
   }
 
+  /* ── a planned day: its lifts and targets, and a day of your own ──── */
+  if (m.kind === "plan") {
+    const pl = p.plan && typeof p.plan === "object" ? p.plan : {};
+    const rows = pList(pl.entries, 60);
+    const refs = [...new Set(rows.map((r) => pStr(r.exercise, 120)).filter(Boolean))];
+    const missing = refs.filter((n) => !have(n)).length;
+    const sent = /^\d{4}-\d{2}-\d{2}$/.test(pStr(pl.date, 10)) ? pl.date : null;
+    const today = todayStr();
+    const on = chatImportedOn(m.messageId);
+    /* the day it was planned for, if that is still ahead; otherwise today */
+    const want = v.planDate || (sent && sent >= today ? sent : today);
+    const clash = planOn(state.plans, want);
+
+    const list = `<div class="pb-card" style="overflow:hidden;margin-bottom:16px">${rows.map((r, i) => {
+      const snap = snapOf(p, r.exercise);
+      const k = snapKind({ kind: r.kind });
+      const label = snap ? snapLabel(snap) : pStr(r.exercise, 120);
+      const color = snap ? snapColor(snap) : (groupColor(pStr(r.muscle, 60)) || "#8a8f97");
+      /* the target in the calendar's own words, from a copy of the entry
+         built out of sanitised numbers only */
+      const pe = {
+        kind: k, unit: pUnit(r.unit), minutes: pNumStr(r.minutes), intensity: pNumStr(r.intensity),
+        setList: pList(r.sets, 40).map((st) => ({ reps: pNumStr(st.reps), weight: pNumStr(st.weight), secs: pNumStr(st.secs) })),
+      };
+      return `<div style="display:flex;gap:10px;padding:11px 14px;border-bottom:${i < rows.length - 1 ? "1px solid var(--border-soft)" : "none"}">
+        <span style="width:8px;height:8px;border-radius:4px;border:1.5px solid ${color};box-sizing:border-box;flex-shrink:0;margin-top:6px"></span>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600;font-size:14px;word-break:break-word">${esc(label)}</div>
+          <div style="font-size:11.5px;color:var(--faint)">${esc(snap ? snapGroupLabel(snap) : pStr(r.muscle, 60))}${k !== DEFAULT_KIND ? " · " + T("kind." + k) : ""}${have(r.exercise) ? "" : ` · <span style="color:var(--blue)">${T("chat.newToYou")}</span>`}</div>
+          <div class="pb-num" style="font-size:12.5px;color:var(--text);margin-top:5px">${planEntryLine(pe)}</div>
+          ${r.notes ? `<div style="font-size:12px;color:var(--muted);font-style:italic;margin-top:5px;word-break:break-word">${esc(pStr(r.notes, 400))}</div>` : ""}
+        </div>
+      </div>`;
+    }).join("")}</div>`;
+
+    const imp = chatImportedHere(m.messageId)
+      ? done(T("chat.addedPlan", { date: on ? fmtDate(on) : "" }), "chat-open-day", `${icon("calendar-days", 15)} ${T("chat.openDay")}`, `data-d="${esc(on || want)}"`)
+      : `<div class="pb-label" style="margin-bottom:6px">${T("chat.planDay")}</div>
+         <input type="date" class="pb-input" data-bind="chatPlanDate" value="${esc(want)}" min="${today}" style="margin-bottom:${clash || want < today ? 6 : 12}px">
+         ${want < today ? `<div style="font-size:11.5px;color:var(--red);line-height:1.5;margin:0 2px 12px">${T("chat.planPast")}</div>`
+           : clash ? `<div style="font-size:11.5px;color:var(--red);line-height:1.5;margin:0 2px 12px">${T("chat.planClash", { date: fmtShort(want) })}</div>` : ""}
+         <button data-action="chat-import" ${clash || want < today ? "disabled" : ""} class="pb-btn pb-gold" style="width:100%;padding:14px 0;font-size:15px;border-radius:14px;opacity:${clash || want < today ? 0.45 : 1}">${icon("calendar-plus", 17)} ${T("chat.addPlan")}</button>
+         <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:8px 2px 18px">${missing ? T("chat.addPlanHintNew", { n: TN("exercise", missing) }) : T("chat.addPlanHint")}</div>`;
+
+    return shell(T("chat.kind.plan"), `
+      ${from}
+      <div class="pb-num" style="font-size:23px;font-weight:700;line-height:1.15;margin-bottom:5px;word-break:break-word">${esc(pStr(pl.name, 80) || (sent ? fmtDate(sent) : T("chat.kind.plan")))}</div>
+      <div style="font-size:12.5px;color:var(--muted);margin-bottom:14px">${[pl.name && sent ? fmtDate(sent) : "", TN("exercise", rows.length)].filter(Boolean).join(" · ")}</div>
+      ${imp}
+      ${sectionTitle(TN("move", rows.length))}
+      ${list}
+    `);
+  }
+
   /* ── a personal record ───────────────────────────────────────────── */
   if (m.kind === "record") {
     const snap = p.ex && typeof p.ex === "object" ? p.ex : {};
@@ -9123,7 +9282,7 @@ function renderChatView() {
     const rank = pNum(p.rank);
     const lvl = rank != null && rank >= 0 && rank < STD_LEVELS.length ? STD_LEVELS[Math.floor(rank)] : null;
     const color = lvl ? STD_COLORS[lvl] : "var(--muted)";
-    const sEx = STD_BY_SLUG[pStr(p.slug, 60)] || null;
+    const sEx = stdOf(pStr(p.slug, 60));
     const reps = p.reps === true;
     const unit = pStr(p.unit, 4);
     const th = Array.isArray(p.th) ? p.th.slice(0, STD_LEVELS.length).map(pNum) : [];
@@ -9262,7 +9421,7 @@ function renderChatAttach() {
     </label>`;
     return sheet(T("chat.attachTitle"), "chatAttach", `
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-bottom:12px">
-        ${photo}${tile("exercise")}${tile("preset")}${tile("workout")}${tile("record")}${tile("rank")}
+        ${photo}${tile("exercise")}${tile("preset")}${tile("workout")}${tile("plan")}${tile("record")}${tile("rank")}
       </div>
       <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:0 2px">${T("chat.attachHint")}</div>
     `, 78);
@@ -9289,6 +9448,22 @@ function renderChatAttach() {
       chatPickRow("workout", d.date, `<span style="width:34px;height:34px;border-radius:9px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:${CHAT_THING_INK.workout}22;color:${CHAT_THING_INK.workout}">${icon("calendar-check", 16)}</span>`,
         fmtDate(d.date), TN("exercise", d.lifts.size) + (d.sets ? " · " + TN("set", d.sets) : ""))).join("")}</div>`
       : `<div style="padding:18px 6px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T("chat.pickNoDays")}</div>`;
+  } else if (step === "plan") {
+    /* what is coming first, soonest first; then what has gone by, newest
+       first, since a plan that was missed can still be somebody's Thursday */
+    const today = todayStr();
+    const all = plansSorted(state.plans).filter((x) => (x.entries || []).length);
+    const ahead = all.filter((x) => x.date >= today);
+    const gone = all.filter((x) => x.date < today).reverse();
+    const row = (x) => {
+      const sets = planSetCount(x);
+      return chatPickRow("plan", x.id,
+        `<span style="width:34px;height:34px;border-radius:9px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:${CHAT_THING_INK.plan}22;color:${CHAT_THING_INK.plan}">${icon("calendar-clock", 16)}</span>`,
+        esc(x.name || fmtDate(x.date)),
+        [x.name ? fmtDate(x.date) : "", TN("exercise", x.entries.length), sets ? TN("set", sets) : ""].filter(Boolean).join(" · "));
+    };
+    body = all.length ? `<div class="pb-card" style="overflow:hidden">${[...ahead, ...gone].map(row).join("")}</div>`
+      : `<div style="padding:18px 6px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T("chat.pickNoPlans")}</div>`;
   } else if (step === "record") {
     const lifts = chatRecordLifts();
     body = lifts.length ? `<div class="pb-card" style="overflow:hidden">${lifts.map((r) => {
@@ -9508,23 +9683,81 @@ function chatGroupFor(snap, groups) {
    returned as it is, or with `asCopy` the new one is numbered beside it. A
    built-in you had deleted comes back AS the built-in, so it speaks your
    language again; anything else is a custom row, exactly as typed. */
+/* The row in `lib` that a snapshot already IS, or null — asked by the
+   import and by the screen that offers it, so the two can never disagree
+   about what is "new to you".
+
+   A built-in is the same movement on both phones whatever either side has
+   since called it, so it is matched by its id first: a squat they renamed
+   "Back Squat" is theirs, not a lift to add again beside it under the name
+   the app shipped. A variation is matched inside its family: their copy of
+   the parent, and the name this app gives a variation of it. Anything else
+   by its name, which is its identity. */
+function chatFind(snap, lib) {
+  const clash = (n) => lib.find((x) => x.name.toLowerCase() === n.toLowerCase()) || null;
+  if (snapBuiltinIx(snap) != null) {
+    const mine = lib.find((x) => x.id === snap.builtin);
+    if (mine) return mine;
+  }
+  const short = pStr(snap && snap.variantName, 60).trim();
+  if (short && snap.parent && typeof snap.parent === "object") {
+    const parent = chatFind({ ...snap.parent, parent: null, variantName: "" }, lib);
+    const root = parent && parent.variantOf ? (lib.find((x) => x.id === parent.variantOf) || parent) : parent;
+    if (root) return clash(`${root.name} (${short})`);
+  }
+  const name = pStr(snap && snap.name, 120).trim();
+  return name ? clash(name) : null;
+}
+
 function chatAddEx(snap, lib, groups, asCopy) {
   let name = pStr(snap && snap.name, 120).trim();
   if (!name) return null;
   const clash = (n) => lib.find((x) => x.name.toLowerCase() === n.toLowerCase());
-  const had = clash(name);
-  if (had && !asCopy) return had.name;
-  if (had) { let i = 2; while (clash(`${name} (${i})`)) i++; name = `${name} (${i})`; }
+  const bi = snapBuiltinIx(snap);
+  /* already here, as a built-in by id, a variation in its family, or by
+     name: theirs, and left exactly as it is */
+  if (!asCopy) {
+    const mine = chatFind(snap, lib);
+    if (mine) return mine.name;
+  }
+
+  /* A variation lands in the family it belongs to: under their own copy of
+     the parent if they have one, or with the parent brought along if not —
+     and is named the way this app names a variation, from THEIR parent's
+     name, so it stays unique and reads right in their library. */
+  const short = pStr(snap && snap.variantName, 60).trim();
+  let root = null;
+  if (short && snap.parent && typeof snap.parent === "object") {
+    /* one level, as a family is: the parent is a base, whatever it claims */
+    const parentName = chatAddEx({ ...snap.parent, parent: null, variantName: "" }, lib, groups, false);
+    const parent = parentName && lib.find((x) => x.name === parentName);
+    root = parent && parent.variantOf ? (lib.find((x) => x.id === parent.variantOf) || parent) : parent;
+  }
+  let variantName = short;
+  if (root) {
+    name = `${root.name} (${short})`;
+    const hadV = clash(name);
+    if (hadV && !asCopy) return hadV.name;
+    if (hadV) { let i = 2; while (clash(`${root.name} (${short} ${i})`)) i++; variantName = `${short} ${i}`; name = `${root.name} (${variantName})`; }
+  } else {
+    const had = clash(name);
+    if (had && !asCopy) return had.name;
+    if (had) { let i = 2; while (clash(`${name} (${i})`)) i++; name = `${name} (${i})`; }
+  }
+
   const muscle = chatGroupFor(snap, groups);
   const gk = (groups.find((x) => x.name === muscle) || {}).kind;
-  const bi = snapBuiltinIx(snap);
-  const restore = bi != null && !asCopy && !lib.some((x) => x.id === snap.builtin);
+  const restore = bi != null && !asCopy && !root && !lib.some((x) => x.id === snap.builtin);
   const video = pStr(snap.video, 500);
   let row = {
     id: restore ? snap.builtin : uid(), name, muscle,
     equipment: pStr(snap.equipment, 200), alternatives: pStr(snap.alternatives, 300), note: pStr(snap.note, 2000),
     image: "", video: /^https?:\/\//i.test(video) ? video : "", custom: !restore,
   };
+  if (root) { row.variantOf = root.id; row.variantName = variantName; }
+  /* the standard it is ranked as, when its owner said so by hand, and only
+     if the tables have that lift; "" is a real answer ("not this one") */
+  if (typeof snap.std === "string" && (snap.std === "" || stdOf(snap.std))) row.std = snap.std;
   row = withKind(row, snapKind(snap), KIND[gk] ? gk : DEFAULT_KIND);
   /* the photo by id: in the store already, fetched by photoPass, and drawn
      straight away if this screen has already fetched it for the card */
@@ -9537,7 +9770,14 @@ function chatAddEx(snap, lib, groups, asCopy) {
   return name;
 }
 
-function chatImport(m, asCopy) {
+/* What a lift is logged in, read against the groups being committed rather
+   than `state.groups`: an import can make a group in the same breath, and
+   exKind asked about it would not find it yet and answer "strength" — which
+   is how a lift from a brand-new cardio group would arrive asking for sets. */
+const kindAmong = (row, groups) =>
+  (KIND[row.kind] ? row.kind : ((groups.find((g) => g.name === row.muscle) || {}).kind) || DEFAULT_KIND);
+
+function chatImport(m, asCopy, opts = {}) {
   const p = m.payload && typeof m.payload === "object" ? m.payload : {};
   const lib = [...(state.library || [])];
   const groups = [...(state.groups && state.groups.length ? state.groups : DEFAULT_GROUPS)];
@@ -9562,7 +9802,7 @@ function chatImport(m, asCopy) {
       const snap = snapOf(p, ref) || { name: ref, muscle: pStr(r.muscle, 60), kind: r.kind };
       const name = chatAddEx(snap, lib, groups, false);
       const row = name && lib.find((x) => x.name === name);
-      if (row) exercises.push({ exercise: row.name, muscle: row.muscle, kind: exKind(row) });
+      if (row) exercises.push({ exercise: row.name, muscle: row.muscle, kind: kindAmong(row, groups) });
     }
     if (!exercises.length) return null;
     const t = chatThreadOf(ui.chatView && ui.chatView.threadId);
@@ -9579,6 +9819,51 @@ function chatImport(m, asCopy) {
     patch({ library: lib, presets: [...(state.presets || []), preset], ...(groups.length !== nGroups ? { groups } : {}) });
     photoPass();
     return preset.id;
+  }
+
+  /* ── A PLANNED DAY, INTO YOUR OWN CALENDAR ─────────────────────────────
+     It lands as YOUR plan on the day you pick: the same object the calendar
+     makes when you plan a day yourself, with the same rules. Nothing in it
+     counts until the day is logged, one plan per day (a day that already
+     has one is refused rather than overwritten), and a target only rides
+     along while it fits the shape the lift is logged in HERE — a lift you
+     log in seconds is not handed reps and kilos (planTargetUsable's rule),
+     it comes as "numbers on the day". */
+  if (m.kind === "plan") {
+    const pl = p.plan && typeof p.plan === "object" ? p.plan : {};
+    const date = opts.date;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date || "") || date < todayStr() || planOn(state.plans, date)) return null;
+    const entries = [];
+    pList(pl.entries, 60).forEach((r, i) => {
+      const ref = pStr(r.exercise, 120).trim();
+      if (!ref) return;
+      const snap = snapOf(p, ref) || { name: ref, muscle: pStr(r.muscle, 60), kind: r.kind };
+      const name = chatAddEx(snap, lib, groups, false);
+      const row = name && lib.find((x) => x.name === name);
+      if (!row) return;
+      const kind = kindAmong(row, groups);
+      const e = newEntry(row.name, row.muscle, kind, Date.now() + i);
+      e.unit = pUnit(r.unit);
+      if (kind === snapKind({ kind: r.kind })) {
+        if (kind === "cardio") { e.minutes = pNumStr(r.minutes); e.intensity = pNumStr(r.intensity); }
+        else {
+          e.setList = pList(r.sets, 40).map((st) => {
+            const set = newSet(pNumStr(st.reps), pNumStr(st.weight), "", pNumStr(st.secs));
+            if (st.drop === true) set.drop = true;
+            return set;
+          }).filter((set) => setHasData(set, kind));
+        }
+      }
+      if (typeof r.notes === "string" && r.notes) e.notes = pStr(r.notes, 500);
+      entries.push(isSetKind(kind) ? syncEntry(e) : e);
+    });
+    if (!entries.length) return null;
+    const plan = { id: uid(), date, name: pStr(pl.name, 80).trim(), entries, createdAt: Date.now() };
+    chatRead().imported[m.messageId] = activeProfileId() + "@" + date;
+    chatWrite();
+    patch({ library: lib, plans: plansSorted([...(state.plans || []), plan]), ...(groups.length !== nGroups ? { groups } : {}) });
+    photoPass();
+    return date;
   }
   return null;
 }
@@ -15991,7 +16276,15 @@ const actions = {
     render();
     await chatSendThing(a.threadId, el.dataset.k, el.dataset.ref);
   },
-  "chat-view": (el) => { ui.chatView = { threadId: el.dataset.id, messageId: el.dataset.m }; render(); },
+  "chat-view": (el) => {
+    ui.chatView = { threadId: el.dataset.id, messageId: el.dataset.m };
+    /* a planned day's import needs a day, and the one it shows before
+       anybody touches the field is the one it will use */
+    const m = chatMsgs(el.dataset.id).find((x) => x.messageId === el.dataset.m);
+    const d = m && m.kind === "plan" && m.payload && m.payload.plan && pStr(m.payload.plan.date, 10);
+    ui.chatView.planDate = /^\d{4}-\d{2}-\d{2}$/.test(d || "") && d >= todayStr() ? d : todayStr();
+    render();
+  },
   "chat-view-close": () => { ui.chatView = null; render(); },
   "chat-image": (el) => { ui.chatImage = { threadId: el.dataset.id, messageId: el.dataset.m }; render(); },
   "chat-image-close": () => { ui.chatImage = null; render(); },
@@ -16001,10 +16294,15 @@ const actions = {
     const v = ui.chatView;
     const m = v && chatMsgs(v.threadId).find((x) => x.messageId === v.messageId);
     if (!m) return;
-    const got = chatImport(m, el.dataset.copy === "1");
+    const got = chatImport(m, el.dataset.copy === "1", { date: v.planDate || null });
     if (!got) { alert(T("chat.importNothing")); return; }
     if (m.kind === "exercise") v.done = got;
     render();
+  },
+  /* the day a planned day was added on, in your own calendar */
+  "chat-open-day": (el) => {
+    ui.chatView = null; ui.chatThread = null; ui.chatMsgMenu = null;
+    actions["plan-open"](el);
   },
   /* An exercise you have, in the place it lives. The conversation is closed
      on the way, because the exercise window is a window of the library and
@@ -16048,6 +16346,11 @@ const actions = {
         chatUploads.delete(m.clientId);
         chatRelast(v.threadId);
         chatWrite();
+        /* the photo went up before the message failed: take it back off
+           the server too, since deleting it here is the user saying so */
+        const pid = m.kind === "image" && m.payload && m.payload.photo;
+        const C = window.ZenofitCloud;
+        if (isPhotoId(pid) && C && C.discardChatPhoto) C.discardChatPhoto(v.threadId, pid).catch(() => {});
       }
     }
     render();
@@ -16683,7 +16986,7 @@ const READ_OK = new Set([
   /* looking at and sending things is chat; ADDING one to your library is a
      write, and chat-import is deliberately not here */
   "chat-attach", "chat-attach-step", "chat-attach-send", "chat-view", "chat-view-close",
-  "chat-image", "chat-image-close", "chat-open-ex", "chat-open-presets",
+  "chat-image", "chat-image-close", "chat-open-ex", "chat-open-presets", "chat-open-day",
   "chat-copy", "chat-unsend", "chat-discard",
   "share-open", "share-kind", "share-send", "share-open-chat",
   /* notifications belong to the phone, like the timers: nothing in them is
@@ -16768,6 +17071,8 @@ function handleBind(el) {
     ui.pickerQ = v;
     const list = document.getElementById("pickList");
     if (list) { list.innerHTML = renderPickerList(state.library); if (window.lucide) lucide.createIcons(); }
+  } else if (bind === "chatPlanDate") {
+    if (ui.chatView) { ui.chatView.planDate = v; render(); }
   } else if (bind === "chatAttachQ") {
     if (ui.chatAttach) {
       ui.chatAttach.q = v;

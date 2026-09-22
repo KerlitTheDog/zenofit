@@ -1624,7 +1624,7 @@ const seedTimers = () =>
 function newStopwatch() { return { startedAt: null, acc: 0, laps: [] }; }
 
 const defaultState = () => ({
-  version: 15,
+  version: 16,
   /* `sex` is "" until asked, and it is only ever asked by the strength
      standards, whose tables are split male/female. It sits in settings so it
      is remembered and travels in a backup, not because the app wants a
@@ -1639,7 +1639,8 @@ const defaultState = () => ({
   presets: [],    // [{id,name,description,pinned,exercises:[{exercise,muscle,kind}],createdAt}]
   timers: seedTimers(), // [{id,name,duration,endsAt,remaining,doneAt,pinned,createdAt}]
   stopwatch: newStopwatch(), // {startedAt,acc,laps}, the Log tab's third mini tab, see STOPWATCH
-  dayDrafts: [],  // [{id,date,entries,savedAt}], workout days you backed out of, see closeWorksheet()
+  dayDrafts: [],  // [{id,date,entries,dayNote,savedAt}], workout days you backed out of, see closeWorksheet()
+  dayNotes: {},   // { [date]: "how the session went" }, see dayNoteOn()
   unlogged: [],   // [{date,entries,savedAt}], lifts left unlogged on a day you DID save, see commitWorkout()
   plans: [],      // [{id,date,name,entries,createdAt}], days you intend to train, see planTargetOf()
   deloads: [],    // [{id,start,end}], planned easy weeks, inclusive ISO dates
@@ -1888,6 +1889,14 @@ function migrate(s) {
         s.drafts.workout.entries = crossAll(s.drafts.workout.entries);
     }
     s.version = 15;
+  }
+  if (v < 16) {
+    /* v16 gives the DAY a note of its own, beside the one every exercise
+       already had. hydrate() spreads defaultState() underneath the save, so
+       an older one already arrives holding an empty map; this is only here
+       to refuse anything in that key that is not one. */
+    if (!s.dayNotes || typeof s.dayNotes !== "object" || Array.isArray(s.dayNotes)) s.dayNotes = {};
+    s.version = 16;
   }
   return s;
 }
@@ -2454,6 +2463,7 @@ const SYNC_COLLECTIONS = {
   deloads:     { id: (x) => x.id },
   dayDrafts:   { id: (x) => x.id },
   unlogged:    { id: (x) => x.date },
+  dayNotes:    { map: true },
   presets:     { id: (x) => x.id, order: true },
   library:     { id: (x) => x.id, order: true },
   groups:      { id: (x) => x.name, order: true },
@@ -3339,7 +3349,7 @@ function profileHasContent(id) {
   const someMap = (k) => !!Object.keys(d[k] || {}).length;
   return some("log") || some("body") || some("plans") || some("dayDrafts") ||
          some("unlogged") || some("deloads") || some("presets") ||
-         someMap("goals") || someMap("volumeGoals");
+         someMap("goals") || someMap("volumeGoals") || someMap("dayNotes");
 }
 
 function profileIsUntouched(id) {
@@ -4100,6 +4110,7 @@ const ui = {
      has to remember to switch the mode off. */
   setOrder: null,
   libOrder: false,      // …the exercise library is, inside each of its groups
+  variationOrder: false, // …the open exercise's family of variations is
   progSeg: "progress",  // progress | standards, Progress sub-tab
   progressSelected: null,
   progressQ: "",        // …and the search box over that list of lifts
@@ -4157,6 +4168,7 @@ function resetTransient() {
   ui.entryOrder = false;
   ui.setOrder = null;
   ui.libOrder = false;
+  ui.variationOrder = false;
   ui.volumeWeek = weekOf(todayStr(), state.settings.startDate);
   ui.volAnchor = todayStr();
 }
@@ -4216,6 +4228,47 @@ const stat = (label, value, sub = "", color = "") =>
     <div style="font-size:10.5px;color:var(--muted);margin-top:4px;text-transform:uppercase;letter-spacing:.06em;font-weight:600">${label}</div>
     ${sub ? `<div style="font-size:11px;color:var(--faint)">${sub}</div>` : ""}
   </div>`;
+
+/* ── A NOTE ON THE WHOLE DAY ─────────────────────────────────
+   An entry's note is about one lift ("left elbow again on the top set").
+   This one is about the SESSION: how you slept, what the gym was like, why
+   the numbers are what they are. Two different questions, so two different
+   notes, and neither is a place to write the other.
+
+   Stored per DATE rather than on a row, because a date is what it is about:
+   a day's rows are added, edited and deleted all the time and the day they
+   happened on does not move with them. There is no "day" record to hang it
+   on — the log is a flat list of entries carrying a date — so this is a map
+   keyed by that date, exactly as `goals` is keyed by a lift's name.
+
+   IT COUNTS FOR NOTHING. No PR, no volume, no week, no graph: it is a
+   sentence, and the app never reads it. And it is dropped WITH the day it
+   belongs to (delete-day, and a day emptied out and saved as not done),
+   because a note with no session under it is a note about nothing.
+
+   Written in one place, the workout sheet, and read back in six, which is
+   the whole reason it is not just a text field: the day in the log, the day
+   on the calendar, a day parked above the history, the point you tap on a
+   lift's graph (where "why is this one down?" is the actual question), every
+   session in a lift's history, and `Last time` in the next workout — the
+   one that pays for the feature, because "shoulder was cold, went light" is
+   exactly what you want in front of you stood over the bar a week later,
+   and a note filed under one exercise could never say it. */
+const dayNoteOn = (date) => String((state.dayNotes || {})[date] || "");
+
+/* Drawn the same way in all six, so it reads as one thing seen from six
+   places rather than six notes that happen to agree. `pre-wrap` because it
+   is typed into a textarea and the line breaks are the user's. */
+const noteBlock = (text, { size = 11.5, color = "var(--faint)", top = 7 } = {}) => {
+  const n = String(text || "").trim();
+  if (!n) return "";
+  return `<div title="${esc(T("wo.dayNote"))}" style="display:flex;gap:6px;margin-top:${top}px;font-size:${size}px;color:${color};line-height:1.45">
+    <span style="flex-shrink:0;display:flex;padding-top:1px">${icon("sticky-note", size + 1)}</span>
+    <span style="flex:1;min-width:0;white-space:pre-wrap;overflow-wrap:anywhere">${esc(n)}</span>
+  </div>`;
+};
+
+const dayNoteBlock = (date, opts) => noteBlock(dayNoteOn(date), opts);
 
 function accordion(id, title, iconHtml, content) {
   const open = !!ui.accordions[id];
@@ -5009,6 +5062,7 @@ function renderDayDrafts() {
           ${entryHasData(e) ? "" : `<span style="font-size:11px;color:var(--faint)">${T("draft.empty")}</span>`}
         </div>`).join("")}
       </div>
+      ${d.dayNote ? `<div style="padding:0 14px 10px">${noteBlock(d.dayNote, { size: 12, color: "var(--muted)", top: 0 })}</div>` : ""}
       <div style="font-size:11.5px;color:var(--faint);padding:0 14px 10px;line-height:1.45">
         ${ready ? T("draft.note") : T("draft.noteBlank")}
       </div>
@@ -5085,6 +5139,16 @@ function renderHistory(log, library, badges, settings, unit) {
         ${mins > 0 ? chip(mins + " " + T("unit.min"), "#a07ec2") : ""}
         ${icon("pencil", 14, 'style="color:var(--faint);flex-shrink:0;margin-left:2px"')}
       </button>
+      ${/* the day's own note, under the day's own heading and above the
+            lifts it is about. It carries the header's own action rather
+            than sitting inert under it, because the note is the part of a
+            day people reach for a second time, and reading it and wanting
+            to change it are one gesture apart. */
+        dayNoteOn(date)
+          ? `<button data-action="edit-day" data-date="${date}" title="${T("log.editDay")}" style="width:100%;text-align:left;padding:9px 14px 11px;border-bottom:1px solid var(--border-soft)">
+              ${dayNoteBlock(date, { size: 12, color: "var(--muted)", top: 0 })}
+            </button>`
+          : ""}
       ${rows}
     </div>`;
   }).join("");
@@ -5316,6 +5380,13 @@ function renderDayCard(log, library, settings) {
     ${dl ? chip(T("vol.legendDeload"), "var(--gold)") : ""}
   </div>`;
 
+  /* how the session went, in its own words, before the list of what was in
+     it: on this card the day IS the subject, so it reads as the heading's
+     second line rather than as a footnote under the lifts */
+  const dayNote = logged.length && dayNoteOn(day)
+    ? `<div style="padding:0 14px 11px">${dayNoteBlock(day, { size: 12.5, color: "var(--muted)", top: 0 })}</div>`
+    : "";
+
   /* what actually happened, if anything did */
   const trained = logged.length ? `<div style="padding:0 14px 12px">
       <div class="pb-label" style="margin-bottom:7px">${T("plan.trained")}${result ? ` · <span style="color:var(--gold)">${T("plan.hitOf", { n: result.hit, total: result.total })}</span>` : ""}</div>
@@ -5397,7 +5468,7 @@ function renderDayCard(log, library, settings) {
   }
 
   return `<div class="pb-card" style="margin-bottom:14px;overflow:hidden">
-    ${head}${trained}${planned}${draft}${empty}
+    ${head}${dayNote}${trained}${planned}${draft}${empty}
   </div>`;
 }
 
@@ -6240,9 +6311,16 @@ function renderPointDetail(scope = "main") {
         }).join("");
       })()}
     </div>` : ""}
+    ${/* Two notes, never merged: the quoted one is what you wrote about THIS
+          LIFT, the one under it is what you wrote about the whole day. A dip
+          in a graph is explained by the second far more often than by the
+          first, which is why this card reads them both. "No note" is only
+          honest when there is neither. */""}
     ${e.notes
       ? `<div style="font-size:12.5px;color:var(--text);margin-top:9px;line-height:1.5">“${esc(e.notes)}”</div>`
-      : `<div style="font-size:11.5px;color:var(--faint);margin-top:8px">${T("chart.noNote")}</div>`}
+      : ""}
+    ${dayNoteBlock(e.date, { size: 12, color: "var(--muted)", top: e.notes ? 7 : 9 })}
+    ${e.notes || dayNoteOn(e.date) ? "" : `<div style="font-size:11.5px;color:var(--faint);margin-top:8px">${T("chart.noNote")}</div>`}
   </div>`;
 }
 
@@ -6707,6 +6785,7 @@ const DRAG_COMMIT = {
   pinnedTimer: reorderPinnedTimers,
   entry: reorderDraftEntries,
   libExercise: reorderLibraryExercises,
+  variation: reorderVariations,
   set: reorderSets,
   profile: reorderProfiles,
 };
@@ -6755,6 +6834,37 @@ function reorderLibraryExercises(from, to, row) {
   if (!group) return;
   const lib = state.library || [];
   const slots = lib.map((ex, i) => (ex.muscle === group ? i : -1)).filter((i) => i >= 0);
+  if (from >= slots.length || to >= slots.length) return;
+  const order = slots.map((i) => lib[i]);
+  const [moved] = order.splice(from, 1);
+  order.splice(to, 0, moved);
+  const next = [...lib];
+  slots.forEach((slot, k) => { next[slot] = order[k]; });
+  patch({ library: next });
+}
+
+/* ── RANKING THE WAYS YOU DO ONE MOVEMENT ──────────────────────
+   Variations arrive in the order they were invented, which is the order you
+   thought of them and nothing to do with which one you actually reach for.
+   Four grips deep, the one you do every week is the one you scroll past
+   three others to tap.
+
+   THERE IS NO SECOND ORDER TO KEEP IN STEP. A variation is an ordinary
+   library row, so its place in state.library IS its place in the family
+   panel, in the nested library list and in the picker you add a lift from;
+   one drag moves it in all three and there is no ordinal field that could
+   ever drift from the list it claims to describe. Same move as the pinned
+   strips and the library's own groups: only the slots this family already
+   occupies are rewritten, so nothing outside it shifts by a row.
+
+   The BASE is not in the list. It is not ranked against its own variations
+   — every surface that draws the family draws it first, by construction —
+   so a handle on it would promise a move that nothing would carry out. */
+function reorderVariations(from, to, row) {
+  const rootId = row && row.dataset ? row.dataset.root : null;
+  if (!rootId) return;
+  const lib = state.library || [];
+  const slots = lib.map((ex, i) => (ex.variantOf === rootId ? i : -1)).filter((i) => i >= 0);
   if (from >= slots.length || to >= slots.length) return;
   const order = slots.map((i) => lib[i]);
   const [moved] = order.splice(from, 1);
@@ -7439,6 +7549,43 @@ function exWindowVariations(ex) {
   }
 
   const family = [...(root ? [root] : []), ...kids];
+
+  /* Rearranging is a mode here for the reason it is one everywhere else in
+     the app: these rows are what you TAP to switch to a variation, and a
+     grip handle living on one is a mis-tap away from the wrong lift. */
+  const reordering = ui.variationOrder && kids.length > 1;
+  const heading = `<div style="display:flex;align-items:baseline;gap:10px">
+    <span style="font-size:11px;color:var(--faint)">${TN("variation", kids.length)}</span>
+    ${orderToggle("variation-reorder", ui.variationOrder, kids.length > 1)}
+  </div>`;
+
+  if (reordering) {
+    /* How many days you have actually trained each one, because that is the
+       thing anybody ranking these is ranking them BY, and it is sitting in
+       the log unasked. Distinct dates, not rows: two entries of one lift on
+       one day were one session, the same rule the history list reads by. */
+    const sessions = (name) => new Set(state.log.filter((e) => e.exercise === name).map((e) => e.date)).size;
+    return `
+      ${sectionTitle(T("ex.variationsTitle"), heading)}
+      ${root ? `<div class="pb-card" style="overflow:hidden;margin-bottom:8px">
+        <div style="display:flex;align-items:center;gap:10px;padding:11px 14px;opacity:.6">
+          <span style="width:7px;height:7px;border-radius:4px;flex-shrink:0;background:var(--border)"></span>
+          <span style="flex:1;min-width:0;font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${T("ex.baseVariation")}</span>
+          <span style="font-size:11px;color:var(--faint);flex-shrink:0">${T("ex.baseStays")}</span>
+        </div>
+      </div>` : ""}
+      <div class="pb-card" style="overflow:hidden;margin-bottom:10px">
+        ${kids.map((x, i) => reorderRow("variation", i, kids.length,
+          esc(x.variantName || x.name),
+          TN("session", sessions(x.name)),
+          "",
+          `data-root="${esc(rootId)}"`)).join("")}
+      </div>
+      <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 2px 18px">
+        ${T("ex.variationReorderHint", { icon: icon("grip-vertical", 11) })}
+      </div>`;
+  }
+
   const row = (x, i, n) => {
     const on = x.id === ex.id;
     return `<button ${on ? "" : `data-action="open-exercise-window" data-name="${esc(x.name)}"`} style="width:100%;display:flex;align-items:center;gap:10px;padding:10px 13px;text-align:left;color:var(--text);background:${on ? "rgba(233,185,73,.06)" : "transparent"};border-bottom:${i < n - 1 ? "1px solid var(--border-soft)" : "none"}">
@@ -7451,7 +7598,7 @@ function exWindowVariations(ex) {
   };
 
   return `
-    ${sectionTitle(T("ex.variationsTitle"), `<span style="font-size:11px;color:var(--faint)">${TN("variation", kids.length)}</span>`)}
+    ${sectionTitle(T("ex.variationsTitle"), heading)}
     <div class="pb-card" style="overflow:hidden;margin-bottom:10px">
       ${family.map((x, i) => row(x, i, family.length)).join("")}
     </div>
@@ -7617,6 +7764,9 @@ function exWindowHistory(hist) {
       </div>
       ${sets ? `<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:7px">${sets}</div>` : ""}
       ${ses.note ? `<div style="font-size:11.5px;color:var(--faint);margin-top:7px;line-height:1.45;font-style:italic">“${esc(ses.note)}”</div>` : ""}
+      ${/* a row here is A DAY, so the day's note belongs on it as much as the
+            lift's does, and the two are told apart by how they are drawn */""}
+      ${dayNoteBlock(ses.date, { top: ses.note ? 5 : 7 })}
     </button>`;
   }).join("");
 
@@ -7829,6 +7979,16 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
       ${reordering ? "" : `<button data-action="open-picker" class="pb-btn pb-ghost" style="width:100%;padding:13px 0;border-style:dashed;margin-top:4px">
         ${icon("plus", 17)} ${T("wo.addExercise")}
       </button>`}
+
+      ${/* Under the lifts, not over them: this is written once the session
+            is done, and a day-level box sat between someone and their first
+            exercise is the same species of noise as narrating the ＋ button.
+            Never on a PLAN, which is an intention and already has a name;
+            what the day turned out to be like is a thing only the day can
+            say. */
+        planning ? "" : `<div style="margin-top:20px">${field(T("wo.dayNote"),
+          `<textarea class="pb-input" rows="3" data-bind="draft.dayNote" placeholder="${T("wo.dayNotePlaceholder")}" style="resize:none">${esc(draft.dayNote || "")}</textarea>`,
+          T("wo.dayNoteHint"))}</div>`}
 
       ${planning ? "" : renderTimerList()}
     </div>
@@ -8439,6 +8599,11 @@ function renderLastTime(form) {
     </div>
     <div style="display:flex;flex-direction:column;gap:6px">${rows}</div>
     ${last.note ? `<div style="font-size:11.5px;color:var(--muted);margin-top:10px;line-height:1.45;font-style:italic">${esc(last.note)}</div>` : ""}
+    ${/* and what the whole of that day was like. "Shoulder was cold, went
+          light" is not a fact about this lift and could never have been
+          written on it, and it is the single most useful thing to have in
+          front of you stood over the bar a week later. */""}
+    ${dayNoteBlock(last.date, { size: 11.5, color: "var(--muted)", top: last.note ? 6 : 10 })}
   </div>`;
 }
 
@@ -10641,15 +10806,24 @@ const newBodyRow = () => ({ id: uid(), date: todayStr(), weight: "", waist: "", 
    form is open right now. This is a deliberate park, that is a safety net.) */
 
 function stashDayDraft(draft) {
-  if (!draft || draft.editing || draft.planning || !draft.entries.length) return;
+  if (!draft || draft.editing || draft.planning) return;
+  const dayNote = String(draft.dayNote || "").trim();
+  /* A day holding nothing but a note is still something that was typed, and
+     dropping typed text on the way out is precisely what this store exists
+     to stop. Emptying BOTH is what deletes a parked day (see closeWorksheet);
+     it cannot be SAVED on a note alone, because a note is not a workout. */
+  if (!draft.entries.length && !dayNote) return;
   const row = {
     id: draft.draftId || uid(),
     date: draft.date,
     entries: clone(draft.entries),
+    /* the note has not been logged either: it lands in state.dayNotes only
+       when the day itself is committed, exactly as the entries do */
+    dayNote,
     /* which plan this day is answering, so picking the day back up still
        knows what to consume when it is finally saved. The targets
        themselves ride on the entries and were never in danger. */
-    planIds: draft.planIds || [],
+    planIds: [...(draft.planIds || [])],
     planName: draft.planName || "",
     savedAt: Date.now(),
   };
@@ -10666,7 +10840,7 @@ function closeWorksheet() {
      still a plan for Wednesday. Emptying it out deletes it, same as a
      parked day. */
   if (draft && draft.planning) { commitPlan(draft); return; }
-  if (draft && !draft.editing && draft.entries.length) stashDayDraft(draft);
+  if (draft && !draft.editing && (draft.entries.length || String(draft.dayNote || "").trim())) stashDayDraft(draft);
   else if (draft && draft.draftId) dropDayDraft(draft.draftId);   // emptied it out
   else render();
 }
@@ -10674,6 +10848,46 @@ function closeWorksheet() {
 function dropDayDraft(id) {
   patch({ dayDrafts: (state.dayDrafts || []).filter((d) => d.id !== id) });
 }
+
+/* ── …AND READ BACK OUT OF IT, IN ONE PLACE ──────────────────────
+   stashDayDraft above is the only thing that WRITES a parked day, and this
+   is the only thing that reads one. Four buttons pick one back up —
+   Continue in the log, Log this day on the calendar, Start on a plan, and
+   Log exercise in a lift's window — and each of them used to spell the
+   same object literal out by hand.
+
+   They drifted, which is the one thing four copies reliably do: the fourth
+   never carried `planIds`, so a day started from a plan and then picked up
+   from an exercise window came back not knowing which plan it was
+   answering. prunePlans then had nothing to consume on save, and the plan
+   went on showing as missed on its day in the calendar forever, with no
+   way left to clear it.
+
+   So A FIELD ADDED TO A PARKED DAY IS ADDED HERE, not at a call site —
+   the same rule renameExerciseIn states for everything that stores an
+   exercise name, arrived at from the same direction. */
+const sheetFromParked = (d) => ({
+  date: d.date,
+  entries: clone(d.entries),
+  draftId: d.id,
+  /* copied, not handed over, for the same reason the entries are: plan-start
+     PUSHES onto the open sheet's list, and a sheet sharing the stored row's
+     array would be editing the store through the back door — which is the
+     same species of bug as the drift above, arrived at from the other side.
+     stashDayDraft copies it on the way in for the same reason. */
+  planIds: [...(d.planIds || [])],
+  planName: d.planName || "",
+  dayNote: d.dayNote || "",
+});
+
+/* The sheet for a DATE, parked day and all. "There is only ever one
+   workout for a day" is a rule three of those four buttons have to keep,
+   and this is what keeping it looks like: the day you already have, else a
+   fresh one, never a second day on the same date. */
+const sheetForDay = (date) => {
+  const parked = (state.dayDrafts || []).find((d) => d.date === date);
+  return parked ? sheetFromParked(parked) : { date, entries: [] };
+};
 
 /* Stepping the period with the arrows scrolls the calendar to match, so
    the highlighted band never wanders off the month you're looking at. */
@@ -10953,6 +11167,17 @@ function commitWorkout(draft) {
   const moved = draft.editing && draft.originalDate && draft.originalDate !== draft.date
     ? draft.originalDate : null;
   const unlogged = unloggedWith(draft.date, filled.length ? stillWaiting : [], moved);
+  /* The session note follows the day, and it is dropped with it: a day
+     emptied out and saved as not done has no session left for a note to be
+     about. The one thing an empty note does NOT do is clear a note already
+     sitting on a date this day has just been MOVED onto — that note was
+     never dealt into the sheet, so the sheet cannot be what decides it is
+     gone, exactly as the waiting lifts above are reasoned about. */
+  const dayNote = String(draft.dayNote || "").trim();
+  const dayNotes = { ...(state.dayNotes || {}) };
+  if (moved) delete dayNotes[moved];
+  if (dayNote && filled.length) dayNotes[draft.date] = dayNote;
+  else if (!moved || !dayNotes[draft.date]) delete dayNotes[draft.date];
   /* Scoring a session you are still in the middle of would be the app calling
      a day finished that its user hasn't, so the result waits for the plan to
      actually run out. */
@@ -10970,7 +11195,7 @@ function commitWorkout(draft) {
     const stamped = filled.map((e, i) => ({ ...e, date: draft.date, createdAt: now + i }));
     ui.workoutSheet = null;
     if (sum) ui.planResult = planResultOf(draft, sum);
-    patch({ log: [...kept, ...stamped], plans, unlogged });
+    patch({ log: [...kept, ...stamped], plans, unlogged, dayNotes });
     return;
   }
   const stamped = filled.map((e, i) => ({ ...e, date: draft.date, createdAt: Date.now() + i }));
@@ -10985,6 +11210,7 @@ function commitWorkout(draft) {
     dayDrafts: draftId ? (state.dayDrafts || []).filter((d) => d.id !== draftId) : state.dayDrafts,
     plans,
     unlogged,
+    dayNotes,
   });
 }
 
@@ -11709,11 +11935,7 @@ const actions = {
   /* log a day that is not today, from the calendar. The long way round
      used to be New Workout and then correcting the date */
   "log-day": (el) => {
-    const d = el.dataset.d;
-    const parked = (state.dayDrafts || []).find((x) => x.date === d);
-    ui.workoutSheet = parked
-      ? { date: parked.date, entries: clone(parked.entries), draftId: parked.id, planIds: parked.planIds || [], planName: parked.planName || "" }
-      : { date: d, entries: [] };
+    ui.workoutSheet = sheetForDay(el.dataset.d);
     ui.picking = false; ui.entryForm = null; ui.setForm = null;
     render();
   },
@@ -11726,15 +11948,10 @@ const actions = {
   "plan-start": (el) => {
     const p = (state.plans || []).find((x) => x.id === el.dataset.id);
     if (!p) return;
-    const today = todayStr();
     /* there is only ever one workout for today, the same rule
-       actions["log-exercise"] follows, for the same reason */
-    if (!ui.workoutSheet || ui.workoutSheet.planning) {
-      const parked = (state.dayDrafts || []).find((d) => d.date === today);
-      ui.workoutSheet = parked
-        ? { date: parked.date, entries: clone(parked.entries), draftId: parked.id, planIds: parked.planIds || [], planName: parked.planName || "" }
-        : { date: today, entries: [] };
-    }
+       actions["log-exercise"] follows, for the same reason — and the same
+       call, now that both of them ask sheetForDay for it */
+    if (!ui.workoutSheet || ui.workoutSheet.planning) ui.workoutSheet = sheetForDay(todayStr());
     const w = ui.workoutSheet;
     /* A day can answer more than one plan ("Push A" and "Arms" were
        planned separately and you are doing both) so the sheet carries a
@@ -12249,6 +12466,7 @@ const actions = {
        start clean rather than inheriting the last exercise's, and its
        history list opens folded no matter how far the last one was opened */
     ui.chartView.ex = null; ui.chartSel.ex = null; ui.exHistAll = false;
+    ui.variationOrder = false;
     ui.exWinEdit = false; ui.exWinDraft = null; render();
   },
   "ex-hist-all": () => { ui.exHistAll = !ui.exHistAll; render(); },
@@ -12293,13 +12511,7 @@ const actions = {
     const name = el.dataset.name;
     const ex = state.library.find((x) => x.name === name);
     if (!ex) return;
-    if (!ui.workoutSheet) {
-      const today = todayStr();
-      const parked = (state.dayDrafts || []).find((d) => d.date === today);
-      ui.workoutSheet = parked
-        ? { date: parked.date, entries: clone(parked.entries), draftId: parked.id }
-        : { date: today, entries: [] };
-    }
+    if (!ui.workoutSheet) ui.workoutSheet = sheetForDay(todayStr());
     ui.exWin = null; ui.exWinEdit = false; ui.exWinDraft = null;
     ui.picking = false; ui.pickerQ = ""; ui.pickerQuick = null;
     ui.entryForm = { f: newEntry(ex.name, ex.muscle, exKind(ex)), isDraft: true };
@@ -12404,7 +12616,7 @@ const actions = {
     const d = (state.dayDrafts || []).find((x) => x.id === el.dataset.id);
     if (!d) return;
     ui.tab = "log"; ui.logSeg = "history"; resetTransient();
-    ui.workoutSheet = { date: d.date, entries: clone(d.entries), draftId: d.id, planIds: d.planIds || [], planName: d.planName || "" };
+    ui.workoutSheet = sheetFromParked(d);
     ui.picking = false; ui.entryForm = null; ui.setForm = null;
     render();
   },
@@ -12440,6 +12652,8 @@ const actions = {
       /* the date this day came from, kept because the sheet's own date field
          can move it somewhere else before it is saved, see commitWorkout */
       date, originalDate: date, entries: [...entries, ...ghosts, ...waiting],
+      /* the day's own note, back in the one place it can be edited */
+      dayNote: dayNoteOn(date),
       editing: true, originalIds: entries.map((e) => e.id),
       planIds: carry.map((pl) => pl.id),
       planName: (carry.find((pl) => pl.name) || {}).name || "",
@@ -12454,11 +12668,15 @@ const actions = {
       const ids = new Set(draft.originalIds || []);
       const date = draft.date;
       ui.workoutSheet = null;
+      const dayNotes = { ...(state.dayNotes || {}) };
+      delete dayNotes[date];
       /* the day is gone, so there is nothing left for its waiting lifts to
-         wait on, and nowhere they could ever be reopened from */
+         wait on, nowhere they could ever be reopened from, and no session
+         for its note to have been about */
       patch({
         log: state.log.filter((e) => !ids.has(e.id)),
         unlogged: (state.unlogged || []).filter((u) => u.date !== date),
+        dayNotes,
       });
     }
   },
@@ -12481,6 +12699,7 @@ const actions = {
      drop whatever was typed before it was hidden rather than reapplying a
      filter the user last saw three taps ago */
   "lib-reorder": () => { ui.libOrder = !ui.libOrder; if (ui.libOrder) ui.libraryQ = ""; render(); },
+  "variation-reorder": () => { ui.variationOrder = !ui.variationOrder; render(); },
   "save-as-preset": () => {
     if (!ui.workoutSheet || !ui.workoutSheet.entries.length) return;
     ui.presetForm = { name: "", description: "" };
@@ -13170,6 +13389,11 @@ function handleBind(el) {
     ui.workoutSheet.date = v; render();
   } else if (bind === "draft.name") {
     ui.workoutSheet.name = v;
+  } else if (bind === "draft.dayNote") {
+    /* deliberately no render(): rebuilding #app on a keystroke throws away
+       the field the caret is sitting in. Nothing on screen answers to this
+       but the box it is being typed into. persist() below is the checkpoint. */
+    ui.workoutSheet.dayNote = v;
   } else if (bind === "progressSel") {
     ui.progressSelected = v;
     ui.chartView.main = null; ui.chartSel.main = null;   // a different lift is a different chart

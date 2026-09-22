@@ -28,6 +28,7 @@ export const COLLECTIONS = new Set([
   "deloads",
   "dayDrafts",
   "unlogged",
+  "dayNotes",
   "library",
   "groups",
   "settings",

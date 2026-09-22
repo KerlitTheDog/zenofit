@@ -16,6 +16,9 @@
  * Phase 6 adds chat, which lives in chat.js and touches none of the above:
  * a message belongs to an ACCOUNT and travels to another person, where
  * everything else here belongs to a profile and travels between devices.
+ * Phase 7 gives photos a store of their own (photos.js), so a library row
+ * carries a photo's id instead of the photo, and a message can carry a
+ * thing from the app as well as words.
  */
 
 import { cleanUsername, cleanKey, newSalt, hashKey, sameHash } from "./auth.js";
@@ -23,6 +26,7 @@ import { newSeed, normalizeSeed } from "./seeds.js";
 import { accessFor, canRead, canWrite, canAdmin } from "./access.js";
 import { sendToUser } from "./push.js";
 import { chatRoute } from "./chat.js";
+import { photoRoute } from "./photos.js";
 import {
   validateItem, encodeCursor, decodeCursor,
   MAX_ITEMS_PER_PUSH, MAX_PUSH_BODY_BYTES,
@@ -151,6 +155,17 @@ function safeParse(text) {
   if (text == null) return null;
   try { return JSON.parse(text); } catch { return null; }
 }
+
+/* The kinds a device may turn off, stored as a sorted comma list so the
+   same choice is always the same string. Anything else is dropped rather
+   than refused: an app newer than this server may know a kind it does
+   not, and that is no reason to fail the whole subscription. */
+const PUSH_KINDS = ["chat", "timer"];
+const offKinds = (v) => {
+  const list = Array.isArray(v) ? PUSH_KINDS.filter((k) => v.includes(k)) : [];
+  return list.length ? list.join(",") : null;
+};
+const offList = (s) => (s ? String(s).split(",").filter(Boolean) : []);
 
 /* ---- routes --------------------------------------------------------------- */
 
@@ -332,6 +347,15 @@ async function route(request, env, url, ctx) {
       json, fail, readJson, newId, sendToUser,
       waitUntil: ctx && ctx.waitUntil ? (p2) => ctx.waitUntil(p2) : null,
     });
+    if (res) return res;
+  }
+
+  /* ---- photos -------------------------------------------------------------
+   * Their own file for the same reason chat has one: they are not items and
+   * never touch the item routes. A library row names its photo by id and
+   * the photo itself is fetched from here, once, by whoever needs it. */
+  if (seg[0] === "v1" && seg[1] === "photos") {
+    const res = await photoRoute({ request, env, method, seg, user, json, fail, readJson });
     if (res) return res;
   }
 
@@ -685,18 +709,36 @@ async function route(request, env, url, ctx) {
        handed to someone else may hand it back under a different user, so the
        row follows the endpoint, not the user. */
     await env.DB.prepare(
-      "INSERT INTO push_subs (id, user_id, endpoint, p256dh, auth, platform, created_at) " +
-      "VALUES (?, ?, ?, ?, ?, ?, ?) " +
+      "INSERT INTO push_subs (id, user_id, endpoint, p256dh, auth, platform, created_at, off_kinds) " +
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
       "ON CONFLICT(endpoint) DO UPDATE SET " +
       "  user_id = excluded.user_id, p256dh = excluded.p256dh, " +
-      "  auth = excluded.auth, platform = excluded.platform"
+      "  auth = excluded.auth, platform = excluded.platform, off_kinds = excluded.off_kinds"
     ).bind(
       newId(), user.id, endpoint, keys.p256dh, keys.auth,
       typeof body.platform === "string" ? body.platform.slice(0, 20) : null,
-      Date.now()
+      Date.now(), offKinds(body.off)
     ).run();
 
-    return json({ subscribed: true }, 201);
+    return json({ subscribed: true, off: offList(offKinds(body.off)) }, 201);
+  }
+
+  /* ── WHICH KINDS THIS DEVICE WANTS ─────────────────────────────────────
+     One switch turns notifications on for a device, and each kind can then
+     be turned off on its own: messages on the phone and not on the laptop,
+     or rest timers without the chat. Kept on the SUBSCRIPTION because that
+     is what a device is to the push service, and checked in sendToUser so a
+     message this device said no to is never sent to it at all -- the other
+     way round, a push the phone has to swallow, is one Safari revokes the
+     subscription over after a handful. */
+  if (p === "/v1/push/prefs" && method === "PUT") {
+    const body = await readJson(request).catch(() => ({}));
+    if (typeof body.endpoint !== "string") return fail(400, "bad_request", "Which subscription?");
+    const off = offKinds(body.off);
+    const res = await env.DB.prepare("UPDATE push_subs SET off_kinds = ? WHERE endpoint = ? AND user_id = ?")
+      .bind(off, body.endpoint, user.id).run();
+    if (!res.meta || !res.meta.changes) return fail(404, "not_found", "This device is not subscribed.");
+    return json({ off: offList(off) });
   }
 
   if (p === "/v1/push/subscribe" && method === "DELETE") {
@@ -707,11 +749,21 @@ async function route(request, env, url, ctx) {
     return json({ unsubscribed: true });
   }
 
+  /* How many devices this account can be reached on, and -- given the
+     endpoint of the one asking -- whether THIS device is one of them and
+     which kinds it has turned off. The notifications window reads it. */
   if (p === "/v1/push/status" && method === "GET") {
     const row = await env.DB.prepare(
       "SELECT COUNT(*) AS n FROM push_subs WHERE user_id = ?"
     ).bind(user.id).first();
-    return json({ subscriptions: row ? row.n : 0, configured: !!env.VAPID_PRIVATE_KEY });
+    const endpoint = url.searchParams.get("endpoint");
+    const me = endpoint ? await env.DB.prepare(
+      "SELECT off_kinds FROM push_subs WHERE endpoint = ? AND user_id = ?"
+    ).bind(endpoint, user.id).first() : null;
+    return json({
+      subscriptions: row ? row.n : 0, configured: !!env.VAPID_PRIVATE_KEY,
+      thisDevice: endpoint ? !!me : null, off: me ? offList(me.off_kinds) : [],
+    });
   }
 
   /* Sends immediately. The only honest way to find out whether push survives

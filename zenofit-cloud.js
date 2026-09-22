@@ -13,6 +13,10 @@
  *
  *   zenofit:device   {userId, token}       this browser's identity
  *   zenofit:push     {endpoint}            what we last subscribed with
+ *
+ * (app.js keeps `zenofit:notify` beside these: whether this DEVICE wants
+ * notifications at all and which kinds, which is a fact about the phone and
+ * therefore not in `state` either.)
  */
 
 (function () {
@@ -203,8 +207,11 @@
 
   /* MUST be called from a real tap. iOS rejects a permission prompt that was
      not triggered by a user gesture, and Chrome penalises sites that ask on
-     load. Resolves {ok:true} or {ok:false, reason}. Never throws at the UI. */
-  async function enablePush() {
+     load. Resolves {ok:true} or {ok:false, reason}. Never throws at the UI.
+
+     opts.off is the kinds this device has said no to ("chat", "timer"),
+     sent with the subscription so the server never pushes them here. */
+  async function enablePush(opts) {
     const blocked = pushBlockedReason();
     if (blocked) return { ok: false, reason: blocked };
 
@@ -242,6 +249,7 @@
         endpoint: raw.endpoint,
         keys: raw.keys,
         platform: isIOS() ? "ios" : /Android/.test(navigator.userAgent) ? "android" : "desktop",
+        off: (opts && Array.isArray(opts.off)) ? opts.off : [],
       });
 
       write(PUSH_KEY, { endpoint: raw.endpoint });
@@ -277,6 +285,35 @@
   }
 
   const testPush = () => call("POST", "/v1/push/test", {});
+
+  /* This browser's own subscription endpoint, or null. It is the handle the
+     server files per-device preferences under. */
+  async function pushEndpoint() {
+    try {
+      if (!("serviceWorker" in navigator)) return null;
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.getSubscription();
+      return sub ? sub.endpoint : null;
+    } catch { return null; }
+  }
+
+  /* Which kinds this device does not want. Fire-and-report: a device with
+     no subscription has nothing to set, and says so. */
+  async function setPushPrefs(off) {
+    const endpoint = await pushEndpoint();
+    if (!endpoint) return { ok: false, reason: "not-subscribed" };
+    try {
+      const res = await call("PUT", "/v1/push/prefs", { endpoint, off: Array.isArray(off) ? off : [] });
+      return { ok: true, off: res.off };
+    } catch (e) { return { ok: false, error: e && e.message, status: e && e.status }; }
+  }
+
+  /* What the server knows: devices on the account, and whether THIS one is
+     among them. Throws, like the other diagnostics the window shows. */
+  async function pushStatus() {
+    const endpoint = await pushEndpoint();
+    return call("GET", "/v1/push/status" + (endpoint ? "?endpoint=" + encodeURIComponent(endpoint) : ""));
+  }
 
   /* ---- timers ------------------------------------------------------------- */
 
@@ -372,6 +409,23 @@
     return call("POST", "/v1/profiles/" + profileId + "/items", body);
   }
 
+  /* ---- photos ---------------------------------------------------------------
+   *
+   * A photo's id is the SHA-256 of its data URL, worked out here the same
+   * way the server checks it, so the two can never disagree about what an
+   * id names. Transport only: which photos a library needs, and when to
+   * send or fetch them, is app.js's business (the PHOTOS block there).
+   *
+   * These throw, like the sync transport above, because the caller has to
+   * tell "not there yet" (404) from "no signal".                          */
+  async function photoId(dataUrl) {
+    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(dataUrl)));
+    return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  const photoHave = (ids) => call("POST", "/v1/photos/have", { ids });
+  const photoPut  = (id, data) => call("PUT", "/v1/photos/" + id, { data });
+  const photoGet  = (id) => call("GET", "/v1/photos/" + id);
+
   /* ---- profiles and seeds -------------------------------------------------- */
 
   /* ---- the roster -----------------------------------------------------------
@@ -461,8 +515,20 @@
      screen, and passing it is what makes a retry safe: the server lands the
      second attempt on the same row instead of sending twice. A send without
      one is a send that can duplicate itself on a flaky connection. */
-  const sendMessage = (threadId, body, clientId) =>
-    call("POST", "/v1/chats/" + threadId + "/messages", { body, clientId });
+  const sendMessage = (threadId, body, clientId, kind, payload) =>
+    call("POST", "/v1/chats/" + threadId + "/messages",
+      kind && kind !== "text" ? { body, clientId, kind, payload } : { body, clientId });
+
+  /* Delete for everyone. Only the sender may, and the other phone drops its
+     copy on its next poll (the server names it in `unsent`). */
+  const unsendMessage = (threadId, messageId) =>
+    call("DELETE", "/v1/chats/" + threadId + "/messages/" + encodeURIComponent(messageId));
+
+  /* A picture for this conversation, uploaded before the message that
+     shows it. Readable by the thread's members only, and deleted with the
+     message if it is unsent. Resolves {photoId}. */
+  const uploadChatPhoto = (threadId, data) =>
+    call("POST", "/v1/chats/" + threadId + "/photos", { data });
 
   const markChatRead = (threadId, at) =>
     call("POST", "/v1/chats/" + threadId + "/read", Number.isFinite(at) ? { at } : {});
@@ -483,13 +549,14 @@
     ensureDevice, hasDevice,
     deriveKey, register, signIn, signOut, account, signedIn, nameAvailable, verifyPassword,
     isStandalone, isIOS, pushBlockedReason,
-    enablePush, disablePush, pushEnabled, testPush,
+    enablePush, disablePush, pushEnabled, testPush, pushEndpoint, setPushPrefs, pushStatus,
+    photoId, photoHave, photoPut, photoGet,
     scheduleTimer, cancelTimer, clockDrift,
     pullChanges, pushChanges,
     listProfiles, createProfile, renameProfile, deleteProfile, setProfileOrder,
     listSeeds, createSeed, rotateSeeds, revokeSeed, joinWithSeed,
     listGrants, revokeGrant, setGrantLevel, leaveProfile,
-    searchUsers, listChats, openChat, fetchMessages, sendMessage,
+    searchUsers, listChats, openChat, fetchMessages, sendMessage, unsendMessage, uploadChatPhoto,
     markChatRead, muteChat, leaveChat, listBlocks, blockUser, unblockUser,
     _call: call,
   };

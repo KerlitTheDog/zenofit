@@ -29,11 +29,17 @@ export async function sendToUser(env, userId, message) {
   }
 
   const subs = await env.DB.prepare(
-    "SELECT id, endpoint, p256dh, auth FROM push_subs WHERE user_id = ?"
+    "SELECT id, endpoint, p256dh, auth, off_kinds FROM push_subs WHERE user_id = ?"
   ).bind(userId).all();
 
-  const rows = subs.results || [];
-  if (!rows.length) return { sent: 0, failed: 0, skipped: "no subscriptions" };
+  /* A device that has turned this kind off is not sent it at all (see
+     /v1/push/prefs). Never a test: a test is somebody asking whether push
+     reaches this phone, and answering "it would, but you said no to
+     messages" by showing nothing is the wrong answer to that question. */
+  const all = subs.results || [];
+  const rows = message.kind === "test" ? all
+    : all.filter((r) => !String(r.off_kinds || "").split(",").includes(message.kind));
+  if (!rows.length) return { sent: 0, failed: 0, skipped: all.length ? "turned off for " + message.kind : "no subscriptions" };
 
   const vapid = vapidFrom(env);
   let sent = 0, failed = 0;

@@ -6,7 +6,7 @@ on a server can. What it does verify is everything up to the moment the push
 service takes over: the key is served, a subscription is stored, a timer is
 accepted, bad times are refused, and cancelling works.
 """
-import json, urllib.request, urllib.error, sys, time, base64, os
+import json, urllib.request, urllib.error, urllib.parse, sys, time, base64, os
 
 # Override to run against a local `wrangler dev`:
 #   ZENOFIT_API=http://127.0.0.1:8787 python3 test/smoke_push.py
@@ -78,6 +78,21 @@ s, b = call("POST", "/v1/push/subscribe", token=tok, body=fake)
 check("re-subscribing does not duplicate", s == 201, (s, b))
 s, b = call("GET", "/v1/push/status", token=tok)
 check("still exactly one subscription", b.get("subscriptions") == 1, b)
+
+print("\n== which kinds this device wants ==")
+s, b = call("POST", "/v1/push/subscribe", token=tok, body=dict(fake, off=["chat", "nonsense"]))
+check("a subscription can say no to a kind", s == 201 and b.get("off") == ["chat"], (s, b))
+s, b = call("GET", "/v1/push/status?endpoint=" + urllib.parse.quote(fake["endpoint"], safe=""), token=tok)
+check("status knows THIS device is subscribed", b.get("thisDevice") is True, b)
+check("and which kinds it turned off", b.get("off") == ["chat"], b)
+s, b = call("PUT", "/v1/push/prefs", token=tok, body={"endpoint": fake["endpoint"], "off": ["timer", "chat"]})
+check("prefs can be changed without re-subscribing", s == 200 and b.get("off") == ["chat", "timer"], (s, b))
+s, b = call("PUT", "/v1/push/prefs", token=tok, body={"endpoint": fake["endpoint"], "off": []})
+check("and turned all back on", s == 200 and b.get("off") == [], (s, b))
+s, b = call("PUT", "/v1/push/prefs", token=tok, body={"endpoint": "https://fcm.googleapis.com/fcm/send/nobody", "off": ["chat"]})
+check("prefs for an endpoint that is not yours are a 404", s == 404, (s, b))
+s, b = call("GET", "/v1/push/status?endpoint=https%3A%2F%2Fexample.com%2Fnope", token=tok)
+check("a device that is not subscribed says so", b.get("thisDevice") is False, b)
 
 print("\n== sending to a dead endpoint ==")
 s, b = call("POST", "/v1/push/test", token=tok)

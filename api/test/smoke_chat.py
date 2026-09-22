@@ -251,6 +251,104 @@ check("writing to them again puts the SAME thread back, not a second one",
 s, r = call("GET", "/v1/chats/%s/messages" % btid, token=blocker["token"])
 check("with the history still in it", len(r.get("messages", [])) >= 2, r.get("messages"))
 
+print("\n== a conversation with nothing in it ==")
+quiet_a = account("dan")
+quiet_b = account("fay")
+s, qt = call("POST", "/v1/chats", token=quiet_a["token"], body={"userId": quiet_b["id"]})
+qtid = qt["threadId"]
+s, r = call("GET", "/v1/chats", token=quiet_a["token"])
+check("whoever opened it sees it straight away", any(c["threadId"] == qtid for c in r.get("chats", [])), r)
+s, r = call("GET", "/v1/chats", token=quiet_b["token"])
+check("the other person does NOT, until something is said",
+      not any(c["threadId"] == qtid for c in r.get("chats", [])), r)
+s, qm = call("POST", "/v1/chats/%s/messages" % qtid, token=quiet_a["token"], body={"body": "hey", "clientId": "q1"})
+s, r = call("GET", "/v1/chats", token=quiet_b["token"])
+check("and does once it is", any(c["threadId"] == qtid for c in r.get("chats", [])), r)
+
+print("\n== unsending ==")
+s, r = call("DELETE", "/v1/chats/%s/messages/%s" % (qtid, qm["message"]["messageId"]), token=quiet_b["token"])
+check("only the sender can unsend", s == 403 and r.get("error") == "not_yours", (s, r))
+s, r = call("DELETE", "/v1/chats/%s/messages/%s" % (qtid, qm["message"]["messageId"]), token=quiet_a["token"])
+check("the sender can", s == 200 and r.get("unsent") is True and r.get("deletedAt"), (s, r))
+s, r = call("DELETE", "/v1/chats/%s/messages/%s" % (qtid, qm["message"]["messageId"]), token=quiet_a["token"])
+check("twice is the same answer, not an error", s == 200 and r.get("unsent") is True, (s, r))
+s, r = call("GET", "/v1/chats/%s/messages" % qtid, token=quiet_a["token"])
+check("an unsent message is in nobody's page, not even as a placeholder", r.get("messages") == [], r)
+s, r = call("GET", "/v1/chats", token=quiet_b["token"])
+check("and a chat left with nothing in it leaves the other person's list again",
+      not any(c["threadId"] == qtid for c in r.get("chats", [])), r)
+s, r = call("GET", "/v1/chats", token=quiet_a["token"])
+check("while staying in the list of whoever opened it", any(c["threadId"] == qtid for c in r.get("chats", [])), r)
+s, r = call("DELETE", "/v1/chats/%s/messages/%s" % (qtid, str(uuid.uuid4())), token=quiet_a["token"])
+check("unsending a message that is not there is a 404", s == 404, (s, r))
+s, r = call("DELETE", "/v1/chats/%s/messages/%s" % (qtid, qm["message"]["messageId"]), token=nosy["token"])
+check("a stranger cannot even find the thread to try", s == 404, (s, r))
+
+# a message the other phone had ALREADY fetched has to be taken back off it
+s, keep = call("POST", "/v1/chats/%s/messages" % qtid, token=quiet_a["token"], body={"body": "first", "clientId": "q2"})
+s, gone = call("POST", "/v1/chats/%s/messages" % qtid, token=quiet_a["token"], body={"body": "oops", "clientId": "q3"})
+s, r = call("GET", "/v1/chats", token=quiet_b["token"])
+mine = [c for c in r.get("chats", []) if c["threadId"] == qtid]
+check("before: two unread, and the newest is the preview",
+      mine and mine[0]["unread"] == 2 and mine[0]["lastMessage"]["body"] == "oops", mine)
+since = gone["message"]["at"]
+s, r = call("DELETE", "/v1/chats/%s/messages/%s" % (qtid, gone["message"]["messageId"]), token=quiet_a["token"])
+s, r = call("GET", "/v1/chats/%s/messages?since=%d" % (qtid, since), token=quiet_b["token"])
+check("a `since` poll names what was unsent since, so the other phone drops its copy",
+      gone["message"]["messageId"] in r.get("unsent", []), r)
+check("and does not carry the message itself", all(m["messageId"] != gone["message"]["messageId"] for m in r.get("messages", [])), r)
+s, r = call("GET", "/v1/chats/%s/messages?since=%d" % (qtid, int(time.time() * 1000) + 60000), token=quiet_b["token"])
+check("a poll from after the unsend is not told about it again", r.get("unsent") == [], r)
+s, r = call("GET", "/v1/chats", token=quiet_b["token"])
+mine = [c for c in r.get("chats", []) if c["threadId"] == qtid]
+check("after: the unread count drops by one", mine and mine[0]["unread"] == 1, mine)
+check("and the preview falls back to the message before it", mine and mine[0]["lastMessage"]["body"] == "first", mine)
+
+print("\n== a thing, not just words ==")
+ex_payload = {"v": 1, "title": "Belt squat", "ex": {"name": "Belt squat", "muscle": "Legs", "kind": "strength"}}
+s, r = call("POST", "/v1/chats/%s/messages" % qtid, token=quiet_a["token"],
+            body={"body": "Exercise: Belt squat", "clientId": "q4", "kind": "exercise", "payload": ex_payload})
+check("an exercise can be sent", s == 201 and r["message"]["kind"] == "exercise", (s, r))
+check("and comes back carrying its payload", r["message"].get("payload") == ex_payload, r)
+s, r = call("GET", "/v1/chats/%s/messages" % qtid, token=quiet_b["token"])
+last = (r.get("messages") or [{}])[-1]
+check("the other side reads it with its kind and payload", last.get("kind") == "exercise" and last.get("payload") == ex_payload, last)
+check("and a plain message reads as text", r["messages"][0].get("kind") == "text" and r["messages"][0].get("payload") is None, r["messages"][0])
+s, r = call("GET", "/v1/chats", token=quiet_b["token"])
+mine = [c for c in r.get("chats", []) if c["threadId"] == qtid]
+check("the chat list says what kind the last message was", mine and mine[0]["lastMessage"].get("kind") == "exercise", mine)
+s, r = call("POST", "/v1/chats/%s/messages" % qtid, token=quiet_a["token"],
+            body={"body": "x", "kind": "virus", "payload": {}})
+check("an unknown kind is refused by name", s == 400 and r.get("error") == "bad_kind", (s, r))
+s, r = call("POST", "/v1/chats/%s/messages" % qtid, token=quiet_a["token"], body={"body": "x", "kind": "preset"})
+check("a thing with no payload is refused", s == 400 and r.get("error") == "bad_payload", (s, r))
+s, r = call("POST", "/v1/chats/%s/messages" % qtid, token=quiet_a["token"],
+            body={"body": "x", "kind": "preset", "payload": {"junk": "y" * 40000}})
+check("and so is one that is an essay", s == 400 and r.get("error") == "bad_payload", (s, r))
+
+print("\n== a photo in a conversation ==")
+tiny = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+s, r = call("POST", "/v1/chats/%s/messages" % qtid, token=quiet_a["token"],
+            body={"body": "Photo", "kind": "image", "payload": {"photo": "0" * 64}})
+check("a photo message naming a photo nobody uploaded here is refused", s == 400 and r.get("error") == "bad_payload", (s, r))
+s, r = call("POST", "/v1/chats/%s/photos" % qtid, token=quiet_a["token"], body={"data": "data:image/svg+xml;base64,PHN2Zz4="})
+check("an SVG is not a photo", s == 400 and r.get("error") == "bad_photo", (s, r))
+s, up = call("POST", "/v1/chats/%s/photos" % qtid, token=quiet_a["token"], body={"data": tiny})
+check("a photo is uploaded into the thread", s == 201 and len(up.get("photoId", "")) == 64, (s, up))
+pid = up.get("photoId")
+s, again = call("POST", "/v1/chats/%s/photos" % qtid, token=quiet_a["token"], body={"data": tiny})
+check("uploading it again lands on the same photo", s == 200 and again.get("photoId") == pid and again.get("stored") is False, (s, again))
+s, r = call("GET", "/v1/photos/" + pid, token=quiet_b["token"])
+check("the other member can read it", s == 200 and r.get("data") == tiny, (s, r))
+s, r = call("GET", "/v1/photos/" + pid, token=nosy["token"])
+check("somebody outside the thread cannot, and is told it does not exist", s == 404, (s, r))
+s, pm = call("POST", "/v1/chats/%s/messages" % qtid, token=quiet_a["token"],
+             body={"body": "Photo", "clientId": "q5", "kind": "image", "payload": {"photo": pid, "w": 1, "h": 1}})
+check("and a message can show it", s == 201 and pm["message"]["payload"]["photo"] == pid, (s, pm))
+s, r = call("DELETE", "/v1/chats/%s/messages/%s" % (qtid, pm["message"]["messageId"]), token=quiet_a["token"])
+s, r = call("GET", "/v1/photos/" + pid, token=quiet_b["token"])
+check("unsending the message deletes the photo with it", s == 404, (s, r))
+
 print("\n== unauthenticated ==")
 s, r = call("GET", "/v1/chats")
 check("no token, no chats", s == 401, (s, r))

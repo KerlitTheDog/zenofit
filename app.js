@@ -340,15 +340,21 @@ function shortUnder(ex, parentName) {
 }
 
 /* ── A PHOTO THAT EXISTS SOMEWHERE ELSE ───────────────────────────────
-   `imageMissing` is set by sync, on the way UP: a picture too big for the
-   wire is left behind so the lift itself can travel (see withoutBigPhoto),
-   and the row arrives saying that a photo exists on the phone it was taken
-   on. Saying nothing would make two very different rows identical on
-   screen — a lift nobody has ever photographed, and a lift photographed on
-   another phone — and only one of those is worth going and asking about.
-   The photo always wins over the flag, here and in syncApply: a row that
-   holds one is not a row waiting for one.                              */
-const photoAway = (ex) => !!(ex && !ex.image && ex.imageMissing);
+   A library row that has a photo travels WITHOUT it: the picture goes up
+   to the photo store once and the row carries its id (`photoId`, see the
+   PHOTOS block beside sync). So a row can arrive here saying "there is a
+   photo" before the photo itself has been fetched, and it has to say so
+   rather than draw a blank where a machine should be.
+
+   Two ways to be in that state, and they read differently on screen:
+   `photoId` with no image is a photo ON ITS WAY — it is in the store and
+   is being fetched. `imageMissing` with no id is a photo taken on a device
+   still running a build from before the store, which kept pictures on the
+   phone that took them; it comes across once that device updates. The
+   photo always wins over both, here and in syncApply: a row that holds one
+   is not a row waiting for one.                                        */
+const photoAway = (ex) => !!(ex && !ex.image && (ex.imageMissing || ex.photoId));
+const photoComing = (ex) => !!(ex && !ex.image && ex.photoId);
 
 function exLabelOf(ex) {
   if (!ex) return "";
@@ -2337,6 +2343,9 @@ function closeEverything() {
   /* a password given to Storage check opens that screen for that visit
      and not for whatever comes after it */
   ui.showStorage = false; ui.storUnlock = null; ui.storUnlocked = new Set();
+  /* "send in a chat" names a lift or a preset of the profile being left,
+     and a shared card's "add to my library" is about to mean another one */
+  ui.shareTo = null; ui.chatView = null; ui.chatAttach = null;
 }
 
 function switchProfile(id) {
@@ -2360,6 +2369,9 @@ function switchProfile(id) {
   /* a live profile has nothing on disk, so what loadState just handed back
      is an empty default; the rows come off the server */
   liveEnter(id);
+  /* photos pulled while this profile was off screen arrived as ids; a live
+     one runs its own pass once its rows are in */
+  if (!syncLive(id)) photoPass();
 }
 
 /* A new profile starts empty, exactly as the app does on a new phone: the
@@ -2555,33 +2567,36 @@ const SYNC_WIPE_FLOOR = 10;
    allowOverwrite() and spent by the next push that asks. */
 let syncWipeOk = false;
 
-/* ── A PHOTO THAT CANNOT TRAVEL MUST NOT TAKE THE LIFT WITH IT ────────
-   The photo is by far the biggest thing in this app: 1000px of JPEG in
-   base64, routinely 200-500 KB and sometimes past the limit (see
-   readImageScaled). A library row over the limit used to be left behind
-   WHOLE, which meant the exercise did not travel either — so the person
-   the profile was shared with opened a log full of sessions naming a lift
-   their library had never heard of, and nothing on either screen said
-   which row was responsible.
+/* ── A PHOTO NEVER TRAVELS INSIDE ITS ROW ─────────────────────────────
+   The photo is by far the biggest thing in this app: a 1000px picture in
+   base64 is 100-700 KB, against a few hundred bytes for the lift it
+   belongs to. It used to ride inside the library row, and a row over the
+   item limit went up WITHOUT it so that the lift could still travel —
+   which meant the other phone got the exercise and a placeholder, and
+   every pull of a library re-sent every photo on the page.
 
-   The lift is the part that matters and it is tiny. So the picture is
-   dropped and the row goes up carrying `imageMissing`, which is not a
-   consolation prize: it is the fact that there IS a photo, on the device
-   that took it, and it is what lets the other phone say so instead of
-   drawing a blank where a machine should be. Sending less than we hold is
-   safe in exactly one direction and syncApply enforces it: a row that
-   says "the photo could not come" never erases a photo already there.
+   Now every photo goes to the photo store once (the PHOTOS block below:
+   photoUpload, and syncPush calling it before any row that names one)
+   and the row on the wire carries only its id. `imageMissing: true` rides
+   along on every such row as well, and that is for the builds that came
+   before the store: to one of those, the flag means "there is a photo
+   somewhere else, keep yours", so an old phone that still holds the
+   picture keeps it instead of deleting it on the strength of a row it
+   does not fully understand. A row with no photo at all goes up exactly
+   as it always has, so nothing that never had a picture is re-sent.
 
-   Done HERE rather than in syncPush so the trimmed row is built before
-   `__i` is appended, which keeps the key order — and therefore the change
-   hash — identical on the device that sent it and the device that got it.
-   Two devices disagreeing about that hash is a row that pushes itself
-   back and forth for ever, one request per sync, changing nothing.    */
-const withoutBigPhoto = (ex) => {
-  if (!ex || !ex.image) return ex;
-  /* the margin covers the `__i` this row is about to be given */
-  if (JSON.stringify(ex).length + 16 <= SYNC_MAX_ITEM) return ex;
-  return { ...ex, image: "", imageMissing: true };
+   Done HERE rather than in syncPush so the wire row is built before `__i`
+   is appended, which keeps the key order — and therefore the change hash
+   — identical on the device that sent it and the device that got it. The
+   image is taken OUT wherever it sat and the flag put back on the end, so
+   a row that has since had its photo filled in on the receiving phone
+   (added last, by photoPass) still hashes the same as the one it came
+   from. Two devices disagreeing about that hash is a row that pushes
+   itself back and forth for ever, one request per sync, changing nothing. */
+const libraryWire = (ex) => {
+  if (!ex || !(ex.image || ex.photoId || ex.imageMissing)) return ex;
+  const { image, imageMissing, ...rest } = ex;
+  return { ...rest, imageMissing: true };
 };
 
 const syncAll = () => { try { return JSON.parse(localStorage.getItem(SYNC_KEY)) || {}; } catch { return {}; } };
@@ -2688,13 +2703,15 @@ function syncLocalItems(from) {
       src.forEach((item, i) => {
         const itemId = def.id(item);
         if (itemId == null || itemId === "") return;
-        /* the picture is the only thing in here that has ever been too big
-           for the wire, and it is not worth the lift it is attached to */
-        const row = collection === "library" ? withoutBigPhoto(item) : item;
+        /* a photo travels on its own, by id; see libraryWire */
+        const row = collection === "library" ? libraryWire(item) : item;
         out.push({
           collection, itemId: String(itemId),
           json: def.order ? { ...row, __i: i } : row,
-          heldPhoto: row !== item,
+          /* a picture that has no id yet cannot be fetched by anybody:
+             photoPass gives it one within the second, and until then the
+             other phone is told there is a photo and not where */
+          heldPhoto: !!(collection === "library" && item && item.image && !item.photoId),
         });
       });
     }
@@ -2728,18 +2745,30 @@ function syncApply(items, into) {
       else if (it.json) {
         const row = { ...it.json };
         delete row.__i;
-        /* ── A ROW THAT SAYS "THE PHOTO COULD NOT COME" NEVER TAKES ONE ──
-           syncPush sends a library row without its picture when the
-           picture is too big for the wire, and the server does not filter
-           a pull by the device that wrote it — so the phone that stripped
-           the photo pulls the stripped row straight back. Applied
-           literally that is a phone deleting its own photograph the
-           moment it shares the profile. The flag only ever means "there
-           is one elsewhere", so wherever a photo is actually held, the
-           photo wins and the flag goes. */
-        if (row.imageMissing && at >= 0 && list[at] && list[at].image) {
-          row.image = list[at].image;
+        /* ── A ROW WITHOUT ITS PICTURE NEVER TAKES THE ONE THAT IS HERE ──
+           A library row always travels without its photo (libraryWire),
+           and the server does not filter a pull by the device that wrote
+           it — so the phone that took the photo pulls the photo-less row
+           straight back. Applied literally that is a phone deleting its
+           own photograph the moment it syncs. So the picture held here is
+           kept whenever the row is talking about the SAME one: the same
+           `photoId`, or, from a build that predates ids, the bare flag
+           that means "there is one elsewhere". A different id is a photo
+           changed on the other device, and the one here makes way for it
+           (photoPass fetches it). A row with neither is a photo that was
+           removed, and removing it is what that row says. */
+        const mine = it.collection === "library" && at >= 0 ? list[at] : null;
+        if (mine && mine.image && !row.image && (row.photoId ? row.photoId === mine.photoId : row.imageMissing)) {
+          row.image = mine.image;
           delete row.imageMissing;
+        } else if (mine && mine.image && !row.image && row.photoId && !mine.photoId) {
+          /* The picture here has no id yet — it came the old way, inside its
+             row — and the other device has just given THE SAME picture one.
+             Kept aside rather than thrown away: photoPass hashes it, and if
+             it is the photo the id names it goes straight back in, with no
+             download and no blank placeholder while the other phone is
+             still uploading. */
+          photoPrev.set(String(row.id), mine.image);
         }
         if (at >= 0) list[at] = row; else list.push(row);
         n++;
@@ -2949,9 +2978,9 @@ async function syncPush(localId) {
        screen naming the row responsible.
 
        Two things can make a row unsendable. Its SIZE, which used to mean
-       an exercise photo and now cannot: withoutBigPhoto has already left
-       the picture behind so the lift itself travels, and anything still
-       over the limit after that is a genuinely enormous row. And its
+       an exercise photo and now cannot: a photo never rides inside its row
+       any more (libraryWire), so anything over the limit is a genuinely
+       enormous row. And its
        ITEMID, which for a goal or a volume target is an exercise or group
        NAME, and a long enough one is refused outright.
 
@@ -3012,6 +3041,14 @@ async function syncPush(localId) {
   /* and carried to the server, which keeps the same refusal for the same
      reason and does not get to see the confirm this device already showed */
   const allowWipe = wouldWipe;
+  /* ── A ROW THAT NAMES A PHOTO GOES UP AFTER THE PHOTO DOES ───────────
+     Otherwise the other phone is handed an id it cannot fetch yet. Never a
+     reason to hold the row back: a photo that fails to upload now is
+     retried by the next pass, and the lift is the part that matters. */
+  if (queue.some((q) => q.collection === "library" && q.json && q.json.photoId)) {
+    try { await photoUpload((profileStateFor(localId) || {}).library || []); }
+    catch (e) { console.warn("photo upload failed; the rows go anyway", e); }
+  }
   queue.push(...tombs);
   syncSet(localId, { tooBig, heldPhotos, wipeBlocked: null });
   if (!queue.length) { syncSet(localId, { lastPushedAt: Date.now() }); return { ok: true, sent: 0, stale: 0, tooBig, heldPhotos }; }
@@ -3185,6 +3222,7 @@ function liveEnter(localId) {
          to recover it, and it would be the right thing to recover. */
       try { localStorage.removeItem(stateKeyFor(localId)); } catch { /* never was one */ }
       render();
+      photoPass();
     })
     .catch((e) => {
       /* No signal, or the grant was revoked. Put back whatever was on
@@ -3209,6 +3247,256 @@ function liveAdopt(localId) {
      day this ships still opens the copy it already had. */
   syncSet(localId, { live: true, cursor: null, marks: {} });
   return true;
+}
+
+/* ══ PHOTOS: A STORE OF THEIR OWN ═════════════════════════════════════
+   A photo is the one thing in this app too big to treat like the rest of a
+   profile, so it is not. The library row keeps its picture LOCALLY, as a
+   data URL in `ex.image`, exactly as before: the app draws from it with no
+   network, a backup file carries it, and nothing that reads a library row
+   has to know any of this exists. What changed is how a picture reaches
+   another device.
+
+   Every photo gets an ID, the SHA-256 of its data URL (`ex.photoId`). The
+   picture goes up to the photo store ONCE under that id (photoUpload), and
+   the row travels with the id and without the picture (libraryWire). The
+   other device sees an id it has no picture for and fetches it (photoLoad),
+   and fills `ex.image` in on its own copy. Because the id is the content,
+   the same picture uploaded by two phones is one row on the server, a
+   device can ask which ids are already there before it spends an upload,
+   and the server checks the bytes are the bytes the id names.
+
+   One pass does all three, for the profile on screen (photoPass):
+     identify   a picture with no id gets one (new photos, and every photo
+                saved before this existed);
+     upload     anything with an id the server has not confirmed goes up,
+                asked about first in batches, remembered per device in
+                PHOTO_UP_KEY so a confirmed id is never asked about again;
+     download   anything with an id and no picture is fetched.
+   It runs after every sync, on the way into a profile, and straight after
+   a photo is added. Every step fails soft and is retried by the next pass:
+   no signal means the placeholder stays a little longer, never a lost lift.
+
+   Fetched pictures are also kept in the browser's Cache Storage under
+   PHOTO_CACHE, keyed by id. That is what lets a live profile, which keeps
+   nothing on the phone, and a chat, whose photos are not in any profile,
+   show a picture a second time without fetching it again. sw.js leaves
+   that cache alone when it clears old shells, and signing out clears it
+   along with the messages (chatForget), because the chat's pictures are
+   the account's and not the phone's.                                    */
+
+const PHOTO_CACHE = "zenofit-photos";
+const PHOTO_UP_KEY = "zenofit:photos-up";
+/* a 404 is "not uploaded YET" — the other device may be mid-upload — so it
+   is asked again, just not on every render */
+const PHOTO_MISS_RETRY = 3 * 60000;
+const PHOTO_MEM_MAX = 80;
+
+const photoMem = new Map();       // id -> data URL, this session
+const photoWaits = new Map();     // id -> the fetch in flight
+const photoMissAt = new Map();    // id -> when the server last said "not here"
+const photoRefused = new Set();   // ids the store turned down, this session
+const photoPrev = new Map();      // library row id -> the picture it held before a row gave it an id
+
+const isPhotoId = (v) => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
+/* the only thing a fetched picture is allowed to be, since it goes straight
+   into an <img>: a raster data URL, never markup */
+const isPhotoData = (v) => typeof v === "string" && /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(v);
+
+function photoRemember(id, data) {
+  photoMem.delete(id);
+  photoMem.set(id, data);
+  while (photoMem.size > PHOTO_MEM_MAX) photoMem.delete(photoMem.keys().next().value);
+}
+
+async function photoCacheGet(id) {
+  try {
+    if (!("caches" in window)) return null;
+    const hit = await (await caches.open(PHOTO_CACHE)).match("photo/" + id);
+    const data = hit ? await hit.text() : null;
+    return isPhotoData(data) ? data : null;
+  } catch { return null; }
+}
+async function photoCachePut(id, data) {
+  try {
+    if (!("caches" in window)) return;
+    await (await caches.open(PHOTO_CACHE)).put("photo/" + id, new Response(data, { headers: { "content-type": "text/plain" } }));
+  } catch { /* a cache is a convenience; the photo is still on the server */ }
+}
+function photoCacheClear() {
+  photoMem.clear(); photoMissAt.clear();
+  try { if ("caches" in window) caches.delete(PHOTO_CACHE); } catch { /* nothing to clear */ }
+}
+
+/* Paint a picture that has just arrived into every slot waiting for it,
+   in place: a fetch finishing is not a reason to rebuild the screen, and a
+   render here would throw away whatever somebody was typing. */
+function photoPaint(id, data) {
+  document.querySelectorAll(`[data-photo-slot="${id}"]`).forEach((el) => {
+    el.innerHTML = `<img src="${esc(data)}" alt="" style="width:100%;height:100%;object-fit:${el.dataset.fit || "cover"};display:block;border-radius:inherit">`;
+    el.style.background = "transparent";
+  });
+}
+
+/* One picture by id, from memory, then this phone's cache, then the store.
+   Resolves the data URL or null, and never throws. */
+function photoLoad(id) {
+  if (!isPhotoId(id)) return Promise.resolve(null);
+  if (photoMem.has(id)) return Promise.resolve(photoMem.get(id));
+  if (photoWaits.has(id)) return photoWaits.get(id);
+  const miss = photoMissAt.get(id);
+  if (miss && Date.now() - miss < PHOTO_MISS_RETRY) return Promise.resolve(null);
+  const job = (async () => {
+    let data = await photoCacheGet(id);
+    if (!data) {
+      const C = window.ZenofitCloud;
+      if (!C || !C.photoGet) return null;
+      try {
+        const res = await C.photoGet(id);
+        data = res && isPhotoData(res.data) ? res.data : null;
+      } catch (e) {
+        if (e && e.status === 404) photoMissAt.set(id, Date.now());
+        return null;
+      }
+      if (data) photoCachePut(id, data);
+    }
+    if (data) { photoRemember(id, data); photoMissAt.delete(id); photoPaint(id, data); }
+    return data;
+  })().finally(() => photoWaits.delete(id));
+  photoWaits.set(id, job);
+  return job;
+}
+
+/* A picture that may not be here yet, as markup: the picture if it is in
+   memory, otherwise a slot that photoPaint fills when it lands. `style`
+   sizes the box; the image fills it. */
+function photoSlot(id, style, opts = {}) {
+  const have = photoMem.get(id);
+  const fit = opts.fit || "cover";
+  if (have) return `<div style="${style};overflow:hidden"><img src="${esc(have)}" alt="${esc(opts.alt || "")}" style="width:100%;height:100%;object-fit:${fit};display:block;border-radius:inherit"></div>`;
+  if (isPhotoId(id)) photoLoad(id);
+  return `<div data-photo-slot="${esc(id)}" data-fit="${fit}" style="${style};overflow:hidden;display:flex;align-items:center;justify-content:center;background:var(--surface2);color:var(--faint)">${icon(opts.icon || "image", opts.iconSize || 18)}</div>`;
+}
+
+const photoUpRead = () => {
+  try { const v = JSON.parse(localStorage.getItem(PHOTO_UP_KEY) || "[]"); return new Set(Array.isArray(v) ? v : []); }
+  catch { return new Set(); }
+};
+const photoUpWrite = (set) => {
+  try { localStorage.setItem(PHOTO_UP_KEY, JSON.stringify([...set].slice(-3000))); } catch { /* re-asked next time */ }
+};
+
+/* Put every picture in these rows that the server has not confirmed into
+   the store. Asks first, in batches, so a phone that got a picture the old
+   way (inside its row) and has only just given it an id does not upload
+   what the server is already holding. THROWS on a network failure, so a
+   caller can tell "done" from "try again later". */
+async function photoUpload(rows) {
+  const C = window.ZenofitCloud;
+  if (!C || !C.photoHave) return 0;
+  const up = photoUpRead();
+  const byId = new Map();
+  for (const x of rows || []) {
+    if (x && isPhotoData(x.image) && isPhotoId(x.photoId) && !up.has(x.photoId)) byId.set(x.photoId, x.image);
+  }
+  if (!byId.size) return 0;
+  const ids = [...byId.keys()];
+  for (let i = 0; i < ids.length; i += 90) {
+    const res = await C.photoHave(ids.slice(i, i + 90));
+    for (const id of (res && res.have) || []) up.add(id);
+  }
+  let sent = 0;
+  try {
+    for (const id of ids) {
+      if (up.has(id) || photoRefused.has(id)) continue;
+      try {
+        await C.photoPut(id, byId.get(id));
+        up.add(id);
+        sent++;
+      } catch (e) {
+        /* the server REFUSING one picture (a format it does not take, a full
+           account) is about that picture, and must not stop the others;
+           no signal, a rate limit or a server fault is about the network,
+           and the whole pass waits for the next one */
+        if (!e || !e.status || e.status === 429 || e.status >= 500) throw e;
+        photoRefused.add(id);
+      }
+    }
+  } finally { photoUpWrite(up); }
+  return sent;
+}
+
+let photoBusy = false, photoAgain = false;
+
+async function photoPass() {
+  if (photoBusy) { photoAgain = true; return; }
+  const C = window.ZenofitCloud;
+  if (!C || !C.photoId || !profiles.active || !Array.isArray(state.library)) return;
+  photoBusy = true;
+  const pid = activeProfileId();
+  const here = () => activeProfileId() === pid;
+  try {
+    /* ── identify. Only on a profile this phone may write to: an id is a
+       change to the row, and somebody else's read-only training is not
+       ours to change. Their rows arrive with ids already. */
+    const ro = syncReadOnly() || syncLive();
+    const bare = ro ? [] : state.library.filter((x) => x && isPhotoData(x.image) && !x.photoId);
+    if (bare.length) {
+      const got = new Map();
+      for (const x of bare) {
+        try { got.set(x.id, { photoId: await C.photoId(x.image), image: x.image }); } catch { /* next pass */ }
+      }
+      if (!here()) return;
+      let changed = false;
+      const library = state.library.map((x) => {
+        const g = got.get(x.id);
+        /* only if the picture is still the one that was hashed: a photo
+           replaced while this ran gets its own turn */
+        if (!g || x.image !== g.image || x.photoId) return x;
+        changed = true;
+        return { ...x, photoId: g.photoId };
+      });
+      if (changed) { state = { ...state, library }; persist(); }
+    }
+
+    /* ── upload */
+    if (!ro) {
+      try { await photoUpload(state.library); } catch { /* offline: next pass */ }
+    }
+
+    /* ── download, one at a time: a library is never in a hurry, and a
+       dozen parallel fetches of a few hundred KB each on gym wifi is how
+       the one the person is actually looking at arrives last */
+    let landed = false;
+    for (const x of state.library.filter((r) => r && !r.image && isPhotoId(r.photoId))) {
+      /* the picture this phone already had, if it is the one the id names */
+      let data = null;
+      const prev = photoPrev.get(String(x.id));
+      if (prev) {
+        photoPrev.delete(String(x.id));
+        try { if ((await C.photoId(prev)) === x.photoId) { data = prev; photoRemember(x.photoId, prev); } } catch { /* fetch it instead */ }
+      }
+      if (!data) data = await photoLoad(x.photoId);
+      if (!data || !here()) continue;
+      state = {
+        ...state,
+        library: state.library.map((y) => {
+          if (y.id !== x.id || y.image || y.photoId !== x.photoId) return y;
+          landed = true;
+          const { imageMissing, ...rest } = y;
+          return { ...rest, image: data };
+        }),
+      };
+    }
+    /* written without a render where the caret is: the slots have already
+       been painted in place (photoPaint), so nothing on screen is waiting */
+    if (landed && here()) { persist(); if (!syncTyping()) render(); }
+  } catch (e) {
+    console.warn("photo pass failed", e);
+  } finally {
+    photoBusy = false;
+    if (photoAgain) { photoAgain = false; setTimeout(photoPass, 0); }
+  }
 }
 
 /* ── SYNC THAT NOBODY HAS TO REMEMBER TO TAP ──────────────────────────
@@ -3299,6 +3587,9 @@ async function syncQuiet(opts) {
   } finally {
     syncInFlight = false;
   }
+  /* whatever landed may name photos this phone has not got, and whatever
+     was added here may be a photo nobody else has: see photoPass */
+  photoPass();
 }
 
 /* Something changed locally. Called from the save path, so it sees every
@@ -3799,6 +4090,7 @@ async function rosterSync(opts) {
 function chatReset() {
   chatForget();
   ui.chatThread = null; ui.chatMenu = null; ui.chatFind = ""; ui.chatResults = null;
+  ui.chatMsgMenu = null; ui.chatAttach = null; ui.chatView = null; ui.chatImage = null; ui.shareTo = null;
 }
 
 /* Just logged in. The account's own list, from this device if it has held
@@ -3967,6 +4259,17 @@ function chatRead() {
   if (!Array.isArray(c.threads)) c.threads = [];
   if (!c.msgs || typeof c.msgs !== "object") c.msgs = {};
   if (!c.drafts || typeof c.drafts !== "object") c.drafts = {};
+  /* which shared things were already added, per message, so the button
+     says "added" rather than offering to do it twice */
+  if (!c.imported || typeof c.imported !== "object") c.imported = {};
+  /* ── A MESSAGE STILL "SENDING" WHEN THE APP OPENS IS NOT SENDING ──────
+     Nothing resumes a send across a reload, so a message the app closed on
+     mid-send used to sit under "Sending…" for ever, with no Retry to press.
+     Anything pending at load is therefore failed, which is what it is, and
+     gets the Retry every other failure gets. */
+  for (const id of Object.keys(c.msgs)) {
+    for (const m of c.msgs[id] || []) if (m && m.pending) { delete m.pending; m.failed = true; }
+  }
   chatCache = c;
   return c;
 }
@@ -4010,6 +4313,8 @@ function chatWrite() {
     else if (c.msgs[id].length > CHAT_KEEP) c.msgs[id] = c.msgs[id].slice(-CHAT_KEEP);
   }
   for (const id of Object.keys(c.drafts)) if (!live.has(id)) delete c.drafts[id];
+  const held = new Set(Object.values(c.msgs).flat().map((m) => m.messageId));
+  for (const id of Object.keys(c.imported)) if (!held.has(id)) delete c.imported[id];
   try { localStorage.setItem(CHAT_KEY, JSON.stringify(c)); return true; }
   catch { return false; }
 }
@@ -4022,7 +4327,12 @@ function chatForget() {
      otherwise fire after this and put a half-typed message back on disk */
   clearTimeout(chatDraftTimer);
   chatCache = null;
+  chatUploads.clear();
+  chatGone.clear();
   try { localStorage.removeItem(CHAT_KEY); } catch { /* already gone */ }
+  /* the pictures fetched for this account's chats and profiles are the
+     account's, exactly as its messages are (see the PHOTOS block) */
+  photoCacheClear();
 }
 
 const chatThreads = () => chatRead().threads;
@@ -4058,7 +4368,7 @@ function chatMerge(threadId, incoming) {
   let changed = false;
 
   for (const m of incoming) {
-    if (!m || !m.messageId) continue;
+    if (!m || !m.messageId || chatGone.has(m.messageId)) continue;
     const mine = byId.get(m.messageId) || (m.clientId && byClient.get(m.clientId)) || null;
     if (mine) {
       /* the acknowledged copy replaces the optimistic one wholesale: same
@@ -4080,6 +4390,68 @@ function chatMerge(threadId, incoming) {
 
   c.msgs[threadId] = chatSortMsgs(have);
   return changed;
+}
+
+/* ── WHAT WAS UNSENT, TAKEN BACK OFF THIS PHONE ───────────────────────
+   Unsending is delete for everyone: the message goes from the server and
+   from every phone that has already drawn it, and nothing is left in its
+   place. The server never hands an unsent message out again, so the only
+   work here is dropping the copy this phone already holds, and it learns
+   about one in two ways:
+
+     by NAME — a `since` poll lists what was unsent since the newest
+       message held, because that message was fetched long before it was
+       unsent and its timestamp never moves (`page.unsent`);
+     by ABSENCE — a tail or a page of history is a complete window of the
+       thread, so anything held inside that window that the page does not
+       mention is no longer there (chatReconcile).
+
+   Messages still on their way out of THIS phone (pending, failed, not yet
+   given a server id) are never touched by either: they are not the
+   server's to report. */
+const chatGone = new Set();           // unsent from here this session; a late poll must not bring one back
+const chatUploads = new Map();        // clientId -> {chatPhoto?, ups?}, see chatPost
+const chatLocal = (m) => m.pending || m.failed || String(m.messageId).startsWith("local:");
+
+function chatDrop(threadId, ids) {
+  const c = chatRead();
+  const have = c.msgs[threadId] || [];
+  const out = have.filter((m) => chatLocal(m) || !ids.has(m.messageId));
+  if (out.length === have.length) return false;
+  c.msgs[threadId] = out;
+  return true;
+}
+
+/* `inWindow(at)` says which timestamps the page is complete for. */
+function chatReconcile(threadId, page, inWindow) {
+  const seen = new Set((page || []).map((m) => m.messageId));
+  const gone = new Set((chatRead().msgs[threadId] || [])
+    .filter((m) => !chatLocal(m) && !seen.has(m.messageId) && inWindow(m.at))
+    .map((m) => m.messageId));
+  return gone.size ? chatDrop(threadId, gone) : false;
+}
+
+/* The notification of a message that has since been unsent still sits in
+   the shade saying what it said. The page cannot un-ring a phone, but it
+   can take the notification back the moment it hears. */
+function chatCloseNotifs(threadId) {
+  try {
+    if (!("serviceWorker" in navigator)) return;
+    navigator.serviceWorker.ready
+      .then((reg) => reg.getNotifications({ tag: "chat-" + threadId }))
+      .then((list) => list.forEach((n) => n.close()))
+      .catch(() => {});
+  } catch { /* nothing to close */ }
+}
+
+/* The thread's last line in the list, from what this phone holds, for the
+   moment between unsending and the next poll saying the same thing. */
+function chatRelast(threadId) {
+  const t = chatThreadOf(threadId);
+  if (!t) return;
+  const last = chatMsgs(threadId).filter((m) => !chatLocal(m)).pop();
+  t.lastMessage = last ? { body: last.body, from: last.from, at: last.at, kind: last.kind || "text" } : null;
+  if (last) t.lastMessageAt = last.at;
 }
 
 /* ── the poll ──────────────────────────────────────────────────────────
@@ -4115,11 +4487,17 @@ async function chatPoll(opts) {
        and a gap is not — the same lean the change feed takes. */
     const open = ui.chatThread && ui.chatThread.threadId;
     if (open && chatThreadOf(open)) {
-      const held = chatMsgs(open).filter((m) => !m.pending && !m.failed);
+      const held = chatMsgs(open).filter((m) => !chatLocal(m));
       const since = held.length ? held[held.length - 1].at : 0;
       const page = await C.fetchMessages(open, since ? { since } : { limit: 60 });
       if (chatMerge(open, page.messages || [])) changed = true;
       if (!since && page.hasMore) ui.chatThread.hasMore = true;
+      /* unsent by the other person, or by this account on another phone */
+      let dropped = (page.unsent || []).length ? chatDrop(open, new Set(page.unsent)) : false;
+      if (!page.hasMore) {
+        dropped = chatReconcile(open, page.messages, since ? (at) => at >= since : () => true) || dropped;
+      }
+      if (dropped) { changed = true; chatCloseNotifs(open); }
       /* Looking at it IS reading it, so the badge clears without anybody
          being asked to dismiss anything. Only while the app is actually
          on screen: a thread left open behind a lock screen has not been
@@ -4236,7 +4614,8 @@ function chatSWClick(data) {
   }
   /* A timer notification: the toast and the Timer tab already say what
      happened, so this only has to put somebody in front of them. */
-  if (data.kind === "timer" || data.kind === "test") { ui.tab = "timer"; render(); }
+  if (data.kind === "timer") { ui.tab = "timer"; render(); }
+  else if (data.kind === "test") { ui.notifyWin = true; ui.notifyDiag = { loading: true }; render(); notifyDiagLoad(); }
 }
 (function claimSWClicks() {
   const hub = window.__zenofitSW;
@@ -4282,6 +4661,13 @@ async function chatOpenFetch(threadId) {
   try {
     const page = await C.fetchMessages(threadId, { limit: 60 });
     chatMerge(threadId, page.messages || []);
+    /* the tail is complete from its oldest message to now, so anything held
+       in that stretch and not in it was unsent while this thread was shut.
+       Strictly after the oldest: messages sharing its millisecond may have
+       fallen just outside the page. */
+    const msgs = page.messages || [];
+    const floor = page.hasMore && msgs.length ? msgs[0].at : -Infinity;
+    if (chatReconcile(threadId, msgs, (at) => at > floor)) chatCloseNotifs(threadId);
     if (ui.chatThread && ui.chatThread.threadId === threadId) {
       ui.chatThread.loading = false;
       ui.chatThread.hasMore = !!page.hasMore;
@@ -4310,8 +4696,12 @@ async function chatLoadEarlier(threadId) {
   if (!held.length) return;
   f.paging = true; ui.chatStick = false; render();
   try {
-    const page = await C.fetchMessages(threadId, { before: held[0].at, limit: 60 });
+    const before = held[0].at;
+    const page = await C.fetchMessages(threadId, { before, limit: 60 });
     chatMerge(threadId, page.messages || []);
+    const msgs = page.messages || [];
+    const floor = page.hasMore && msgs.length ? msgs[0].at : -Infinity;
+    chatReconcile(threadId, msgs, (at) => at > floor && at < before);
     chatWrite();
     if (ui.chatThread === f) { f.hasMore = !!page.hasMore; f.error = null; }
   } catch (e) {
@@ -4337,23 +4727,73 @@ async function chatLoadEarlier(threadId) {
    with one tap to send it again. Throwing away what somebody typed
    because a request failed is the one outcome that is never acceptable. */
 async function chatSend(threadId, text) {
-  const C = window.ZenofitCloud;
   const body = String(text || "").trim();
+  if (!body) return;
+  await chatPost(threadId, { body });
+}
+
+/* ── WHAT A SEND NEEDS THAT IS NOT IN THE MESSAGE ─────────────────────
+   A photo has to be uploaded before the message that shows it, and an
+   exercise's photo before the exercise that names it. Neither belongs in
+   the chat cache: a picture is hundreds of kilobytes and the cache lives
+   in localStorage beside everybody's training. So it is held here, in
+   memory, by clientId, for as long as the send takes — and a photo
+   message the app closed on before it went is marked failed on the next
+   load (chatRead), with a line saying to send it again. */
+/* (declared with chatGone, above the poll, so nothing can reach it early) */
+
+/* One message, words or a thing, drawn on screen before the request goes. */
+async function chatPost(threadId, { body, kind = "text", payload = null, upload = null }) {
+  const C = window.ZenofitCloud;
   if (!C || !body || !chatSignedIn()) return;
   const me = chatMe();
   const clientId = "c" + uid();
+  if (upload) chatUploads.set(clientId, upload);
 
   chatMerge(threadId, [{
     messageId: "local:" + clientId,
-    from: me.userId, body, at: Date.now(), clientId, pending: true,
+    from: me.userId, body, kind, payload, at: Date.now(), clientId, pending: true,
   }]);
   const t = chatThreadOf(threadId);
-  if (t) { t.lastMessage = { body, from: me.userId, at: Date.now() }; t.lastMessageAt = Date.now(); }
+  if (t) { t.lastMessage = { body, from: me.userId, at: Date.now(), kind }; t.lastMessageAt = Date.now(); }
   chatWrite();
   ui.chatStick = true;
   render();
 
   await chatDeliver(threadId, clientId);
+  return clientId;
+}
+
+/* ── UNSEND: DELETE FOR EVERYONE ──────────────────────────────────────
+   Off this screen first, then off the server, which tells every other
+   phone on its next poll (see chatDrop). A failure puts it back where it
+   was and says why, because a message that vanished here and is still on
+   the other phone is exactly the lie this feature exists to prevent. */
+async function chatUnsend(threadId, messageId) {
+  const C = window.ZenofitCloud;
+  const c = chatRead();
+  const list = c.msgs[threadId] || [];
+  const row = list.find((m) => m.messageId === messageId);
+  if (!C || !row || chatLocal(row)) return;
+  chatGone.add(messageId);
+  c.msgs[threadId] = list.filter((m) => m.messageId !== messageId);
+  delete c.imported[messageId];
+  chatRelast(threadId);
+  chatWrite();
+  if (ui.chatView && ui.chatView.messageId === messageId) ui.chatView = null;
+  render();
+  try {
+    await C.unsendMessage(threadId, messageId);
+    chatLastPoll = 0;
+  } catch (e) {
+    if (e && e.status === 404) return;     // already gone, which is what was asked for
+    chatGone.delete(messageId);
+    chatMerge(threadId, [row]);
+    chatRelast(threadId);
+    chatWrite();
+    render();
+    alert(chatErrText(e));
+  }
 }
 
 /* ── WHERE A CONVERSATION IS SCROLLED TO ──────────────────────────────
@@ -4415,7 +4855,25 @@ async function chatDeliver(threadId, clientId) {
   row.pending = true; delete row.failed; delete row.error;
 
   try {
-    const res = await C.sendMessage(threadId, row.body, clientId);
+    const job = chatUploads.get(clientId) || {};
+    /* a photo message: the picture into the thread first, then the message
+       naming it. Kept on the row once it is up, so a Retry after a failed
+       send does not upload it twice. */
+    if (row.kind === "image" && !(row.payload && row.payload.photo)) {
+      if (!isPhotoData(job.chatPhoto)) {
+        const lost = new Error(T("chat.photoLost")); lost.status = 400; throw lost;
+      }
+      const up = await C.uploadChatPhoto(threadId, job.chatPhoto);
+      photoRemember(up.photoId, job.chatPhoto);
+      photoCachePut(up.photoId, job.chatPhoto);
+      row.payload = { ...(row.payload || {}), photo: up.photoId };
+      chatWrite();
+    }
+    /* an exercise's own photo, into the store, so the person it is sent to
+       can see the machine as well as read about it */
+    if (job.ups && job.ups.length) await photoUpload(job.ups.map((u) => ({ image: u.data, photoId: u.id })));
+    const res = await C.sendMessage(threadId, row.body, clientId, row.kind || "text", row.payload || null);
+    chatUploads.delete(clientId);
     chatMerge(threadId, [res.message]);
     chatWrite();
     if (!syncTyping()) render();
@@ -5073,12 +5531,20 @@ const ui = {
   chatStarting: false,  // a "start a chat with this person" round trip
   chatThread: null,     // {threadId, draft, hasMore, loading, paging, error}
   chatMenu: null,       // threadId whose mute/block/leave sheet is open
+  chatMsgMenu: null,    // {threadId, messageId} a long-pressed message's copy/unsend sheet
+  chatAttach: null,     // {threadId, step, q} the composer's + sheet
+  chatView: null,       // {threadId, messageId, done?} a shared thing, open in full
+  chatImage: null,      // {threadId, messageId} a photo, full screen
+  shareTo: null,        // {kinds, kind, ref, busy?, sent?, failed?} "send in a chat" from elsewhere
   /* Whether the open conversation is pinned to its newest message. True
      until somebody scrolls up to read history, which is the one time a
      new message must NOT yank the screen back down. */
   chatStick: true,
-  chatPushOn: false,    // notifications were granted in this session
-  chatPushBusy: false,
+  /* ── notifications, see the NOTIFICATIONS block ─────────────────── */
+  notifyOn: false,      // this device is subscribed to push, as the browser reports it
+  notifyBusy: false,    // an enable or disable in flight
+  notifyWin: false,     // the Notifications window is open
+  notifyDiag: null,     // {loading, status, error, msg, ok, testing} the check at its foot
 };
 
 function resetTransient() {
@@ -5709,9 +6175,18 @@ function render() {
   if (ui.groupForm) html += renderGroupForm();
   if (ui.deloadForm) html += renderDeloadForm();
   if (ui.planResult) html += renderPlanResult();
-  /* the thread first, then its own menu on top of it */
+  /* the thread first, then everything that opens from it on top of it:
+     a card in full, a photo, the + sheet, and the two menus */
   if (ui.chatThread) html += renderChatThread();
+  if (ui.chatView) html += renderChatView();
+  if (ui.chatImage) html += renderChatImage();
+  if (ui.chatAttach) html += renderChatAttach();
   if (ui.chatMenu) html += renderChatMenu();
+  if (ui.chatMsgMenu) html += renderChatMsgMenu();
+  /* sending something from where it lives: above whatever it lives in */
+  if (ui.shareTo) html += renderShareTo();
+  /* opened from Settings or from the chat tab, so above both */
+  if (ui.notifyWin) html += renderNotifyWindow();
 
   html += `</div></div>`;
   app.innerHTML = html;
@@ -7364,6 +7839,8 @@ function renderProgStandards(log, library, unit) {
       </div>
     </div>
 
+    ${chatShareBtn("rank", "last", "margin:-4px 0 16px")}
+
     ${sectionTitle(T("std.ladder"), `<span style="font-size:11px;color:var(--faint)">${T("std.atBodyweight", { bw: trimNum(res.bw), unit: res.unit })}</span>`)}
     <div class="pb-card" style="overflow:hidden;margin-bottom:16px">${ladder}</div>
 
@@ -7742,38 +8219,22 @@ function chatAvatar(name, size = 42) {
   return `<span style="flex-shrink:0;width:${size}px;height:${size}px;border-radius:${Math.round(size / 2.6)}px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:${Math.round(size / 2.4)}px;background:hsl(${h} 42% 30%);color:hsl(${h} 70% 88%)">${esc(ch)}</span>`;
 }
 
-/* ── notifications, asked for where the answer matters ────────────────
-   Push has until now only ever been turned on from the diagnostics page,
-   which is a page nobody visits. A rest timer survives that because it
-   also rings locally; a message cannot, since the whole point of one is
-   reaching a phone that is in a pocket with the app shut.
-
-   So the chat tab asks, once, in a strip it stops drawing the moment the
-   answer is yes. It must be a real tap (iOS refuses a permission prompt
-   that was not, and Chrome penalises a site that asks on load), which is
-   exactly what this is. Every reason it cannot be offered is said in
-   words somebody can act on rather than the strip silently not appearing:
-   on iOS the app has to be installed to the home screen first, and a
-   permission already refused can only be undone in the browser's own
-   settings.                                                            */
-function chatPushStrip() {
+/* ── A DOORWAY, NOT A SECOND SWITCH ───────────────────────────────────
+   This used to be a strip with its own "Turn on" button, which was the
+   Settings button again under a different name (see the NOTIFICATIONS
+   block). It is now a way INTO the one window, shown only while nobody has
+   decided: somebody who turned notifications off made that choice in the
+   place it is made, and does not need it put back under their nose here. */
+function chatNotifyDoor() {
   const C = window.ZenofitCloud;
   if (!C || !chatSignedIn()) return "";
-  if (ui.chatPushOn) return "";          // asked and granted, this session
-  const why = C.pushBlockedReason();
-  if (why === "unsupported") return "";  // nothing to offer and nothing to say
-
-  const tint = why ? "rgba(93,138,168,.12)" : "rgba(233,185,73,.08)";
-  const ink = why ? "var(--steel)" : "var(--gold)";
-  const line = why === "ios-needs-install" ? T("chat.pushIos")
-    : why === "denied" ? T("chat.pushDenied")
-    : T("chat.pushOffer");
-
-  return `<div class="pb-card" style="display:flex;align-items:center;gap:10px;padding:11px 12px;margin-bottom:12px;background:${tint};border-color:${ink}33">
-    ${icon(why ? "bell-off" : "bell", 16, `style="color:${ink};flex-shrink:0"`)}
-    <span style="flex:1;min-width:0;font-size:11.5px;line-height:1.45;color:var(--muted)">${line}</span>
-    ${why ? "" : `<button data-action="chat-push-on" ${ui.chatPushBusy ? "disabled" : ""} class="pb-btn pb-ghost" style="flex-shrink:0;padding:7px 12px;font-size:12px;color:var(--gold);border-color:rgba(233,185,73,.4)">${ui.chatPushBusy ? T("sync.working") : T("chat.pushOn")}</button>`}
-  </div>`;
+  const st = notifyState();
+  if (st === "on" || st === "unsupported" || notifyPrefs().want !== null) return "";
+  return `<button data-action="notify-open" class="pb-card" style="width:100%;display:flex;align-items:center;gap:10px;padding:10px 12px;margin-bottom:12px;text-align:left;background:rgba(233,185,73,.06);border-color:rgba(233,185,73,.28)">
+    ${icon("bell-off", 15, 'style="color:var(--gold);flex-shrink:0"')}
+    <span style="flex:1;min-width:0;font-size:11.5px;line-height:1.45;color:var(--muted)">${T("notify.chatDoor")}</span>
+    ${icon("chevron-right", 15, 'style="color:var(--faint);flex-shrink:0"')}
+  </button>`;
 }
 
 function renderChat() {
@@ -7865,6 +8326,7 @@ function chatBodyHTML() {
     const local = chatMsgs(t.threadId).filter((m) => m.pending || m.failed).pop();
     const failed = local && local.failed;
     const preview = local ? local.body : last ? last.body : "";
+    const pkind = local ? local.kind : last ? last.kind : null;
     const unread = t.unread || 0;
 
     return `<button data-action="chat-open" data-id="${esc(t.threadId)}" class="pb-card" style="width:100%;display:flex;align-items:center;gap:11px;padding:11px 12px;margin-bottom:8px;text-align:left">
@@ -7878,6 +8340,7 @@ function chatBodyHTML() {
           ${failed ? icon("alert-circle", 12, 'style="color:var(--red);flex-shrink:0"')
             : local ? icon("clock", 12, 'style="color:var(--faint);flex-shrink:0"')
             : mine ? icon("corner-up-right", 12, 'style="color:var(--faint);flex-shrink:0"') : ""}
+          ${CHAT_THING_ICON[pkind] ? icon(CHAT_THING_ICON[pkind], 12, `style="color:${CHAT_THING_INK[pkind]};flex-shrink:0"`) : ""}
           <span style="flex:1;min-width:0;font-size:12px;color:${unread ? "var(--muted)" : "var(--faint)"};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${preview ? esc(preview.replace(/\n+/g, " ")) : `<i>${T("chat.noMessages")}</i>`}</span>
           ${t.muted ? icon("bell-off", 12, 'style="color:var(--faint);flex-shrink:0"') : ""}
           ${unread ? `<span style="flex-shrink:0;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--gold);color:var(--gold-ink);font-size:10.5px;font-weight:700;display:flex;align-items:center;justify-content:center">${unread > 99 ? "99+" : unread}</span>` : ""}
@@ -7886,7 +8349,7 @@ function chatBodyHTML() {
     </button>`;
   }).join("");
 
-  return `${chatPushStrip()}${threads.length ? rows : `<div class="pb-card" style="padding:26px 20px;text-align:center;color:var(--muted);font-size:13px;line-height:1.6">
+  return `${chatNotifyDoor()}${threads.length ? rows : `<div class="pb-card" style="padding:26px 20px;text-align:center;color:var(--muted);font-size:13px;line-height:1.6">
       ${icon("message-circle", 26, 'style="margin:0 auto 10px;display:block;color:var(--faint)"')}
       ${T("chat.empty")}
     </div>`}`;
@@ -7977,23 +8440,57 @@ function renderChatThread() {
       sep = `<div style="text-align:center;margin:12px 0 10px"><span style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);background:var(--surface2);border-radius:999px;padding:4px 10px">${esc(chatWhen(m.at) === chatStamp(m.at) ? T("chat.today") : chatWhen(m.at))}</span></div>`;
     }
 
-    const tail = m.failed
-      ? `<button data-action="chat-retry" data-id="${esc(f.threadId)}" data-c="${esc(m.clientId || "")}" style="display:inline-flex;align-items:center;gap:4px;color:var(--red);font-size:10.5px;font-weight:600;padding:2px 0">${icon("rotate-ccw", 11)} ${T("chat.retry")}</button>`
+    const tailOn = (onGold) => m.failed
+      ? `<span style="display:inline-flex;align-items:center;gap:8px">${m.error && m.kind === "image" ? `<span style="font-size:10.5px;color:var(--red)">${esc(m.error)}</span>` : ""}<button data-action="chat-retry" data-id="${esc(f.threadId)}" data-c="${esc(m.clientId || "")}" style="display:inline-flex;align-items:center;gap:4px;color:var(--red);font-size:10.5px;font-weight:600;padding:2px 0">${icon("rotate-ccw", 11)} ${T("chat.retry")}</button></span>`
       : m.pending
         ? `<span style="font-size:10px;color:var(--faint)">${T("chat.sending")}</span>`
-        : `<span style="font-size:10px;color:${mine ? "rgba(26,21,7,.55)" : "var(--faint)"}">${chatStamp(m.at)}</span>`;
+        : `<span style="font-size:10px;color:${onGold ? "rgba(26,21,7,.55)" : "var(--faint)"}">${chatStamp(m.at)}</span>`;
+    /* what a long press opens, see chatOpenMsgMenu */
+    const press = `data-msgpress="${esc(m.messageId)}" data-tid="${esc(f.threadId)}"`;
+    const side = mine ? "flex-end" : "flex-start";
+    const under = `<div style="display:flex;justify-content:${side};margin-top:3px;padding:0 4px">${tailOn(false)}</div>`;
 
-    /* Deleted server-side: the row stays and says so, because a message
-       vanishing out of the middle of a conversation is worse than one
-       that admits it went. */
-    const body = m.body == null
-      ? `<i style="opacity:.7">${T("chat.deleted")}</i>`
-      : esc(m.body).replace(/\n/g, "<br>");
+    /* A photo is the message, so it is drawn as itself, holding its own
+       shape from the size it was sent at so the list does not jump when
+       it loads. */
+    if (m.kind === "image") {
+      const pl = m.payload && typeof m.payload === "object" ? m.payload : {};
+      const w = pNum(pl.w) || 4, h = pNum(pl.h) || 3;
+      const bw = 220, bh = Math.round(Math.min(300, Math.max(110, (bw * h) / w)));
+      const box = `width:${bw}px;max-width:100%;height:${bh}px;border-radius:14px`;
+      const local = chatUploads.get(m.clientId);
+      const img = isPhotoId(pl.photo) ? photoSlot(pl.photo, box, { iconSize: 20 })
+        : local && isPhotoData(local.chatPhoto) ? `<div style="${box};overflow:hidden"><img src="${esc(local.chatPhoto)}" alt="" style="width:100%;height:100%;object-fit:cover;display:block"></div>`
+        : `<div style="${box};display:flex;align-items:center;justify-content:center;background:var(--surface2);color:var(--faint)">${icon("image-off", 20)}</div>`;
+      return `${sep}<div style="display:flex;justify-content:${side};margin-bottom:7px">
+        <div ${press} class="pb-msg" style="max-width:78%;${m.pending ? "opacity:.72;" : ""}">
+          <button data-action="chat-image" data-id="${esc(f.threadId)}" data-m="${esc(m.messageId)}" style="display:block;padding:0;border-radius:14px;overflow:hidden;border:1px solid ${m.failed ? "var(--red)" : "var(--border-soft)"}">${img}</button>
+          ${under}
+        </div>
+      </div>`;
+    }
 
-    return `${sep}<div style="display:flex;justify-content:${mine ? "flex-end" : "flex-start"};margin-bottom:7px">
-      <div style="max-width:78%;padding:8px 11px 6px;border-radius:${mine ? "13px 13px 4px 13px" : "13px 13px 13px 4px"};background:${mine ? "var(--gold)" : "var(--surface)"};border:1px solid ${mine ? "var(--gold)" : "var(--border-soft)"};${m.failed ? "border-color:var(--red);" : ""}${m.pending ? "opacity:.72;" : ""}">
+    /* A thing from the app: a card, the same on both sides of the
+       conversation, as a shared link or an invitation is in any messaging
+       app. Tapping it opens it in full (renderChatView). */
+    if (chatIsThing(m)) {
+      return `${sep}<div style="display:flex;justify-content:${side};margin-bottom:7px">
+        <div ${press} class="pb-msg" style="width:264px;max-width:84%;${m.pending ? "opacity:.72;" : ""}">
+          <button data-action="chat-view" data-id="${esc(f.threadId)}" data-m="${esc(m.messageId)}" class="pb-card" style="display:block;width:100%;padding:0;text-align:left;overflow:hidden;border-radius:15px;${mine ? "border-color:rgba(233,185,73,.5);" : ""}${m.failed ? "border-color:var(--red);" : ""}">${chatThingCard(m)}</button>
+          ${under}
+        </div>
+      </div>`;
+    }
+
+    /* Words — and anything of a kind this build does not know yet, which
+       arrives with a one-line summary for exactly this reason. An unsent
+       message never reaches this point: it is taken off the screen, not
+       drawn as a row saying it was there (see chatDrop). */
+    const body = esc(m.body == null ? "" : m.body).replace(/\n/g, "<br>");
+    return `${sep}<div style="display:flex;justify-content:${side};margin-bottom:7px">
+      <div ${press} class="pb-msg" style="max-width:78%;padding:8px 11px 6px;border-radius:${mine ? "13px 13px 4px 13px" : "13px 13px 13px 4px"};background:${mine ? "var(--gold)" : "var(--surface)"};border:1px solid ${mine ? "var(--gold)" : "var(--border-soft)"};${m.failed ? "border-color:var(--red);" : ""}${m.pending ? "opacity:.72;" : ""}">
         <div style="font-size:13.5px;line-height:1.45;color:${mine ? "var(--gold-ink)" : "var(--text)"};word-break:break-word;white-space:pre-wrap">${body}</div>
-        <div style="display:flex;justify-content:flex-end;margin-top:2px">${tail}</div>
+        <div style="display:flex;justify-content:flex-end;margin-top:2px">${tailOn(mine)}</div>
       </div>
     </div>`;
   }).join("");
@@ -8028,6 +8525,8 @@ function renderChatThread() {
           a stray keyboard return posting half a sentence. It grows to
           four lines and then scrolls. */""}
     <div style="flex-shrink:0;display:flex;align-items:flex-end;gap:8px;padding:9px 12px calc(9px + var(--pb-sab));border-top:1px solid var(--border-soft);background:var(--surface)">
+      <button data-action="chat-attach" data-id="${esc(f.threadId)}" title="${esc(T("chat.attachTitle"))}"
+        style="flex-shrink:0;width:42px;height:42px;border-radius:14px;display:flex;align-items:center;justify-content:center;color:var(--muted);background:var(--surface2);border:1px solid var(--border)">${icon("plus", 20)}</button>
       <textarea class="pb-input" data-bind="chatDraft" rows="1" enterkeyhint="enter"
         placeholder="${esc(T("chat.composePh"))}" maxlength="2000"
         style="flex:1;min-width:0;resize:none;max-height:104px;line-height:1.4;padding-top:9px;padding-bottom:9px">${esc(f.draft || "")}</textarea>
@@ -8065,6 +8564,1023 @@ function renderChatMenu() {
     ${other ? row("chat-block", "user-x", T("chat.block", { name: esc(other.username || name) }), T("chat.blockHint"), "var(--red)") : ""}
     ${row("chat-leave", "trash-2", T("chat.leave"), T("chat.leaveHint"), "var(--red)")}
   `, 130);
+}
+
+/* ══ THINGS IN A MESSAGE ═════════════════════════════════════════════
+   A message can carry something from the app, not only words: an
+   exercise, a preset, a logged day, a personal record, a strength rank, a
+   photo. It arrives as a card — the way a link or a game invite arrives in
+   a messaging app, not as a line of text describing one — and tapping the
+   card opens it in full (renderChatView), where the things that belong in
+   a library can be added to your own.
+
+   WHAT TRAVELS IS A SNAPSHOT, NEVER A POINTER. The person you send it to
+   cannot read your profile and never should, so the card carries a copy
+   of the thing as it is now: the exercise's name, group, cues and photo;
+   the preset's lifts; the day's sets. Changing yours afterwards does not
+   change what you sent, which is how a message behaves anyway.
+
+   IT IS SOMEBODY ELSE'S DATA. A payload came from another phone, so every
+   field is read as data (pStr / pNum / pColor): a string or nothing, a
+   number or nothing, a colour only if it is one, and everything drawn from
+   it still goes through esc(). A photo is fetched by id from the photo
+   store and drawn only if it is a raster data URL (isPhotoData).
+
+   ADDING IT IS A WRITE, AND ONLY THAT IS. Looking at a card is on READ_OK
+   like the rest of chat; `chat-import` is deliberately not, so a profile
+   shared with you read-only cannot be filled with somebody else's
+   exercises by accident. An import never overwrites: an exercise whose
+   name you already have is offered as "open yours" or "add a copy", the
+   same rule the editor applies to a name clash, because a name is an
+   exercise's identity and your log is filed under it.                  */
+
+const CHAT_THING_ICON = {
+  image: "image", exercise: "dumbbell", preset: "layers",
+  workout: "calendar-check", record: "trophy", rank: "medal",
+};
+const CHAT_THING_INK = {
+  image: "#7ea0b8", exercise: "#5d8bcc", preset: "#e9b949",
+  workout: "#6aa465", record: "#c98f5a", rank: "#a07ec2",
+};
+const chatIsThing = (m) => !!(m && CHAT_THING_ICON[m.kind]);
+
+const pStr = (v, max = 300) => (typeof v === "string" ? v.slice(0, max) : "");
+const pNum = (v) => (typeof v === "number" && isFinite(v) ? v : null);
+const pColor = (v) => (typeof v === "string" && /^#[0-9a-fA-F]{6}$/.test(v) ? v : null);
+const pList = (v, max = 80) => (Array.isArray(v) ? v.slice(0, max).filter((x) => x && typeof x === "object") : []);
+
+/* ── snapshots of your own things, on the way out ─────────────────────── */
+
+/* One library row as it travels. The STORED fields, not the labels: a
+   built-in carries its id so the other phone can show it in ITS language
+   (snapLabel), exactly as its own library would, and anything the user
+   wrote is sent as they wrote it. */
+function chatExSnap(ex) {
+  const g = groupList().find((x) => x.name === ex.muscle) || null;
+  const snap = {
+    name: ex.name, muscle: ex.muscle || "",
+    group: g ? { name: g.name, key: g.key || null, color: g.color, kind: g.kind } : null,
+    kind: exKind(ex),
+    equipment: ex.equipment || "", alternatives: ex.alternatives || "", note: ex.note || "",
+    video: ex.video || "", photo: null,
+  };
+  const i = !ex.custom ? DEFAULT_INDEX[ex.id] : undefined;
+  if (i != null && ex.name === DEFAULT_LIBRARY[i].name) snap.builtin = ex.id;
+  return snap;
+}
+
+/* The row's photo, by id. The picture itself goes to the photo store with
+   the send (chatDeliver → photoUpload), and into this session's memory so
+   the card on YOUR screen shows it straight away rather than waiting to
+   fetch back what it has just uploaded. */
+async function chatSnapPhoto(ex, snap, ups) {
+  if (isPhotoData(ex.image)) {
+    const C = window.ZenofitCloud;
+    const id = isPhotoId(ex.photoId) ? ex.photoId : await C.photoId(ex.image);
+    snap.photo = id;
+    photoRemember(id, ex.image);
+    ups.push({ id, data: ex.image });
+  } else if (isPhotoId(ex.photoId)) {
+    snap.photo = ex.photoId;           // on its way here too; it is in the store already
+  }
+}
+
+/* Your rank on a lift, worked out the way the exercise window's own button
+   does (ex-std-check), from a COPY of the standards form so sending it does
+   not rewrite the form you left filled in. */
+function chatRankFor(name) {
+  const ex = (state.library || []).find((x) => x.name === name);
+  const slug = stdSlugFor(ex);
+  const sEx = slug ? STD_BY_SLUG[slug] : null;
+  const best = sEx ? stdBestSetFor(ex, sEx) : null;
+  if (!best) return null;
+  const unit = state.settings.units;
+  const f = { ...stdForm(), slug };
+  if (sEx.reps) { f.mode = "1rm"; f.lift = String(best.reps); }
+  else { f.mode = "set"; f.setReps = String(best.reps); f.setWeight = String(weightAs(best.weight, best.unit, unit)); f.lift = ""; }
+  return stdCheck(f, unit);
+}
+
+/* A series thinned to what a card can draw, keeping its first, its last
+   and its best, since those are the three points anybody looks for. */
+function chatThin(series, max = 40) {
+  if (series.length <= max) return series;
+  let top = 0;
+  series.forEach((p, i) => { if (p[1] > series[top][1]) top = i; });
+  const keep = new Set([0, series.length - 1, top]);
+  const step = (series.length - 1) / (max - 1);
+  for (let k = 0; k < max; k++) keep.add(Math.round(k * step));
+  return [...keep].sort((a, b) => a - b).map((i) => series[i]);
+}
+
+/* {body, payload, ups} for a thing, or null when it is not there any more.
+   `body` is the one line the notification, the chat list and an older
+   build show; it is written in the sender's language, like anything else
+   the sender types. */
+async function chatBuildThing(kind, ref) {
+  const ups = [];
+  const lib = state.library || [];
+  const findEx = (name) => lib.find((x) => x.name === name) || null;
+  const snapsFor = async (names) => {
+    const out = [];
+    for (const name of [...new Set(names)]) {
+      const ex = findEx(name);
+      if (!ex) continue;
+      const snap = chatExSnap(ex);
+      await chatSnapPhoto(ex, snap, ups);
+      out.push(snap);
+    }
+    return out;
+  };
+
+  if (kind === "exercise") {
+    const ex = findEx(ref);
+    if (!ex) return null;
+    const snap = chatExSnap(ex);
+    await chatSnapPhoto(ex, snap, ups);
+    return { body: T("chat.kind.exercise") + ": " + exLabelOf(ex), payload: { v: 1, ex: snap }, ups };
+  }
+
+  if (kind === "preset") {
+    const p = (state.presets || []).find((x) => x.id === ref);
+    if (!p || !(p.exercises || []).length) return null;
+    const exercises = p.exercises.map((e) => ({ exercise: e.exercise, muscle: e.muscle, kind: e.kind || DEFAULT_KIND }));
+    return {
+      body: T("chat.kind.preset") + ": " + p.name,
+      payload: { v: 1, preset: { name: p.name, description: p.description || "", exercises }, lib: await snapsFor(exercises.map((e) => e.exercise)) },
+      ups,
+    };
+  }
+
+  if (kind === "workout") {
+    const entries = (state.log || []).filter((e) => e.date === ref && entryHasData(e))
+      .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+    if (!entries.length) return null;
+    const rows = entries.map((e) => {
+      const k = kindOf(e);
+      const row = { exercise: e.exercise, muscle: groupOfEntry(e), kind: k, unit: unitOf(e) };
+      if (k === "cardio") { row.minutes = e.minutes; row.intensity = e.intensity; }
+      else row.sets = filledSets(e).map((st) => ({ reps: st.reps, weight: st.weight, secs: st.secs, drop: isDrop(st) }));
+      if (e.notes) row.notes = e.notes;
+      return row;
+    });
+    return {
+      body: T("chat.kind.workout") + " · " + fmtShort(ref),
+      payload: { v: 1, date: ref, note: dayNoteOn(ref), entries: rows, lib: await snapsFor(rows.map((r) => r.exercise)) },
+      ups,
+    };
+  }
+
+  if (kind === "record") {
+    const hist = exerciseHistory(ref, state.log || []);
+    if (!hist.best) return null;
+    const ex = findEx(ref);
+    const b = hist.best, k = hist.kind, units = state.settings.units;
+    const set = k === "cardio" ? { minutes: b.minutes, intensity: b.intensity } : (bestSet(filledSets(b), k) || {});
+    const series = chatThin(hist.chart.map((pt) => [pt.e.date, Math.round(pt.y * 10) / 10]));
+    const value = Math.round(b.m * 10) / 10;
+    const snap = ex ? chatExSnap(ex) : { name: ref };
+    if (ex) await chatSnapPhoto(ex, snap, ups);
+    return {
+      body: T("chat.kind.record") + ": " + (ex ? exLabelOf(ex) : ref) + " · " + trimNum(value) + " " + metricUnit(k, units),
+      payload: {
+        v: 1, ex: snap, kind: k, units, value, date: b.date,
+        set: { reps: set.reps, weight: set.weight, secs: set.secs, minutes: set.minutes, intensity: set.intensity },
+        setUnit: unitOf(b), sessions: hist.sessions.filter((x) => !x.offKind).length, series,
+      },
+      ups,
+    };
+  }
+
+  if (kind === "rank") {
+    const res = ref === "last" ? ui.stdResult : chatRankFor(ref);
+    if (!res) return null;
+    const sEx = STD_BY_SLUG[res.slug];
+    const lvl = res.rank >= 0 ? STD_LEVELS[res.rank] : null;
+    return {
+      body: T("chat.kind.rank") + ": " + (lvl ? stdLevelLabel(lvl) : T("chat.rankUnder")) + " · " + stdName(sEx),
+      payload: {
+        v: 1, slug: res.slug, name: sEx ? sEx.name : "", reps: !!res.reps, sex: res.sex, unit: res.unit,
+        bw: res.bw, value: res.value, set: res.set, rank: res.rank, nextI: res.nextI,
+        toGo: res.toGo, progress: res.progress, th: res.th,
+      },
+      ups,
+    };
+  }
+  return null;
+}
+
+async function chatSendThing(threadId, kind, ref) {
+  let thing = null;
+  try { thing = await chatBuildThing(kind, ref); } catch (e) { console.warn("could not build", kind, e); }
+  if (!thing) { alert(T("chat.thingGone")); return null; }
+  return chatPost(threadId, {
+    body: thing.body, kind, payload: thing.payload,
+    upload: thing.ups.length ? { ups: thing.ups } : null,
+  });
+}
+
+/* A picture from the camera or the gallery, already scaled down (1280px,
+   WebP where the browser can) by readImageScaled. */
+async function chatSendPhoto(threadId, dataUrl, dim) {
+  if (!isPhotoData(dataUrl)) { alert(T("chat.photoBad")); return; }
+  await chatPost(threadId, {
+    body: T("chat.kind.image"), kind: "image",
+    payload: { w: dim ? dim.w : null, h: dim ? dim.h : null },
+    upload: { chatPhoto: dataUrl },
+  });
+}
+
+/* ── reading somebody else's, on the way in ───────────────────────────── */
+
+function snapBuiltinIx(snap) {
+  const b = snap && typeof snap.builtin === "string" ? snap.builtin : null;
+  return b && Object.prototype.hasOwnProperty.call(DEFAULT_INDEX, b) ? DEFAULT_INDEX[b] : null;
+}
+/* the name in YOUR language when it is a built-in still wearing the name
+   the app shipped it under, and exactly as its owner typed it otherwise —
+   exLabelOf's rule, applied to a row that is not in your library */
+function snapLabel(snap) {
+  const name = pStr(snap && snap.name, 120);
+  const i = snapBuiltinIx(snap);
+  const row = i != null && EX[langCode()] ? EX[langCode()][i] : null;
+  return row && name === DEFAULT_LIBRARY[i].name ? row[0] : name;
+}
+function snapField(snap, field) {
+  const own = pStr(snap && snap[field], 2000);
+  const i = snapBuiltinIx(snap);
+  const row = i != null && EX[langCode()] ? EX[langCode()][i] : null;
+  const col = { equipment: 1, alternatives: 2, note: 3 }[field];
+  return row && own === DEFAULT_LIBRARY[i][field] ? row[col] : own;
+}
+function snapGroupLabel(snap) {
+  const g = snap && snap.group && typeof snap.group === "object" ? snap.group : null;
+  const key = g && typeof g.key === "string" && Object.prototype.hasOwnProperty.call(DEFAULT_GROUP_NAME, g.key) ? g.key : null;
+  const name = pStr((g && g.name) || (snap && snap.muscle), 60);
+  return key && name === DEFAULT_GROUP_NAME[key] ? T("group." + key) : name;
+}
+const snapColor = (snap) =>
+  pColor(snap && snap.group && snap.group.color) || groupColor(pStr(snap && snap.muscle, 60)) || "#8a8f97";
+const snapKind = (snap) => (snap && KIND[snap.kind] ? snap.kind : DEFAULT_KIND);
+const snapOf = (p, name) => pList(p && p.lib).find((x) => x.name === name) || null;
+
+/* One set as it is read back, in the unit it was logged in. */
+function chatSetText(kind, st, unit) {
+  const s = st || {};
+  if (kind === "cardio") return T("sug.cardioSet", { min: esc(pStr(String(s.minutes ?? ""), 8)), rpe: esc(pStr(String(s.intensity ?? ""), 4)) });
+  if (kind === "bodyweight") return T("unit.nReps", { n: esc(pStr(String(s.reps ?? ""), 8)) });
+  if (kind === "hold") return T("unit.nSecs", { n: esc(pStr(String(s.secs ?? ""), 8)) });
+  return `${esc(pStr(String(s.reps ?? ""), 8))} × ${esc(pStr(String(s.weight ?? ""), 10))} ${esc(pStr(unit, 4))}`;
+}
+
+/* a line through a series, sized by its box: the card's small one and the
+   viewer's large one are the same drawing */
+function chatSpark(series, h, color, dots = false) {
+  const vals = series.map((p) => pNum(p && p[1])).filter((v) => v != null);
+  if (vals.length < 2) return "";
+  const W = 300, pad = 4;
+  const lo = Math.min(...vals), hi = Math.max(...vals), span = hi - lo || 1;
+  const pts = vals.map((v, i) => ({
+    x: +(pad + (i / (vals.length - 1)) * (W - pad * 2)).toFixed(2),
+    y: +(h - pad - ((v - lo) / span) * (h - pad * 2)).toFixed(2),
+  }));
+  const last = pts[pts.length - 1];
+  return `<svg viewBox="0 0 ${W} ${h}" width="100%" height="${h}" preserveAspectRatio="none" style="display:block;overflow:visible">
+    <path d="${monotonePath(pts)}" fill="none" stroke="${color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
+    ${dots ? `<circle cx="${pts[0].x}" cy="${pts[0].y}" r="3" fill="var(--faint)"/>` : ""}
+    <circle cx="${last.x}" cy="${last.y}" r="3.4" fill="${color}"/>
+  </svg>`;
+}
+
+/* ── the card, inside the conversation ────────────────────────────────── */
+
+function chatThingCard(m) {
+  const p = m.payload && typeof m.payload === "object" ? m.payload : {};
+  const ink = CHAT_THING_INK[m.kind] || "#8a8f97";
+  const tile = (ic, color) => `<span style="width:50px;height:50px;border-radius:12px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:${color}24;color:${color}">${icon(ic, 22)}</span>`;
+  const head = (thumb, title, sub) => `<div style="display:flex;gap:11px;align-items:center;padding:11px 12px 10px">
+    ${thumb}
+    <div style="flex:1;min-width:0">
+      <div style="font-size:9.5px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:${ink};margin-bottom:2px">${T("chat.kind." + m.kind)}</div>
+      <div style="font-weight:700;font-size:14.5px;line-height:1.3;color:var(--text);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;word-break:break-word">${title}</div>
+      ${sub ? `<div style="font-size:11.5px;color:var(--faint);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${sub}</div>` : ""}
+    </div>
+  </div>`;
+  const foot = `<div style="display:flex;align-items:center;justify-content:flex-end;gap:3px;padding:8px 12px;border-top:1px solid var(--border-soft);font-size:12px;font-weight:600;color:var(--gold)">${T("chat.viewThing")} ${icon("chevron-right", 13)}</div>`;
+  const lifts = (names, more) => `<div style="display:flex;flex-direction:column;gap:5px;padding:0 12px 10px">
+    ${names.slice(0, 4).map(({ label, color }) => `<div style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--muted);min-width:0">
+      <span style="width:7px;height:7px;border-radius:4px;background:${color};flex-shrink:0"></span>
+      <span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(label)}</span></div>`).join("")}
+    ${more > 4 ? `<div style="font-size:11.5px;color:var(--faint);padding-left:15px">${T("chat.andMore", { n: more - 4 })}</div>` : ""}
+  </div>`;
+
+  if (m.kind === "exercise") {
+    const snap = p.ex && typeof p.ex === "object" ? p.ex : {};
+    const color = snapColor(snap);
+    const thumb = isPhotoId(snap.photo)
+      ? photoSlot(snap.photo, "width:50px;height:50px;border-radius:12px;flex-shrink:0", { icon: "dumbbell" })
+      : tile("dumbbell", color);
+    const equip = snapField(snap, "equipment");
+    const note = snapField(snap, "note");
+    return head(thumb, esc(snapLabel(snap)), `<span style="color:${color}">●</span> ${esc(snapGroupLabel(snap))}${equip ? " · " + esc(equip) : ""}`) +
+      /* the clamp on an inner box: on the padded one, the third line shows
+         through the padding under the second */
+      (note ? `<div style="padding:0 12px 10px"><div style="font-size:12px;color:var(--muted);line-height:1.45;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">${esc(note)}</div></div>` : "") +
+      foot;
+  }
+
+  if (m.kind === "preset") {
+    const pr = p.preset && typeof p.preset === "object" ? p.preset : {};
+    const exs = pList(pr.exercises, 60);
+    const names = exs.map((e) => {
+      const snap = snapOf(p, e.exercise);
+      return { label: snap ? snapLabel(snap) : pStr(e.exercise, 120), color: snap ? snapColor(snap) : (groupColor(pStr(e.muscle, 60)) || "#8a8f97") };
+    });
+    return head(tile("layers", ink), esc(pStr(pr.name, 80) || T("chat.kind.preset")), TN("exercise", exs.length)) + lifts(names, names.length) + foot;
+  }
+
+  if (m.kind === "workout") {
+    const rows = pList(p.entries, 60);
+    const sets = rows.reduce((n, r) => n + pList(r.sets, 60).length, 0);
+    const names = rows.map((r) => {
+      const snap = snapOf(p, r.exercise);
+      return { label: snap ? snapLabel(snap) : pStr(r.exercise, 120), color: snap ? snapColor(snap) : (groupColor(pStr(r.muscle, 60)) || "#8a8f97") };
+    });
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(pStr(p.date, 10)) ? fmtDate(p.date) : "";
+    return head(tile("calendar-check", ink), esc(date || T("chat.kind.workout")),
+      TN("exercise", rows.length) + (sets ? " · " + TN("set", sets) : "")) + lifts(names, names.length) + foot;
+  }
+
+  if (m.kind === "record") {
+    const snap = p.ex && typeof p.ex === "object" ? p.ex : {};
+    const k = snapKind({ kind: p.kind });
+    const value = pNum(p.value);
+    const unit = metricUnit(k, pStr(p.units, 4) || state.settings.units);
+    const pts = Array.isArray(p.series) ? p.series.slice(0, 60).filter((x) => Array.isArray(x)) : [];
+    return head(tile("trophy", ink), esc(snapLabel(snap)), T("chat.bestSet", { set: chatSetText(k, p.set, pStr(p.setUnit, 4)) })) +
+      `<div style="display:flex;align-items:flex-end;gap:12px;padding:0 12px 11px">
+        <div style="flex-shrink:0">
+          <div class="pb-num" style="font-size:24px;font-weight:700;line-height:1;color:var(--gold)">${value != null ? esc(trimNum(value)) : "—"}<span style="font-size:12px;color:var(--muted);font-weight:600"> ${esc(unit)}</span></div>
+          <div style="font-size:10.5px;color:var(--faint);margin-top:4px">${esc(metricLabel(k, pStr(p.units, 4) || state.settings.units))}</div>
+        </div>
+        <div style="flex:1;min-width:0">${chatSpark(pts, 38, "var(--gold)")}</div>
+      </div>` + foot;
+  }
+
+  if (m.kind === "rank") {
+    const rank = pNum(p.rank);
+    const lvl = rank != null && rank >= 0 && rank < STD_LEVELS.length ? STD_LEVELS[Math.floor(rank)] : null;
+    const color = lvl ? STD_COLORS[lvl] : "var(--muted)";
+    const sEx = STD_BY_SLUG[pStr(p.slug, 60)] || null;
+    const prog = Math.max(0, Math.min(1, pNum(p.progress) || 0));
+    return `<div style="display:flex;gap:11px;align-items:center;padding:11px 12px 8px">
+        <span style="width:50px;height:50px;border-radius:12px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:var(--surface2);color:${color}">${icon("medal", 22)}</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:9.5px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:${ink};margin-bottom:2px">${T("chat.kind.rank")}</div>
+          <div class="pb-num" style="font-size:22px;font-weight:700;line-height:1.05;color:${color}">${lvl ? stdLevelLabel(lvl) : T("chat.rankUnder")}</div>
+          <div style="font-size:11.5px;color:var(--faint);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(sEx ? stdName(sEx) : pStr(p.name, 80))}</div>
+        </div>
+      </div>
+      <div style="padding:0 12px 11px"><div style="height:5px;background:var(--surface2);border-radius:3px;overflow:hidden"><div style="height:100%;width:${Math.round(prog * 100)}%;background:${color}"></div></div></div>` + foot;
+  }
+  return "";
+}
+
+/* ── the thing in full ────────────────────────────────────────────────── */
+
+function chatImportedHere(messageId) {
+  return chatRead().imported[messageId] === activeProfileId();
+}
+
+function renderChatView() {
+  const v = ui.chatView;
+  const m = chatMsgs(v.threadId).find((x) => x.messageId === v.messageId);
+  const t = chatThreadOf(v.threadId);
+  const me = chatMe();
+
+  const shell = (title, body) => fullScreen(85, `
+    <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px;border-bottom:1px solid var(--border-soft)">
+      <button data-action="chat-view-close" style="color:var(--muted);padding:4px">${icon("arrow-left", 21)}</button>
+      <div class="pb-num" style="font-size:18px;font-weight:700;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${title}</div>
+    </div>
+    <div class="pb-scroll" data-scrollkey="chatView" style="flex:1;overflow-y:auto;padding:16px 16px calc(40px + var(--pb-sab))">${body}</div>
+  `, "chatView");
+
+  /* unsent while it was open: said plainly rather than a blank screen */
+  if (!m || !chatIsThing(m)) {
+    return shell(T("chat.viewTitle"), `<div class="pb-card" style="padding:26px 20px;text-align:center;color:var(--muted);font-size:13px;line-height:1.6">
+      ${icon("message-circle-off", 24, 'style="margin:0 auto 10px;display:block;color:var(--faint)"')}${T("chat.viewGone")}</div>`);
+  }
+
+  const p = m.payload && typeof m.payload === "object" ? m.payload : {};
+  const mine = me && m.from === me.userId;
+  const who = mine ? T("chat.you") : esc(chatName(t));
+  const from = `<div style="display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--faint);margin-bottom:14px">
+    ${chatAvatar(mine ? (me.username || "?") : chatName(t), 22)}<span>${T("chat.sentBy", { name: who, when: chatWhen(m.at) })}</span>
+  </div>`;
+  const detail = (label, val, empty) => `<div style="margin-bottom:16px">
+    <div class="pb-label" style="margin-bottom:5px">${label}</div>
+    <div style="font-size:14px;color:${val ? "var(--text)" : "var(--faint)"};line-height:1.55;white-space:pre-wrap;word-break:break-word">${val ? esc(val) : empty}</div>
+  </div>`;
+  const lib = state.library || [];
+  const have = (name) => lib.find((x) => x.name.toLowerCase() === String(name).toLowerCase()) || null;
+  const done = (line, action, label, attrs = "") => `<div class="pb-card" style="padding:13px 14px;margin-bottom:10px;border-color:rgba(106,164,101,.45)">
+      <div style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600;color:var(--green);margin-bottom:10px">${icon("check-circle-2", 16)} ${line}</div>
+      <button data-action="${action}" ${attrs} class="pb-btn pb-ghost" style="width:100%;padding:11px 0;font-size:13.5px">${label}</button>
+    </div>`;
+
+  /* ── an exercise: laid out like one in your own library ─────────── */
+  if (m.kind === "exercise") {
+    const snap = p.ex && typeof p.ex === "object" ? p.ex : {};
+    const color = snapColor(snap);
+    const k = snapKind(snap);
+    const vid = youtubeId(pStr(snap.video, 500));
+    const link = !vid && /^https?:\/\//i.test(pStr(snap.video, 500)) ? pStr(snap.video, 500) : "";
+    const mineRow = have(snap.name);
+    const added = v.done ? lib.find((x) => x.name === v.done) : null;
+
+    const imp = added
+      ? done(T("chat.addedEx"), "chat-open-ex", `${icon("book-open", 15)} ${T("chat.openInLibrary")}`, `data-name="${esc(added.name)}"`)
+      : mineRow
+      ? `<div class="pb-card" style="padding:13px 14px;margin-bottom:10px">
+          <div style="font-size:12.5px;color:var(--muted);line-height:1.5;margin-bottom:11px">${T("chat.haveEx", { name: esc(exLabelOf(mineRow)) })}</div>
+          <div style="display:flex;gap:8px">
+            <button data-action="chat-open-ex" data-name="${esc(mineRow.name)}" class="pb-btn pb-ghost" style="flex:1;padding:11px 0;font-size:13px">${icon("book-open", 14)} ${T("chat.openYours")}</button>
+            <button data-action="chat-import" data-copy="1" class="pb-btn pb-ghost" style="flex:1;padding:11px 0;font-size:13px;color:var(--gold);border-color:rgba(233,185,73,.4)">${icon("copy-plus", 14)} ${T("chat.addCopy")}</button>
+          </div>
+        </div>`
+      : `<button data-action="chat-import" class="pb-btn pb-gold" style="width:100%;padding:15px 0;font-size:15.5px;border-radius:14px">${icon("plus", 18, 'stroke-width="2.6"')} ${T("chat.addEx")}</button>
+         <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:8px 2px 18px">${T("chat.addExHint", { group: esc(snapGroupLabel(snap) || T("group.Uncategorized")) })}</div>`;
+
+    return shell(T("chat.kind.exercise"), `
+      ${from}
+      <div class="pb-num" style="font-size:23px;font-weight:700;line-height:1.15;margin-bottom:9px;word-break:break-word">${esc(snapLabel(snap))}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:16px">
+        ${chip(esc(snapGroupLabel(snap) || T("group.Uncategorized")), color)}
+        ${k !== DEFAULT_KIND ? chip(T("kind." + k), "var(--muted)") : ""}
+      </div>
+      ${imp}
+      ${isPhotoId(snap.photo) ? photoSlot(snap.photo, "width:100%;height:240px;border-radius:14px;border:1px solid var(--border);margin:6px 0 18px", { alt: snapLabel(snap), iconSize: 22 }) : ""}
+      ${vid ? `<div style="margin-bottom:18px">
+          <div class="pb-label" style="margin-bottom:6px">${T("ex.tutorial")}</div>
+          <div style="position:relative;width:100%;padding-bottom:56.25%;border-radius:14px;overflow:hidden;border:1px solid var(--border);background:#000">
+            <iframe src="https://www.youtube.com/embed/${vid}" title="Tutorial video" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen loading="lazy" style="position:absolute;inset:0;width:100%;height:100%;border:0"></iframe>
+          </div>
+        </div>` : link ? `<div style="margin-bottom:18px">
+          <div class="pb-label" style="margin-bottom:6px">${T("ex.tutorial")}</div>
+          <a href="${esc(link)}" target="_blank" rel="noopener noreferrer" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;color:var(--blue)">${icon("external-link", 15)} ${T("ex.openLink")}</a>
+        </div>` : ""}
+      ${detail(T("ex.details"), snapField(snap, "note"), T("ex.noDetails"))}
+      ${detail(T("ex.equipment"), snapField(snap, "equipment"), T("ex.notFilled"))}
+      ${detail(T("ex.alternatives"), snapField(snap, "alternatives"), T("ex.notFilled"))}
+    `);
+  }
+
+  /* ── a preset, or a logged day: the lifts, and a way to keep them ── */
+  if (m.kind === "preset" || m.kind === "workout") {
+    const isPreset = m.kind === "preset";
+    const pr = isPreset && p.preset && typeof p.preset === "object" ? p.preset : {};
+    const rows = isPreset ? pList(pr.exercises, 60) : pList(p.entries, 60);
+    const refs = [...new Set(rows.map((r) => pStr(r.exercise, 120)).filter(Boolean))];
+    const missing = refs.filter((n) => !have(n)).length;
+    const date = !isPreset && /^\d{4}-\d{2}-\d{2}$/.test(pStr(p.date, 10)) ? p.date : null;
+
+    const list = `<div class="pb-card" style="overflow:hidden;margin-bottom:16px">${rows.map((r, i) => {
+      const snap = snapOf(p, r.exercise);
+      const k = snapKind({ kind: r.kind });
+      const label = snap ? snapLabel(snap) : pStr(r.exercise, 120);
+      const color = snap ? snapColor(snap) : (groupColor(pStr(r.muscle, 60)) || "#8a8f97");
+      const group = snap ? snapGroupLabel(snap) : pStr(r.muscle, 60);
+      const sets = isPreset ? "" : k === "cardio"
+        ? `<div style="font-size:12.5px;color:var(--text);margin-top:5px">${chatSetText("cardio", r, "")}</div>`
+        : `<div style="display:flex;flex-direction:column;gap:3px;margin-top:6px">${pList(r.sets, 40).map((st, n) => `<div style="display:flex;align-items:center;gap:8px;font-size:12.5px;${st.drop === true ? "padding-left:14px;" : ""}">
+            <span style="width:18px;flex-shrink:0;color:var(--faint);font-size:11px">${st.drop === true ? "↳" : n + 1}</span>
+            <span class="pb-num" style="font-weight:600">${chatSetText(k, st, pStr(r.unit, 4))}</span>
+          </div>`).join("")}</div>`;
+      return `<div style="display:flex;gap:10px;padding:11px 14px;border-bottom:${i < rows.length - 1 ? "1px solid var(--border-soft)" : "none"}">
+        <span style="width:8px;height:8px;border-radius:4px;background:${color};flex-shrink:0;margin-top:6px"></span>
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:600;font-size:14px;word-break:break-word">${esc(label)}</div>
+          <div style="font-size:11.5px;color:var(--faint)">${esc(group)}${k !== DEFAULT_KIND ? " · " + T("kind." + k) : ""}${have(r.exercise) ? "" : ` · <span style="color:var(--blue)">${T("chat.newToYou")}</span>`}</div>
+          ${sets}
+          ${!isPreset && r.notes ? `<div style="font-size:12px;color:var(--muted);font-style:italic;margin-top:5px;word-break:break-word">${esc(pStr(r.notes, 400))}</div>` : ""}
+        </div>
+      </div>`;
+    }).join("")}</div>`;
+
+    const imp = chatImportedHere(m.messageId)
+      ? done(T("chat.addedPreset"), "chat-open-presets", `${icon("layers", 15)} ${T("chat.openPresets")}`)
+      : `<button data-action="chat-import" class="pb-btn pb-gold" style="width:100%;padding:14px 0;font-size:15px;border-radius:14px">${icon("bookmark-plus", 17)} ${T(isPreset ? "chat.addPreset" : "chat.saveAsPreset")}</button>
+         <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:8px 2px 18px">${missing ? T("chat.addPresetHintNew", { n: TN("exercise", missing) }) : T("chat.addPresetHint")}</div>`;
+
+    return shell(T("chat.kind." + m.kind), `
+      ${from}
+      <div class="pb-num" style="font-size:23px;font-weight:700;line-height:1.15;margin-bottom:5px;word-break:break-word">${esc(isPreset ? (pStr(pr.name, 80) || T("chat.kind.preset")) : date ? fmtDate(date) : T("chat.kind.workout"))}</div>
+      <div style="font-size:12.5px;color:var(--muted);margin-bottom:14px">${TN("exercise", rows.length)}${isPreset ? "" : " · " + TN("set", rows.reduce((n, r) => n + pList(r.sets, 60).length, 0))}</div>
+      ${isPreset && pr.description ? `<div style="font-size:13px;color:var(--muted);line-height:1.5;margin:-6px 0 14px;word-break:break-word">${esc(pStr(pr.description, 300))}</div>` : ""}
+      ${!isPreset && p.note ? `<div class="pb-card2" style="padding:10px 12px;margin-bottom:14px;font-size:12.5px;color:var(--muted);line-height:1.5;font-style:italic;word-break:break-word">${esc(pStr(p.note, 1000))}</div>` : ""}
+      ${imp}
+      ${sectionTitle(TN("move", rows.length))}
+      ${list}
+    `);
+  }
+
+  /* ── a personal record ───────────────────────────────────────────── */
+  if (m.kind === "record") {
+    const snap = p.ex && typeof p.ex === "object" ? p.ex : {};
+    const k = snapKind({ kind: p.kind });
+    const units = pStr(p.units, 4) || state.settings.units;
+    const unit = metricUnit(k, units);
+    const pts = Array.isArray(p.series) ? p.series.slice(0, 60).filter((x) => Array.isArray(x) && pNum(x[1]) != null) : [];
+    const first = pts.length ? pNum(pts[0][1]) : null;
+    const value = pNum(p.value);
+    const gain = value != null && first != null && pts.length > 1 ? Math.round((value - first) * 10) / 10 : null;
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(pStr(p.date, 10)) ? p.date : null;
+    const firstDate = pts.length && /^\d{4}-\d{2}-\d{2}$/.test(pStr(pts[0][0], 10)) ? pts[0][0] : null;
+    return shell(T("chat.kind.record"), `
+      ${from}
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:16px">
+        ${isPhotoId(snap.photo) ? photoSlot(snap.photo, "width:56px;height:56px;border-radius:13px;flex-shrink:0", { icon: "dumbbell" }) : ""}
+        <div class="pb-num" style="flex:1;min-width:0;font-size:22px;font-weight:700;line-height:1.15;word-break:break-word">${esc(snapLabel(snap))}</div>
+      </div>
+      <div class="pb-card" style="padding:16px 15px;margin-bottom:12px;border-color:rgba(233,185,73,.45)">
+        <div class="pb-label" style="margin-bottom:5px">${esc(metricLabel(k, units))}</div>
+        <div class="pb-num" style="font-size:38px;font-weight:700;line-height:1;color:var(--gold)">${value != null ? esc(trimNum(value)) : "—"}<span style="font-size:15px;color:var(--muted);font-weight:600"> ${esc(unit)}</span></div>
+        <div style="font-size:12.5px;color:var(--muted);margin-top:8px">${T("chat.bestSet", { set: chatSetText(k, p.set, pStr(p.setUnit, 4)) })}${date ? " · " + fmtShort(date) : ""}</div>
+        ${pts.length > 1 ? `<div style="margin-top:14px">${chatSpark(pts, 90, "var(--gold)", true)}</div>
+          <div style="display:flex;justify-content:space-between;font-size:10.5px;color:var(--faint);margin-top:6px"><span>${firstDate ? fmtShort(firstDate) : ""}</span><span>${date ? fmtShort(date) : ""}</span></div>` : ""}
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:14px">
+        ${stat(T("chat.sessions"), String(pNum(p.sessions) ?? "—"))}
+        ${gain != null ? stat(T("chat.sinceFirst"), (gain > 0 ? "+" : "") + esc(trimNum(gain)), esc(unit), gain > 0 ? "var(--green)" : "") : ""}
+      </div>
+      <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 2px">${T("chat.recordHint")}</div>
+    `);
+  }
+
+  /* ── a rank: the card the standards tab draws, and its ladder ────── */
+  if (m.kind === "rank") {
+    const rank = pNum(p.rank);
+    const lvl = rank != null && rank >= 0 && rank < STD_LEVELS.length ? STD_LEVELS[Math.floor(rank)] : null;
+    const color = lvl ? STD_COLORS[lvl] : "var(--muted)";
+    const sEx = STD_BY_SLUG[pStr(p.slug, 60)] || null;
+    const reps = p.reps === true;
+    const unit = pStr(p.unit, 4);
+    const th = Array.isArray(p.th) ? p.th.slice(0, STD_LEVELS.length).map(pNum) : [];
+    const nextI = pNum(p.nextI);
+    const nextLvl = nextI != null && nextI >= 0 && nextI < STD_LEVELS.length ? STD_LEVELS[Math.floor(nextI)] : null;
+    const prog = Math.max(0, Math.min(1, pNum(p.progress) || 0));
+    const set = p.set && typeof p.set === "object" ? p.set : null;
+    const name = esc(sEx ? stdName(sEx) : pStr(p.name, 80));
+    const bw = pNum(p.bw), value = pNum(p.value), toGo = pNum(p.toGo);
+    const line = reps
+      ? T("std.fromReps", { name, reps: TN("rep", value || 0), bw: trimNum(bw || 0), unit: esc(unit) })
+      : set && pNum(set.reps) != null && pNum(set.weight) != null
+      ? T("std.fromSet", { name, reps: pNum(set.reps), weight: trimNum(pNum(set.weight), 2), value: trimNum(value || 0), unit: esc(unit), bw: trimNum(bw || 0) })
+      : T("std.from", { name, value: trimNum(value || 0), unit: esc(unit), bw: trimNum(bw || 0) });
+    const ladder = th.length === STD_LEVELS.length && th.every((x) => x != null) ? STD_LEVELS.map((l, i) => {
+      const reached = rank != null && rank >= i, at = rank === i, c = STD_COLORS[l];
+      return `<div style="display:flex;align-items:center;gap:10px;padding:10px 13px;border-bottom:${i === STD_LEVELS.length - 1 ? "none" : "1px solid var(--border-soft)"};background:${at ? "var(--raise)" : "transparent"}">
+        <div style="width:9px;height:9px;border-radius:5px;flex-shrink:0;background:${reached ? c : "transparent"};border:1.5px solid ${reached ? c : "var(--border)"}"></div>
+        <div style="flex:1;min-width:0;font-size:11.5px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:${reached ? c : "var(--faint)"}">${stdLevelLabel(l)}</div>
+        <div class="pb-num" style="font-weight:700;font-size:15px;flex-shrink:0;color:${reached ? "var(--text)" : "var(--muted)"}">${stdCell(th[i], reps, esc(unit))}</div>
+      </div>`;
+    }).join("") : "";
+    return shell(T("chat.kind.rank"), `
+      ${from}
+      <div class="pb-card" style="padding:16px 15px;margin-bottom:16px;border-color:${lvl ? color : "var(--border)"}">
+        <div class="pb-label" style="margin-bottom:5px">${mine ? T("std.youAre") : T("chat.theyAre", { name: who })}</div>
+        <div class="pb-num" style="font-size:${lvl ? 34 : 22}px;font-weight:700;line-height:1.05;letter-spacing:.02em;color:${color}">${lvl ? stdLevelLabel(lvl) : T("std.underFirst", { level: stdLevelLabel(STD_LEVELS[0]) })}</div>
+        <div style="font-size:12.5px;color:var(--muted);margin-top:7px">${line}</div>
+        <div style="display:flex;align-items:center;gap:9px;margin-top:11px">
+          <div style="flex:1;height:6px;background:var(--surface2);border-radius:3px;overflow:hidden">
+            <div style="height:100%;width:${Math.round(prog * 100)}%;background:${nextLvl ? STD_COLORS[nextLvl] : color}"></div>
+          </div>
+          <div style="font-size:11.5px;font-weight:700;flex-shrink:0;color:${nextLvl ? "var(--muted)" : color}">
+            ${!nextLvl ? T("std.top") : reps ? T("std.toGoReps", { n: TN("rep", toGo || 0), level: stdLevelLabel(nextLvl) }) : T("std.toGo", { n: trimNum(toGo || 0), unit: esc(unit), level: stdLevelLabel(nextLvl) })}
+          </div>
+        </div>
+      </div>
+      ${ladder ? `${sectionTitle(T("std.ladder"), `<span style="font-size:11px;color:var(--faint)">${T("std.atBodyweight", { bw: trimNum(bw || 0), unit: esc(unit) })}</span>`)}
+      <div class="pb-card" style="overflow:hidden;margin-bottom:16px">${ladder}</div>` : ""}
+    `);
+  }
+
+  /* a photo opens in its own viewer, see renderChatImage */
+  return shell(T("chat.viewTitle"), "");
+}
+
+/* A photo, as big as the screen allows. Tapping anywhere closes it. */
+function renderChatImage() {
+  const v = ui.chatImage;
+  const m = chatMsgs(v.threadId).find((x) => x.messageId === v.messageId);
+  const ph = m && m.payload && m.payload.photo;
+  const local = m && chatUploads.get(m.clientId);
+  const inner = isPhotoId(ph)
+    ? photoSlot(ph, "width:100%;height:100%;background:transparent", { fit: "contain", iconSize: 26 })
+    : local && isPhotoData(local.chatPhoto)
+    ? `<img src="${esc(local.chatPhoto)}" alt="" style="width:100%;height:100%;object-fit:contain;display:block">`
+    : `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--faint)">${icon("image-off", 26)}</div>`;
+  return `<div data-overlay="chatImage" data-layer="fs" data-action="chat-image-close" class="${_lastOverlayKeys.has("chatImage") ? "" : "pb-sheet"}"
+    style="position:absolute;inset:0;z-index:96;background:rgba(0,0,0,.94);display:flex;flex-direction:column;padding:calc(var(--pb-sat) + 8px) 0 calc(var(--pb-sab) + 8px)">
+    <div style="display:flex;justify-content:flex-end;padding:0 12px 6px">
+      <button data-action="chat-image-close" style="color:#fff;opacity:.85;padding:6px">${icon("x", 24)}</button>
+    </div>
+    <div style="flex:1;min-height:0">${inner}</div>
+  </div>`;
+}
+
+/* ── choosing something to send ───────────────────────────────────────── */
+
+/* The lifts that have a record to send: anything with a number in the log,
+   most recently trained first, since that is the one somebody means. */
+function chatRecordLifts() {
+  const by = new Map();
+  for (const e of state.log || []) {
+    if (!entryHasData(e) || metricOf(e) == null) continue;
+    const r = by.get(e.exercise) || { name: e.exercise, last: "" };
+    if (e.date > r.last) r.last = e.date;
+    by.set(e.exercise, r);
+  }
+  return [...by.values()].sort((a, b) => (a.last < b.last ? 1 : -1));
+}
+
+function chatWorkoutDays() {
+  const by = new Map();
+  for (const e of state.log || []) {
+    if (!entryHasData(e)) continue;
+    const d = by.get(e.date) || { date: e.date, lifts: new Set(), sets: 0 };
+    d.lifts.add(e.exercise);
+    if (isSetKind(kindOf(e))) d.sets += filledSets(e).length;
+    by.set(e.date, d);
+  }
+  return [...by.values()].sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 60);
+}
+
+/* Every row of a picking list, one shape: a mark, two lines, a send glyph. */
+function chatPickRow(k, ref, mark, title, sub, enabled = true) {
+  return `<button ${enabled ? `data-action="chat-attach-send" data-k="${k}" data-ref="${esc(ref)}"` : "disabled"} style="width:100%;display:flex;align-items:center;gap:11px;padding:11px 13px;text-align:left;color:var(--text);border-bottom:1px solid var(--border-soft);opacity:${enabled ? 1 : 0.45}">
+    ${mark}
+    <span style="flex:1;min-width:0">
+      <span style="display:block;font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${title}</span>
+      ${sub ? `<span style="display:block;font-size:11.5px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${sub}</span>` : ""}
+    </span>
+    ${enabled ? icon("send", 15, 'style="color:var(--gold);flex-shrink:0"') : ""}
+  </button>`;
+}
+const chatDot = (color) => `<span style="width:9px;height:9px;border-radius:5px;background:${color};flex-shrink:0;margin:0 12px 0 13px"></span>`;
+const chatExMark = (ex) => ex.image
+  ? `<img src="${esc(ex.image)}" alt="" style="width:34px;height:34px;border-radius:8px;object-fit:cover;flex-shrink:0;border:1px solid var(--border)">`
+  : photoComing(ex) ? photoSlot(ex.photoId, "width:34px;height:34px;border-radius:8px;flex-shrink:0", { iconSize: 13 })
+  : chatDot(colorFor(ex.muscle));
+
+/* The exercise list, patched in place as the search is typed (every search
+   in this app patches and never renders; see chatBodyHTML). */
+function chatAttachListHTML() {
+  const q = (ui.chatAttach && ui.chatAttach.q) || "";
+  const rows = (state.library || []).filter((ex) => exMatches(ex, q));
+  if (!rows.length) return `<div style="padding:18px 6px;text-align:center;font-size:12.5px;color:var(--faint)">${T("chat.pickNone")}</div>`;
+  return `<div class="pb-card" style="overflow:hidden">${rows.slice(0, 200).map((ex) =>
+    chatPickRow("exercise", ex.name, chatExMark(ex), esc(exLabelOf(ex)), esc(groupLabel(ex.muscle)))).join("")}</div>`;
+}
+
+function renderChatAttach() {
+  const a = ui.chatAttach;
+  const step = a.step || "menu";
+
+  if (step === "menu") {
+    const tile = (k, extra = "") => `<button data-action="chat-attach-step" data-s="${k}" class="pb-card" style="display:flex;flex-direction:column;align-items:center;gap:8px;padding:14px 4px 12px;text-align:center" ${extra}>
+      <span style="width:44px;height:44px;border-radius:14px;display:flex;align-items:center;justify-content:center;background:${CHAT_THING_INK[k]}22;color:${CHAT_THING_INK[k]}">${icon(CHAT_THING_ICON[k], 21)}</span>
+      <span style="font-size:12.5px;font-weight:600;color:var(--text)">${T("chat.kind." + k)}</span>
+    </button>`;
+    /* a <label> round the file input, so the picker opens from the tap
+       itself: a click forwarded from script is refused on iOS */
+    const photo = `<label class="pb-card" style="display:flex;flex-direction:column;align-items:center;gap:8px;padding:14px 4px 12px;text-align:center;cursor:pointer">
+      <span style="width:44px;height:44px;border-radius:14px;display:flex;align-items:center;justify-content:center;background:${CHAT_THING_INK.image}22;color:${CHAT_THING_INK.image}">${icon("image", 21)}</span>
+      <span style="font-size:12.5px;font-weight:600;color:var(--text)">${T("chat.kind.image")}</span>
+      <input type="file" accept="image/*" data-filebind="chat.photo" style="display:none">
+    </label>`;
+    return sheet(T("chat.attachTitle"), "chatAttach", `
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-bottom:12px">
+        ${photo}${tile("exercise")}${tile("preset")}${tile("workout")}${tile("record")}${tile("rank")}
+      </div>
+      <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:0 2px">${T("chat.attachHint")}</div>
+    `, 78);
+  }
+
+  const back = `<span style="display:flex;align-items:center;gap:6px"><button data-action="chat-attach-step" data-s="menu" style="color:var(--muted);padding:2px 4px 2px 0;display:flex">${icon("arrow-left", 19)}</button>${T("chat.pick." + step)}</span>`;
+  let body = "";
+
+  if (step === "exercise") {
+    body = `<div style="position:relative;margin-bottom:10px">
+        <input class="pb-input" data-bind="chatAttachQ" value="${esc(a.q || "")}" placeholder="${esc(T("lib.search"))}" style="padding-left:36px">
+        <span style="position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--faint);pointer-events:none;display:flex">${icon("search", 15)}</span>
+      </div>
+      <div id="chatAttachList">${chatAttachListHTML()}</div>`;
+  } else if (step === "preset") {
+    const ps = (state.presets || []).filter((x) => (x.exercises || []).length);
+    body = ps.length ? `<div class="pb-card" style="overflow:hidden">${ps.map((x) =>
+      chatPickRow("preset", x.id, `<span style="width:34px;height:34px;border-radius:9px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:${CHAT_THING_INK.preset}22;color:${CHAT_THING_INK.preset}">${icon("layers", 16)}</span>`,
+        esc(x.name), TN("exercise", x.exercises.length))).join("")}</div>`
+      : `<div style="padding:18px 6px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T("chat.pickNoPresets")}</div>`;
+  } else if (step === "workout") {
+    const days = chatWorkoutDays();
+    body = days.length ? `<div class="pb-card" style="overflow:hidden">${days.map((d) =>
+      chatPickRow("workout", d.date, `<span style="width:34px;height:34px;border-radius:9px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:${CHAT_THING_INK.workout}22;color:${CHAT_THING_INK.workout}">${icon("calendar-check", 16)}</span>`,
+        fmtDate(d.date), TN("exercise", d.lifts.size) + (d.sets ? " · " + TN("set", d.sets) : ""))).join("")}</div>`
+      : `<div style="padding:18px 6px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T("chat.pickNoDays")}</div>`;
+  } else if (step === "record") {
+    const lifts = chatRecordLifts();
+    body = lifts.length ? `<div class="pb-card" style="overflow:hidden">${lifts.map((r) => {
+      const ex = (state.library || []).find((x) => x.name === r.name);
+      return chatPickRow("record", r.name, ex ? chatExMark(ex) : chatDot("#8a8f97"), esc(exLabel(r.name)), T("chat.lastTrained", { date: fmtShort(r.last) }));
+    }).join("")}</div>`
+      : `<div style="padding:18px 6px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T("chat.pickNoRecords")}</div>`;
+  } else if (step === "rank") {
+    const f = stdForm();
+    const ready = !!f.sex && +decimalize(f.bw) > 0;
+    const rows = [];
+    for (const ex of state.library || []) {
+      const slug = stdSlugFor(ex);
+      const sEx = slug ? STD_BY_SLUG[slug] : null;
+      const best = sEx ? stdBestSetFor(ex, sEx) : null;
+      if (best) rows.push({ ex, sEx, best });
+    }
+    const last = ui.stdResult && STD_BY_SLUG[ui.stdResult.slug];
+    body = `${ready ? "" : `<div class="pb-card2" style="padding:10px 12px;margin-bottom:10px;font-size:12px;color:var(--steel);line-height:1.5">${T("chat.pickRankSetup")}</div>`}
+      ${last ? `${sectionTitle(T("chat.pickRankLast"))}<div class="pb-card" style="overflow:hidden;margin-bottom:14px">${chatPickRow("rank", "last",
+        `<span style="width:34px;height:34px;border-radius:9px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:var(--surface2);color:${ui.stdResult.rank >= 0 ? STD_COLORS[STD_LEVELS[ui.stdResult.rank]] : "var(--muted)"}">${icon("medal", 16)}</span>`,
+        esc(stdName(last)), ui.stdResult.rank >= 0 ? stdLevelLabel(STD_LEVELS[ui.stdResult.rank]) : T("chat.rankUnder"))}</div>` : ""}
+      ${rows.length ? `${sectionTitle(T("chat.pickRankLifts"))}<div class="pb-card" style="overflow:hidden">${rows.map(({ ex, sEx, best }) =>
+        chatPickRow("rank", ex.name, chatExMark(ex), esc(exLabelOf(ex)),
+          esc(stdName(sEx)) + " · " + (sEx.reps ? TN("rep", +best.reps) : `${esc(best.reps)} × ${esc(trimNum(best.weight, 2))} ${best.unit}`), ready)).join("")}</div>`
+        : last ? "" : `<div style="padding:18px 6px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T("chat.pickNoRanks")}</div>`}`;
+  }
+
+  return sheet(back, "chatAttach", body, 78);
+}
+
+/* ── what a long press on a message offers ────────────────────────────── */
+
+function chatMsgActions(m) {
+  const me = chatMe();
+  const mine = !!(me && m.from === me.userId);
+  const out = [];
+  if ((m.kind || "text") === "text" && m.body) out.push("copy");
+  if (mine && m.failed) out.push("discard");
+  else if (mine && !chatLocal(m)) out.push("unsend");
+  return out;
+}
+
+function renderChatMsgMenu() {
+  const { threadId, messageId } = ui.chatMsgMenu;
+  const m = chatMsgs(threadId).find((x) => x.messageId === messageId);
+  if (!m) return "";
+  const acts = chatMsgActions(m);
+  const preview = chatIsThing(m)
+    ? `<span style="display:flex;align-items:center;gap:8px">${icon(CHAT_THING_ICON[m.kind], 15, `style="color:${CHAT_THING_INK[m.kind]};flex-shrink:0"`)}<span>${esc(m.body || "")}</span></span>`
+    : esc(String(m.body || "").slice(0, 280)).replace(/\n/g, "<br>");
+  const row = (action, ic, label, hint, ink) => `<button data-action="${action}"
+      class="pb-btn pb-ghost" style="width:100%;padding:12px 14px;margin-bottom:8px;justify-content:flex-start;gap:10px;text-align:left;color:${ink}">
+      ${icon(ic, 16)}
+      <span style="flex:1;min-width:0">
+        <span style="display:block;font-size:13.5px;font-weight:600">${label}</span>
+        ${hint ? `<span style="display:block;font-size:11px;color:var(--faint);font-weight:400;margin-top:2px;white-space:normal;line-height:1.4">${hint}</span>` : ""}
+      </span>
+    </button>`;
+  return sheet(T("chat.msgTitle"), "chatMsgMenu", `
+    <div class="pb-card2" style="padding:10px 12px;margin-bottom:12px;font-size:12.5px;color:var(--muted);line-height:1.45;max-height:96px;overflow:hidden;word-break:break-word">${preview}</div>
+    ${acts.includes("copy") ? row("chat-copy", "copy", T("chat.copy"), "", "var(--text)") : ""}
+    ${acts.includes("unsend") ? row("chat-unsend", "trash-2", T("chat.unsend"), T("chat.unsendHint"), "var(--red)") : ""}
+    ${acts.includes("discard") ? row("chat-discard", "trash-2", T("chat.discard"), T("chat.discardHint"), "var(--red)") : ""}
+  `, 132);
+}
+
+/* ── LONG PRESS, THE WAY EVERY MESSAGING APP DOES IT ──────────────────
+   A tap on a message already means something — open the card, open the
+   photo — so the actions on a message (copy it, unsend it) live behind a
+   long press, and behind a right click on a desktop. One listener on the
+   document, like everything else here, because render() throws the nodes
+   away on every frame.
+
+   The finger is still down when the menu opens, and lifting it lands a
+   click on whatever is now underneath — the menu's own backdrop, which
+   would close it again. So that one click is swallowed, in the capture
+   phase, before the dispatcher sees it. A press that moves is a scroll,
+   and cancels. */
+const CHAT_PRESS_MS = 460;
+let chatPress = null;
+let chatPressSwallow = 0;
+
+function chatOpenMsgMenu(threadId, messageId) {
+  if (ui.chatMsgMenu && ui.chatMsgMenu.messageId === messageId) return;
+  const m = chatMsgs(threadId).find((x) => x.messageId === messageId);
+  if (!m || !chatMsgActions(m).length) return;
+  ui.chatMsgMenu = { threadId, messageId };
+  chatPressSwallow = Date.now() + 900;
+  try { if (navigator.vibrate) navigator.vibrate(12); } catch { /* no buzz, no matter */ }
+  render();
+}
+document.addEventListener("pointerdown", (e) => {
+  const el = e.target.closest && e.target.closest("[data-msgpress]");
+  if (!el || (e.pointerType === "mouse" && e.button !== 0)) return;
+  clearTimeout(chatPress && chatPress.timer);
+  chatPress = {
+    x: e.clientX, y: e.clientY,
+    timer: setTimeout(() => { chatPress = null; chatOpenMsgMenu(el.dataset.tid, el.dataset.msgpress); }, CHAT_PRESS_MS),
+  };
+});
+document.addEventListener("pointermove", (e) => {
+  if (chatPress && Math.hypot(e.clientX - chatPress.x, e.clientY - chatPress.y) > 10) { clearTimeout(chatPress.timer); chatPress = null; }
+}, { passive: true });
+["pointerup", "pointercancel"].forEach((ev) => document.addEventListener(ev, () => {
+  if (chatPress) { clearTimeout(chatPress.timer); chatPress = null; }
+}));
+document.addEventListener("contextmenu", (e) => {
+  const el = e.target.closest && e.target.closest("[data-msgpress]");
+  if (!el) return;
+  e.preventDefault();
+  if (chatPress) { clearTimeout(chatPress.timer); chatPress = null; }
+  chatOpenMsgMenu(el.dataset.tid, el.dataset.msgpress);
+});
+document.addEventListener("click", (e) => {
+  if (!chatPressSwallow) return;
+  const swallow = Date.now() < chatPressSwallow;
+  chatPressSwallow = 0;
+  if (swallow) { e.stopImmediatePropagation(); e.preventDefault(); }
+}, true);
+
+/* Text onto the clipboard, with the old route for a browser that will not
+   hand the async one to a page. */
+function chatCopyText(text) {
+  const s = String(text || "");
+  const legacy = () => {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = s; ta.setAttribute("readonly", ""); ta.style.cssText = "position:fixed;opacity:0;top:0;left:0";
+      document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove();
+    } catch { /* nothing more to try */ }
+  };
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(s).catch(legacy);
+    else legacy();
+  } catch { legacy(); }
+}
+
+/* ── SENDING SOMETHING FROM WHERE IT LIVES ────────────────────────────
+   The composer's + is one way in. The other is from the thing itself: an
+   exercise's window, a preset, a rank you have just been given. This sheet
+   picks the conversation, sends, and says it went — it does not take you
+   away from where you were, because you were in the middle of something. */
+function renderShareTo() {
+  const sh = ui.shareTo;
+  const threads = chatThreads();
+  const kinds = sh.kinds || [sh.kind];
+  const pick = kinds.length > 1
+    ? segControl("share-kind", sh.kind, kinds.map((k) => [k, T("chat.kind." + k)]))
+    : "";
+
+  if (sh.sent) {
+    const t = chatThreadOf(sh.sent);
+    const failed = sh.failed;
+    return sheet(T("chat.shareTitle"), "shareTo", `
+      <div class="pb-card" style="padding:16px 14px;margin-bottom:12px;text-align:center;border-color:${failed ? "rgba(208,90,80,.45)" : "rgba(106,164,101,.45)"}">
+        ${icon(failed ? "alert-circle" : "check-circle-2", 26, `style="display:block;margin:0 auto 8px;color:${failed ? "var(--red)" : "var(--green)"}"`)}
+        <div style="font-weight:700;font-size:14.5px">${failed ? T("chat.shareFailed") : T("chat.shareSent", { name: esc(chatName(t)) })}</div>
+        ${failed ? `<div style="font-size:12px;color:var(--muted);margin-top:6px;line-height:1.5">${esc(failed)}</div>` : ""}
+      </div>
+      <div style="display:flex;gap:8px">
+        <button data-action="overlay-close" data-target="shareTo" class="pb-btn pb-ghost" style="flex:1;padding:12px 0;font-size:13.5px">${T("common.done")}</button>
+        <button data-action="share-open-chat" data-id="${esc(sh.sent)}" class="pb-btn pb-gold" style="flex:1;padding:12px 0;font-size:13.5px">${icon("message-circle", 15)} ${T("chat.shareOpen")}</button>
+      </div>
+    `, 128);
+  }
+
+  const list = !chatSignedIn()
+    ? `<div style="padding:16px 6px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T("chat.needAccount")}</div>`
+    : threads.length
+    ? `<div class="pb-card" style="overflow:hidden">${threads.map((t, i) => `<button data-action="share-send" data-id="${esc(t.threadId)}" ${sh.busy ? "disabled" : ""} style="width:100%;display:flex;align-items:center;gap:11px;padding:10px 13px;text-align:left;color:var(--text);border-bottom:${i < threads.length - 1 ? "1px solid var(--border-soft)" : "none"};opacity:${sh.busy ? 0.5 : 1}">
+        ${chatAvatar(chatName(t), 34)}
+        <span style="flex:1;min-width:0;font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(chatName(t))}</span>
+        ${sh.busy === t.threadId ? `<span style="font-size:11.5px;color:var(--faint)">${T("chat.sending")}</span>` : icon("send", 15, 'style="color:var(--gold);flex-shrink:0"')}
+      </button>`).join("")}</div>`
+    : `<div style="padding:16px 6px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T("chat.shareNoChats")}</div>`;
+
+  return sheet(T("chat.shareTitle"), "shareTo", `
+    ${pick}
+    <div style="font-size:12px;color:var(--muted);line-height:1.5;margin:0 2px 12px">${T("chat.shareHint." + sh.kind)}</div>
+    ${list}
+  `, 128);
+}
+
+/* the "send in a chat" button, drawn only where there is somebody to send
+   it to: signed in to an account that can chat */
+const chatShareBtn = (kinds, ref, style = "") => chatSignedIn()
+  ? `<button data-action="share-open" data-kinds="${esc(kinds)}" data-ref="${esc(ref)}" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:13.5px;${style}">${icon("send", 15)} ${T("chat.sendToChat")}</button>`
+  : "";
+
+/* ── ADDING IT TO YOUR OWN ────────────────────────────────────────────
+   The group it goes in: yours if you have it — by the key the app shipped
+   it under first, so "Chest" lands in your chest group even if you renamed
+   it "Pecs" — then by name, and made fresh with the sender's colour and
+   kind when you have nothing like it. `groups` is a working copy the caller
+   commits. */
+function chatGroupFor(snap, groups) {
+  const g = snap && snap.group && typeof snap.group === "object" ? snap.group : null;
+  const key = g && typeof g.key === "string" && Object.prototype.hasOwnProperty.call(DEFAULT_GROUP_NAME, g.key) ? g.key : null;
+  if (key) { const mine = groups.find((x) => x.key === key); if (mine) return mine.name; }
+  const want = pStr((g && g.name) || (snap && snap.muscle), 40).trim();
+  if (!want || want === UNCATEGORIZED) return UNCATEGORIZED;
+  const hit = groups.find((x) => x.name.toLowerCase() === want.toLowerCase());
+  if (hit) return hit.name;
+  const made = {
+    name: want,
+    color: pColor(g && g.color) || EXTRA_COLORS[groups.length % EXTRA_COLORS.length],
+    kind: g && KIND[g.kind] ? g.kind : snapKind(snap),
+  };
+  if (key && DEFAULT_GROUP_NAME[key] === want) made.key = key;
+  groups.push(made);
+  return want;
+}
+
+/* One exercise into a working copy of the library. Returns the name it is
+   filed under. A name you already have is YOURS and is never touched: it is
+   returned as it is, or with `asCopy` the new one is numbered beside it. A
+   built-in you had deleted comes back AS the built-in, so it speaks your
+   language again; anything else is a custom row, exactly as typed. */
+function chatAddEx(snap, lib, groups, asCopy) {
+  let name = pStr(snap && snap.name, 120).trim();
+  if (!name) return null;
+  const clash = (n) => lib.find((x) => x.name.toLowerCase() === n.toLowerCase());
+  const had = clash(name);
+  if (had && !asCopy) return had.name;
+  if (had) { let i = 2; while (clash(`${name} (${i})`)) i++; name = `${name} (${i})`; }
+  const muscle = chatGroupFor(snap, groups);
+  const gk = (groups.find((x) => x.name === muscle) || {}).kind;
+  const bi = snapBuiltinIx(snap);
+  const restore = bi != null && !asCopy && !lib.some((x) => x.id === snap.builtin);
+  const video = pStr(snap.video, 500);
+  let row = {
+    id: restore ? snap.builtin : uid(), name, muscle,
+    equipment: pStr(snap.equipment, 200), alternatives: pStr(snap.alternatives, 300), note: pStr(snap.note, 2000),
+    image: "", video: /^https?:\/\//i.test(video) ? video : "", custom: !restore,
+  };
+  row = withKind(row, snapKind(snap), KIND[gk] ? gk : DEFAULT_KIND);
+  /* the photo by id: in the store already, fetched by photoPass, and drawn
+     straight away if this screen has already fetched it for the card */
+  if (isPhotoId(snap.photo)) {
+    row.photoId = snap.photo;
+    const have = photoMem.get(snap.photo);
+    if (have) row.image = have;
+  }
+  lib.push(row);
+  return name;
+}
+
+function chatImport(m, asCopy) {
+  const p = m.payload && typeof m.payload === "object" ? m.payload : {};
+  const lib = [...(state.library || [])];
+  const groups = [...(state.groups && state.groups.length ? state.groups : DEFAULT_GROUPS)];
+  const nGroups = groups.length;
+
+  if (m.kind === "exercise") {
+    const name = chatAddEx(p.ex || {}, lib, groups, asCopy);
+    if (!name) return null;
+    patch({ library: lib, ...(groups.length !== nGroups ? { groups } : {}) });
+    photoPass();
+    return name;
+  }
+
+  if (m.kind === "preset" || m.kind === "workout") {
+    const rows = m.kind === "preset" ? pList(p.preset && p.preset.exercises, 60) : pList(p.entries, 60);
+    const exercises = [];
+    const seen = new Set();
+    for (const r of rows) {
+      const ref = pStr(r.exercise, 120).trim();
+      if (!ref || seen.has(ref)) continue;
+      seen.add(ref);
+      const snap = snapOf(p, ref) || { name: ref, muscle: pStr(r.muscle, 60), kind: r.kind };
+      const name = chatAddEx(snap, lib, groups, false);
+      const row = name && lib.find((x) => x.name === name);
+      if (row) exercises.push({ exercise: row.name, muscle: row.muscle, kind: exKind(row) });
+    }
+    if (!exercises.length) return null;
+    const t = chatThreadOf(ui.chatView && ui.chatView.threadId);
+    const preset = {
+      id: uid(),
+      name: m.kind === "preset"
+        ? (pStr(p.preset && p.preset.name, 80).trim() || T("chat.kind.preset"))
+        : T("chat.workoutPresetName", { date: /^\d{4}-\d{2}-\d{2}$/.test(pStr(p.date, 10)) ? fmtShort(p.date) : "" }),
+      description: m.kind === "preset" ? pStr(p.preset && p.preset.description, 200) : T("chat.fromWho", { name: chatName(t) }),
+      pinned: false, exercises, createdAt: Date.now(),
+    };
+    chatRead().imported[m.messageId] = activeProfileId();
+    chatWrite();
+    patch({ library: lib, presets: [...(state.presets || []), preset], ...(groups.length !== nGroups ? { groups } : {}) });
+    photoPass();
+    return preset.id;
+  }
+  return null;
 }
 
 /* ─────────────────────────── LIBRARY ──────────────────────────────── */
@@ -8148,6 +9664,10 @@ function renderLibraryList(library) {
         ${ex.variantOf ? icon("corner-down-right", 13, 'style="color:var(--faint);flex-shrink:0;margin-right:-2px"') : ""}
         ${ex.image
           ? `<img src="${esc(ex.image)}" alt="" style="width:38px;height:38px;border-radius:8px;object-fit:cover;flex-shrink:0;border:1px solid var(--border)">`
+          : photoComing(ex)
+          /* on its way from the photo store: the slot fills itself in place
+             when it lands, and photoPass writes it into the row */
+          ? photoSlot(ex.photoId, "width:38px;height:38px;border-radius:8px;flex-shrink:0;border:1px solid var(--border)", { iconSize: 15 })
           : photoAway(ex)
           /* the same 38px the photo would have taken, so a shared library
              does not comb itself into two differently-indented columns */
@@ -8710,6 +10230,8 @@ function renderPresetView() {
     <button data-action="presetview-pin" class="pb-btn" style="width:100%;padding:11px 0;font-size:13.5px;margin-bottom:12px;background:${p.pinned ? "rgba(233,185,73,.12)" : "var(--surface2)"};color:${p.pinned ? "var(--gold)" : "var(--muted)"};border:1px solid ${p.pinned ? "rgba(233,185,73,.4)" : "var(--border)"}">
       ${icon(p.pinned ? "pin-off" : "pin", 15)} ${p.pinned ? T("preset.pinned") : T("preset.pinTo")}
     </button>
+    ${/* the preset as it is SAVED, which is what a friend would be adding */
+      (state.presets || []).some((x) => x.id === p.id && (x.exercises || []).length) ? chatShareBtn("preset", p.id, "margin-bottom:12px") : ""}
     <button data-action="save-preset-edits" ${canSave ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${canSave ? 1 : 0.45}">${icon("check", 16)} ${T("common.saveChanges")}</button>
     <button data-action="delete-preset" data-id="${esc(p.id)}" class="pb-btn" style="width:100%;padding:12px 0;margin-top:10px;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">${icon("trash-2", 15)} ${T("common.delete")}</button>
   `);
@@ -8746,14 +10268,25 @@ function youtubeId(url) {
 }
 
 /* Read an uploaded image and downscale it so a data URL of a phone photo
-   doesn't blow past the localStorage quota. Longest side capped, re-encoded
-   as JPEG. Falls back to the raw data URL if the decode ever fails. */
-function readImageScaled(file, cb) {
+   doesn't blow past the localStorage quota, and so what goes up to the
+   photo store is a few hundred KB rather than the camera's few megabytes.
+   Longest side capped (1000px for a machine on a library row, more for a
+   photo sent in a chat, where the picture IS the message).
+
+   Encoded as WebP where the browser can do it and JPEG where it cannot,
+   keeping whichever came out SMALLER: WebP is usually a third lighter at
+   the same quality, but Safari cannot encode it and silently hands back a
+   PNG instead, which is why the answer is checked rather than trusted.
+   Falls back to the raw data URL if the decode ever fails. `cb` also gets
+   the size it was drawn at, which a chat photo uses to hold its place
+   before it has loaded. */
+function readImageScaled(file, cb, opts = {}) {
+  const MAX = opts.max || 1000;
+  const Q = opts.quality || 0.8;
   const reader = new FileReader();
   reader.onload = () => {
     const img = new Image();
     img.onload = () => {
-      const MAX = 1000;
       let { width, height } = img;
       if (width > MAX || height > MAX) {
         const s = Math.min(MAX / width, MAX / height);
@@ -8763,10 +10296,14 @@ function readImageScaled(file, cb) {
         const c = document.createElement("canvas");
         c.width = width; c.height = height;
         c.getContext("2d").drawImage(img, 0, 0, width, height);
-        cb(c.toDataURL("image/jpeg", 0.82));
-      } catch { cb(reader.result); }
+        let out = null;
+        try { const w = c.toDataURL("image/webp", Q); if (w.startsWith("data:image/webp")) out = w; } catch { /* no webp encoder */ }
+        const jpg = c.toDataURL("image/jpeg", Q);
+        if (!out || jpg.length < out.length) out = jpg;
+        cb(out, { w: width, h: height });
+      } catch { cb(reader.result, { w: width, h: height }); }
     };
-    img.onerror = () => cb(reader.result);
+    img.onerror = () => cb(reader.result, null);
     img.src = reader.result;
   };
   reader.readAsDataURL(file);
@@ -8924,11 +10461,16 @@ function exWindowViewBody(ex, hist) {
 
     ${ex.image
       ? `<img src="${esc(ex.image)}" alt="${esc(exLabelOf(ex))}" style="width:100%;max-height:300px;object-fit:cover;border-radius:14px;border:1px solid var(--border);margin-bottom:18px;display:block">`
+      : photoComing(ex)
+      /* In the photo store and on its way: drawn the moment it lands, in
+         place, with no line of explanation, because a picture arriving a
+         second late needs none. */
+      ? photoSlot(ex.photoId, "width:100%;height:220px;border-radius:14px;border:1px solid var(--border);margin-bottom:18px", { alt: exLabelOf(ex), iconSize: 22 })
       : photoAway(ex)
       /* Where the machine should be, saying what is actually the case: the
-         picture exists and is not on this phone. Not an error and not a
-         broken image — nothing here has failed, the training all arrived,
-         and one file was too big to come with it. */
+         picture exists, on a device still running a build from before
+         photos had a store of their own, and it comes across when that
+         device updates. Not an error and not a broken image. */
       ? `<div class="pb-placeholder" style="height:110px;flex-direction:column;gap:7px;margin-bottom:8px">
           ${icon("image-off", 20)}
           <span style="font-size:12px;letter-spacing:.02em;text-transform:none">${T("ex.photoAway")}</span>
@@ -8953,6 +10495,10 @@ function exWindowViewBody(ex, hist) {
     ${detailField(T("ex.details"), exFieldOf(ex, "note"), ex.missing ? T("ex.gone") : T("ex.noDetails"))}
     ${detailField(T("ex.equipment"), exFieldOf(ex, "equipment"), T("ex.notFilled"))}
     ${detailField(T("ex.alternatives"), exFieldOf(ex, "alternatives"), T("ex.notFilled"))}
+
+    ${/* the lift, or your record on it, into a conversation: see
+          renderShareTo. A lift with nothing logged has no record to send. */
+      ex.missing ? "" : chatShareBtn(hist && hist.best ? "exercise,record" : "exercise", ex.name, "margin-bottom:18px")}
 
     ${exWindowVariations(ex)}
     ${exWindowStandard(ex)}
@@ -9385,7 +10931,7 @@ function exWindowEditBody(f, library) {
     ${field(T("ex.groupRequired"), musclePicker, T("ex.groupHint"))}
     ${field(T("kind.exLabel"), kindPicker("exwin-kind", exKind(f), f.muscle ? groupKind(f.muscle) : null), T("kind.exHint"))}
 
-    ${field(T("ex.photo"), imageBlock, photoAway(f) ? T("ex.photoAwayHint") : T("ex.photoHint"))}
+    ${field(T("ex.photo"), imageBlock, photoAway(f) && !photoComing(f) ? T("ex.photoAwayHint") : T("ex.photoHint"))}
 
     ${field(T("ex.videoLabel"), `<input class="pb-input" type="url" inputmode="url" data-bind="exwin.video" value="${esc(f.video)}" placeholder="—">`,
       vid ? T("ex.videoOk") : (f.video ? T("ex.videoBad") : T("ex.videoHint")))}
@@ -10721,6 +12267,260 @@ function renderBodyFormSheet(f, unit) {
   `, 100);   /* above the Body window it opens from */
 }
 
+/* ═══════════════════════ NOTIFICATIONS ══════════════════════════════
+   ONE SWITCH, FOR THE WHOLE APP, ON THIS DEVICE.
+
+   There used to be two buttons that looked like two features: "Turn on
+   notifications" in Settings and a strip in the chat tab offering to "Turn
+   on" message notifications. They were the same button — both asked the
+   browser for permission and subscribed this device to push, and that one
+   subscription is what a rest timer rings through AND what a message
+   arrives through. Two controls for one thing is how somebody turns it
+   "on for chat" and wonders why a timer still cannot reach a locked phone.
+   A third place asked as well: the first Start of a timer requested the
+   browser's permission and stopped there, without the subscription, so the
+   answer "allow" bought local notifications and nothing that worked with
+   the app closed.
+
+   So there is one switch, and everything goes through it:
+     - Settings → Notifications opens the one window (renderNotifyWindow),
+       with the switch, what each kind is for, and the check that used to
+       be a separate diagnostics page;
+     - the chat tab shows a doorway to that window while nobody has decided
+       yet, and nothing once they have;
+     - the first Start of a timer, if nobody has decided yet, asks through
+       the SAME enable, so saying yes there turns the whole thing on.
+
+   Each KIND can then be turned off on its own (rest timers, messages).
+   That choice is sent to the server with the subscription, which never
+   pushes a kind a device said no to (push.js), and the page honours it
+   too, for the timer notification it shows itself.
+
+   IT IS THE DEVICE'S, NOT THE PROFILE'S. Whether a phone rings is a fact
+   about the phone, like its theme, so it lives in NOTIFY_KEY beside the
+   device token and outside `state`: switching profile does not change it,
+   a backup does not carry it, and it never syncs.
+
+   `want` is the user's own answer: true, false, or null for "never asked".
+   Only null is ever asked about unprompted, and only from a tap.        */
+
+const NOTIFY_KEY = "zenofit:notify";
+const NOTIFY_KINDS = ["timer", "chat"];
+
+function notifyPrefs() {
+  let p = null;
+  try { p = JSON.parse(localStorage.getItem(NOTIFY_KEY) || "null"); } catch { p = null; }
+  if (!p || typeof p !== "object") p = {};
+  return {
+    want: typeof p.want === "boolean" ? p.want : null,
+    off: Array.isArray(p.off) ? p.off.filter((k) => NOTIFY_KINDS.includes(k)) : [],
+    /* the `off` list the server last confirmed, so it is sent once, not on
+       every launch */
+    sent: typeof p.sent === "string" ? p.sent : null,
+  };
+}
+function notifySave(patch) {
+  const next = { ...notifyPrefs(), ...patch };
+  try { localStorage.setItem(NOTIFY_KEY, JSON.stringify(next)); } catch { /* asked again next time */ }
+  return next;
+}
+const notifyOffKey = (off) => off.slice().sort().join(",");
+const notifyKindOn = (kind) => { const p = notifyPrefs(); return p.want !== false && !p.off.includes(kind); };
+
+/* Where this device stands, in one word: "on", "off", or the reason it
+   cannot be either ("ios-needs-install", "denied", "unsupported"). */
+function notifyState() {
+  const C = window.ZenofitCloud;
+  if (!C || !C.pushBlockedReason) return "unsupported";
+  const why = C.pushBlockedReason();
+  if (why) return why;
+  return ui.notifyOn ? "on" : "off";
+}
+
+/* The one way on. MUST run from a tap: iOS refuses a permission prompt
+   that was not, and Chrome penalises a site that asks on load. Resolves
+   what enablePush said, which never throws. */
+async function notifyEnable() {
+  const C = window.ZenofitCloud;
+  if (!C || !C.enablePush || ui.notifyBusy) return { ok: false, reason: "busy" };
+  ui.notifyBusy = true; render();
+  const prefs = notifyPrefs();
+  const res = (await C.enablePush({ off: prefs.off })) || { ok: false, reason: "error" };
+  ui.notifyBusy = false;
+  if (res.ok) {
+    ui.notifyOn = true;
+    notifySave({ want: true, sent: notifyOffKey(prefs.off) });
+  } else if (res.reason === "denied") {
+    /* the browser has said no, and only its own settings can undo that */
+    notifySave({ want: false });
+  }
+  render();
+  if (ui.notifyWin) notifyDiagLoad();
+  return res;
+}
+
+/* Off: the subscription is taken back on the server and in the browser,
+   so nothing is sent here at all, and the page stops showing its own
+   timer notification too. The browser's permission stays granted — only
+   the user can take that away, in its settings — which is what makes
+   switching back on a tap with no prompt. */
+async function notifyDisable() {
+  const C = window.ZenofitCloud;
+  if (!C || ui.notifyBusy) return;
+  notifySave({ want: false });
+  ui.notifyBusy = true; render();
+  try { await C.disablePush(); } catch { /* the server's copy is pruned on its next failed send */ }
+  ui.notifyBusy = false; ui.notifyOn = false;
+  render();
+  if (ui.notifyWin) notifyDiagLoad();
+}
+
+async function notifySyncPrefs() {
+  const C = window.ZenofitCloud;
+  const p = notifyPrefs();
+  if (!C || !C.setPushPrefs || !ui.notifyOn || p.sent === notifyOffKey(p.off)) return;
+  const res = await C.setPushPrefs(p.off);
+  if (res && res.ok) notifySave({ sent: notifyOffKey(p.off) });
+}
+
+function notifySetKind(kind, on) {
+  if (!NOTIFY_KINDS.includes(kind)) return;
+  const p = notifyPrefs();
+  const off = on ? p.off.filter((k) => k !== kind) : [...new Set([...p.off, kind])];
+  notifySave({ off });
+  render();
+  notifySyncPrefs();
+}
+
+/* The first Start of a rest timer, on a device nobody has decided about
+   yet. It used to ask for the browser's permission and stop there; now it
+   is the same enable as the switch, so "allow" here really does mean a
+   timer can reach a locked phone. Never asked twice, and never on a device
+   that said no. */
+function notifyFirstAsk() {
+  const C = window.ZenofitCloud;
+  if (!C || ui.notifyOn || notifyPrefs().want !== null) return;
+  if (C.pushBlockedReason() || !window.Notification || Notification.permission !== "default") return;
+  notifyEnable();
+}
+
+/* Words for a failed enable, for the tap that asked. Dismissing the
+   prompt is an answer, not a failure, and says nothing. */
+function notifyFailText(res) {
+  const why = res && res.reason;
+  if (!why || why === "dismissed" || why === "busy") return "";
+  return T(why === "denied" ? "notify.state.denied"
+    : why === "ios-needs-install" ? "notify.state.ios-needs-install"
+    : why === "server-not-configured" ? "notify.noServer"
+    : "notify.failed");
+}
+
+/* What the server knows about this device, for the check at the bottom of
+   the window. Only ever read while the window is open. */
+async function notifyDiagLoad() {
+  const C = window.ZenofitCloud;
+  if (!C || !C.pushStatus) return;
+  const d = ui.notifyDiag || (ui.notifyDiag = {});
+  d.loading = true;
+  try { d.status = await C.pushStatus(); d.error = null; }
+  catch (e) { d.error = e && e.status ? (e.message || T("chat.errGeneric")) : T("chat.errOffline"); }
+  d.loading = false;
+  if (ui.notifyWin && !syncTyping()) render();
+}
+
+/* A switch drawn as one: the same gold-on and grey-off the app's segmented
+   controls use, in the space a trailing chevron would take. */
+const switchPill = (on) => `<span aria-hidden="true" style="flex-shrink:0;position:relative;width:42px;height:25px;border-radius:13px;background:${on ? "var(--gold)" : "var(--surface2)"};border:1px solid ${on ? "var(--gold)" : "var(--border)"};transition:background .15s">
+  <span style="position:absolute;top:2px;left:${on ? 19 : 2}px;width:19px;height:19px;border-radius:10px;background:${on ? "var(--gold-ink)" : "var(--faint)"};transition:left .15s"></span>
+</span>`;
+
+function renderNotifyWindow() {
+  const C = window.ZenofitCloud;
+  const st = notifyState();
+  const on = st === "on";
+  const blocked = st === "ios-needs-install" || st === "denied" || st === "unsupported";
+  const prefs = notifyPrefs();
+  const d = ui.notifyDiag || {};
+  const busy = ui.notifyBusy;
+
+  const hero = `<div class="pb-card" style="padding:15px 14px 14px;margin-bottom:18px;${on ? "border-color:rgba(233,185,73,.45)" : ""}">
+    <div style="display:flex;align-items:flex-start;gap:12px">
+      <span style="width:42px;height:42px;border-radius:14px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:${on ? "rgba(233,185,73,.14)" : "var(--surface2)"};color:${on ? "var(--gold)" : blocked ? "var(--steel)" : "var(--faint)"}">${icon(on ? "bell-ring" : "bell-off", 20)}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:700;font-size:15.5px">${T(on ? "notify.onTitle" : blocked ? "notify.blockedTitle" : "notify.offTitle")}</div>
+        <div style="font-size:12px;color:${blocked ? "var(--steel)" : "var(--muted)"};line-height:1.5;margin-top:3px">${T("notify.state." + st)}</div>
+      </div>
+    </div>
+    ${blocked ? "" : `<div style="margin-top:14px">${busy
+      ? `<div style="text-align:center;padding:9px 0;font-size:13px;color:var(--muted)">${T("sync.working")}</div>`
+      : segControl("notify-set", on ? "on" : "off", [["off", T("notify.off")], ["on", T("notify.on")]]).replace("margin-bottom:14px", "margin-bottom:0")}</div>`}
+  </div>`;
+
+  const kindRow = (kind, ic, last) => {
+    const kOn = !prefs.off.includes(kind);
+    const live = on && kOn;
+    return `<button data-action="notify-kind" data-k="${kind}" ${on ? "" : "disabled"} style="width:100%;display:flex;align-items:center;gap:11px;padding:13px 14px;text-align:left;color:var(--text);border-bottom:${last ? "none" : "1px solid var(--border-soft)"};opacity:${on ? 1 : 0.5}">
+      ${icon(ic, 17, `style="color:${live ? "var(--gold)" : "var(--faint)"};flex-shrink:0"`)}
+      <span style="flex:1;min-width:0">
+        <span style="display:block;font-weight:600;font-size:14px">${T("notify.kind." + kind)}</span>
+        <span style="display:block;font-size:11.5px;color:var(--faint);line-height:1.45;margin-top:2px">${T("notify.kindHint." + kind)}</span>
+      </span>
+      ${switchPill(live)}
+    </button>`;
+  };
+
+  const perm = window.Notification ? Notification.permission : "na";
+  const standalone = !!(C && C.isStandalone && C.isStandalone());
+  const row = (label, value, ink, last) => `<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 14px;border-bottom:${last ? "none" : "1px solid var(--border-soft)"}">
+    <span style="font-size:12.5px;color:var(--muted)">${label}</span>
+    <span style="font-size:12.5px;font-weight:600;text-align:right;color:${ink || "var(--text)"}">${value}</span>
+  </div>`;
+  const reg = d.status ? d.status.thisDevice : null;
+  const checks = `<div class="pb-card" style="overflow:hidden;margin-bottom:10px">
+    ${row(T("notify.diag.installed"), T(standalone ? "notify.yes" : "notify.no"), standalone ? "var(--green)" : "var(--faint)")}
+    ${row(T("notify.diag.permission"), T("notify.perm." + perm), perm === "granted" ? "var(--green)" : perm === "denied" ? "var(--red)" : "var(--faint)")}
+    ${row(T("notify.diag.thisDevice"),
+      d.loading && !d.status ? T("sync.working") : reg == null ? "—" : T(reg ? "notify.diag.registered" : "notify.diag.notRegistered"),
+      reg ? "var(--green)" : "var(--faint)")}
+    ${row(T("notify.diag.devices"), d.status ? String(d.status.subscriptions) : "—", null, true)}
+  </div>
+  ${d.error ? `<div style="font-size:11.5px;color:var(--red);line-height:1.5;margin:0 2px 10px">${esc(d.error)}</div>` : ""}`;
+
+  const timerOn = on && !prefs.off.includes("timer");
+  const tests = `<div style="display:flex;flex-direction:column;gap:8px;margin-bottom:8px">
+    <button data-action="notify-test" ${on && !d.testing ? "" : "disabled"} class="pb-btn pb-ghost" style="width:100%;padding:12px 14px;font-size:13.5px;justify-content:flex-start;gap:9px;opacity:${on ? 1 : 0.45}">
+      ${icon("send", 15)} ${T("notify.test")}
+    </button>
+    <button data-action="notify-test-timer" ${timerOn && !d.testing ? "" : "disabled"} class="pb-btn pb-ghost" style="width:100%;padding:12px 14px;font-size:13.5px;justify-content:flex-start;gap:9px;opacity:${timerOn ? 1 : 0.45}">
+      ${icon("timer", 15)} ${T("notify.testTimer")}
+    </button>
+  </div>
+  ${d.msg ? `<div style="display:flex;gap:8px;align-items:flex-start;font-size:12px;line-height:1.5;margin:4px 2px 10px;color:${d.ok ? "var(--green)" : "var(--red)"}">${icon(d.ok ? "check" : "alert-circle", 14, 'style="flex-shrink:0;margin-top:2px"')}<span>${esc(d.msg)}</span></div>` : ""}
+  <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 2px 18px">${T("notify.checkHint")}</div>`;
+
+  return fullScreen(116, `
+    <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px;border-bottom:1px solid var(--border-soft)">
+      <button data-action="notify-close" style="color:var(--muted);padding:4px">${icon("arrow-left", 21)}</button>
+      <div class="pb-num" style="font-size:19px;font-weight:700;flex:1">${T("notify.title")}</div>
+    </div>
+    <div class="pb-scroll" data-scrollkey="notifyWin" style="flex:1;overflow-y:auto;padding:16px 16px calc(40px + var(--pb-sab))">
+      ${hero}
+      ${sectionTitle(T("notify.kindsTitle"))}
+      <div class="pb-card" style="overflow:hidden;margin-bottom:${on ? 18 : 8}px">
+        ${kindRow("timer", "timer")}
+        ${kindRow("chat", "message-circle", true)}
+      </div>
+      ${st === "off" ? `<div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:0 2px 18px">${T("notify.kindsOff")}</div>` : on ? "" : `<div style="height:10px"></div>`}
+      ${sectionTitle(T("notify.checkTitle"))}
+      ${checks}
+      ${tests}
+      <div style="display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--faint);line-height:1.5;margin:4px 2px 0">
+        ${icon("shield-check", 14, 'style="flex-shrink:0"')} ${T("notify.footer")}
+      </div>
+    </div>
+  `, "notifyWin");
+}
+
 /* ═══════════════════════════ TIMERS ════════════════════════════════
    A timer is {id,name,duration,endsAt,remaining,doneAt,pinned}. `endsAt` is an
    absolute timestamp rather than a ticking countdown, so a running timer
@@ -10844,22 +12644,35 @@ function playSound(id, volume = DEFAULT_VOLUME) {
   } catch { /* ignore, a missing chime never blocks a workout */ }
 }
 
-/* Asked for on the first Start, since a permission prompt needs a user gesture. */
-function askNotifyPermission() {
-  try {
-    if (window.Notification && Notification.permission === "default") Notification.requestPermission();
-  } catch { /* unsupported */ }
-}
+/* The page's own notification for a timer that ran out while it was still
+   alive. Through the one switch (notifyKindOn): a device that turned
+   notifications off, or turned rest timers off, is not shown one.
 
+   Only when nobody is looking. On screen, the chime, the buzz and the
+   banner above the nav have already said it, and a system notification on
+   top of all three is the fourth copy of one fact.
+
+   Through the service worker where there is one, because Chrome on
+   Android refuses `new Notification()` from a page outright — it only
+   ever worked on a desktop. The constructor stays as the fallback for a
+   page the worker does not control yet. */
 function notifyDone(t) {
+  if (!notifyKindOn("timer")) return;
   try {
-    if (window.Notification && Notification.permission === "granted") {
-      const n = new Notification(timerLabel(t) || T("timers.listTitle"), {
-        body: T("timers.notifBody", { time: fmtClock(t.duration) }),
-        icon: "logoC.png", badge: "logoC.png", tag: "pbt-" + t.id, renotify: true,
-      });
-      n.onclick = () => { try { window.focus(); } catch { /* ignore */ } n.close(); };
+    if (!window.Notification || Notification.permission !== "granted") return;
+    if (document.visibilityState === "visible" && document.hasFocus()) return;
+    const title = timerLabel(t) || T("timers.listTitle");
+    const opts = {
+      body: T("timers.notifBody", { time: fmtClock(t.duration) }),
+      icon: "icon-192.png", badge: "icon-192.png", tag: "pbt-" + t.id, renotify: true,
+      data: { kind: "timer", url: "./" },
+    };
+    if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
+      navigator.serviceWorker.ready.then((reg) => reg.showNotification(title, opts)).catch(() => {});
+      return;
     }
+    const n = new Notification(title, opts);
+    n.onclick = () => { try { window.focus(); } catch { /* ignore */ } n.close(); };
   } catch { /* some browsers only allow notifications from a service worker */ }
 }
 
@@ -10961,6 +12774,10 @@ async function cloudTimerStart(t, secs) {
   const inMs = Math.round(secs * 1000) + PUSH_GRACE_MS;
   /* checked here rather than spending a request to be told no */
   if (!(inMs > 1000) || inMs > PUSH_MAX_MS) return;
+  /* a device that turned notifications off, or rest timers off, books
+     nothing: the server would not send it anyway, and a Durable Object
+     alarm held for a push nobody wants is a request paid for nothing */
+  if (!notifyKindOn("timer")) return;
   try {
     if (C.pushBlockedReason() || !(await C.pushEnabled())) return;
     /* what the run was when we asked, so we can tell whether it is still
@@ -10995,7 +12812,7 @@ function cloudTimerCancel(t) {
 
 function startTimer(t) {
   unlockAudio();          // both need the user gesture that got us here
-  askNotifyPermission();
+  notifyFirstAsk();
   const secs = t.remaining != null ? t.remaining : t.duration;
   cloudTimerCancel(t);    // a resume books a fresh deadline, never a second one
   t.endsAt = Date.now() + Math.max(1, secs) * 1000;
@@ -11431,38 +13248,22 @@ function renderProfile(f) {
 
       <div class="pb-hairline" style="margin:18px 0"></div>
       ${sectionTitle(T("push.section"))}
-      ${/* ── TURNING THEM ON, WHERE SOMEBODY WOULD LOOK ──────────────
-            Until chat existed, the only way to grant push permission was
-            the diagnostics page below, which is a page nobody visits. A
-            rest timer survived that because it also rings locally; a
-            message cannot, since the whole point of one is reaching a
-            phone in a pocket with the app shut. So the grant is offered
-            here as well as in the chat tab — same action, same reasons
-            printed when the platform will not allow it, and the button
-            is drawn only while there is something to grant. */
+      ${/* ── ONE ROW, ONE WINDOW ─────────────────────────────────────
+            This section used to hold a "Turn on notifications" button and a
+            link to a separate diagnostics page that looked like another
+            app. Both live in the Notifications window now, with the switch
+            that the chat tab's strip used to duplicate. See the
+            NOTIFICATIONS block. */
         (() => {
-          const C = window.ZenofitCloud;
-          if (!C) return "";
-          const why = C.pushBlockedReason();
-          if (why === "unsupported") return "";
-          if (why) return `<div style="font-size:11.5px;color:var(--steel);margin-bottom:12px;line-height:1.5">${T(why === "ios-needs-install" ? "chat.pushIos" : "chat.pushDenied")}</div>`;
-          if (ui.chatPushOn) return `<div style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--green);margin-bottom:12px">${icon("check", 14)} ${T("push.on")}</div>`;
-          return `<button data-action="chat-push-on" ${ui.chatPushBusy ? "disabled" : ""} class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:13.5px;margin-bottom:9px;justify-content:flex-start;padding-left:14px;gap:9px">
-            ${icon("bell-ring", 15)} ${ui.chatPushBusy ? T("sync.working") : T("push.enable")}
+          const st = notifyState();
+          const on = st === "on";
+          return `<button data-action="notify-open" class="pb-card" style="width:100%;display:flex;align-items:center;gap:11px;padding:12px 14px;margin-bottom:8px;text-align:left;color:var(--text)">
+            ${icon(on ? "bell-ring" : "bell-off", 18, `style="color:${on ? "var(--gold)" : "var(--faint)"};flex-shrink:0"`)}
+            <span style="flex:1;min-width:0;font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${T("notify.short." + st)}</span>
+            ${icon("chevron-right", 15, 'style="color:var(--faint);flex-shrink:0"')}
           </button>
-          <div style="font-size:11.5px;color:var(--faint);margin-bottom:12px;line-height:1.5">${T("push.enableHint")}</div>`;
+          <div style="font-size:11.5px;color:var(--faint);margin:0 2px 16px;line-height:1.5">${T("notify.settingsHint")}</div>`;
         })()}
-      ${/* The diagnostic page is a separate document, so this is a link in
-            button's clothing rather than another ui flag: see open-push-test
-            for why it is a real navigation and not a new tab. */""}
-      <button data-action="open-push-test" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:13.5px;margin-bottom:9px;justify-content:flex-start;padding-left:14px;gap:9px">
-        ${icon("bell", 15)} ${T("push.diag")}
-        <span style="flex:1"></span>
-        ${icon("chevron-right", 15, 'style="color:var(--faint)"')}
-      </button>
-      <div style="font-size:11.5px;color:var(--faint);margin-bottom:16px;line-height:1.5">
-        ${T("push.diagHint")}
-      </div>
 
       <div class="pb-hairline" style="margin:18px 0"></div>
       ${sectionTitle(T("profile.data"))}
@@ -13197,32 +14998,6 @@ const actions = {
     if (level !== "read") await syncNow(localId);
   },
 
-  /* ── OUT TO THE PUSH DIAGNOSTIC AND BACK ─────────────────────────────
-     The one place in the app that deliberately navigates the document
-     away from itself, so it is worth saying why it is shaped like this.
-
-     A REAL NAVIGATION, NOT window.open. Inside an installed app on iOS a
-     new tab does not open beside you, it opens in Safari: a different
-     browsing context, outside the installed scope, with no service worker
-     and no standalone flag. iOS only delivers a push to an installed app,
-     so the page would sit there diagnosing a context that can never pass,
-     which is the one thing it exists to test. Same-window keeps it inside
-     the scope on every platform, and push-test.html carries a link back.
-
-     RELATIVE, NEVER THE github.io URL. The whole document resolves it
-     against wherever the app is actually being served from, so a move to
-     another host, or a local file:// copy, or a preview server, all keep
-     working. Hard-coding the deploy URL would send a developer testing a
-     local build to the live site to look at the live build.
-
-     The state write is belt and braces: writeNow is already bound to
-     pagehide and beforeunload, and both fire on a navigation like this.
-     Doing it here too costs one localStorage write and means a half-typed
-     set survives even on a browser that drops those events. */
-  "open-push-test": () => {
-    writeNow();
-    location.href = "push-test.html";
-  },
   /* Read-only, both of them, so they still work on a device too full to
      save anything. Nothing is awaited before the share, see shareFile —
      except where the save is another account's, which asks for that
@@ -13967,14 +15742,16 @@ const actions = {
     if (ui.exWin && ui.exWin.isNew) ui.exWin = null;
     ui.exWinEdit = false; ui.exWinDraft = null; render();
   },
-  /* `imageMissing` goes with it. The flag means "there is one elsewhere",
-     which is a thing to go and fetch; a photo the user has just deleted is
-     a decision, and the row must not go on advertising a picture nobody
-     is coming back for. Same on upload, one screen down. */
+  /* `imageMissing` and `photoId` go with it. Both mean "there is one
+     elsewhere", which is a thing to go and fetch; a photo the user has just
+     deleted is a decision, and the row must not go on advertising a picture
+     nobody is coming back for. Same on upload, one screen down. */
   "exwin-remove-image": () => {
     if (!ui.exWinDraft) return;
     ui.exWinDraft.image = "";
     delete ui.exWinDraft.imageMissing;
+    /* and the id: a row that names a photo is a row that has one */
+    delete ui.exWinDraft.photoId;
     render();
   },
   /* ── A RENAME HAS TO TAKE THE LIFT'S WHOLE PAST WITH IT ─────────────
@@ -14031,6 +15808,9 @@ const actions = {
 
     ui.exWin = { name }; ui.exWinEdit = false; ui.exWinDraft = null;
     patch(p);
+    /* a new photo gets its id and goes up now, well inside the push's own
+       debounce, so the row reaches the other phone already naming it */
+    if (ex.image && !ex.photoId) photoPass();
   },
   "exwin-delete": () => {
     const id = ui.exWinDraft && ui.exWinDraft.id;
@@ -14172,7 +15952,11 @@ const actions = {
   /* The draft is deliberately kept: backing out of a conversation to look
      something up and coming back to a cleared composer is the same
      complaint the day-draft store exists to answer. */
-  "chat-close": () => { ui.chatThread = null; ui.chatMenu = null; render(); },
+  "chat-close": () => {
+    ui.chatThread = null; ui.chatMenu = null;
+    ui.chatMsgMenu = null; ui.chatAttach = null; ui.chatView = null; ui.chatImage = null;
+    render();
+  },
 
   "chat-earlier": (el) => chatLoadEarlier(el.dataset.id),
   "chat-retry": (el) => chatDeliver(el.dataset.id, el.dataset.c),
@@ -14191,6 +15975,114 @@ const actions = {
   },
 
   "chat-menu": (el) => { ui.chatMenu = el.dataset.id; render(); },
+
+  /* ── things in a message ──────────────────────────────────────────── */
+  "chat-attach": (el) => { ui.chatAttach = { threadId: el.dataset.id, step: "menu", q: "" }; render(); },
+  "chat-attach-step": (el) => {
+    if (!ui.chatAttach) return;
+    ui.chatAttach.step = el.dataset.s || "menu";
+    ui.chatAttach.q = "";
+    render();
+  },
+  "chat-attach-send": async (el) => {
+    const a = ui.chatAttach;
+    if (!a) return;
+    ui.chatAttach = null;
+    render();
+    await chatSendThing(a.threadId, el.dataset.k, el.dataset.ref);
+  },
+  "chat-view": (el) => { ui.chatView = { threadId: el.dataset.id, messageId: el.dataset.m }; render(); },
+  "chat-view-close": () => { ui.chatView = null; render(); },
+  "chat-image": (el) => { ui.chatImage = { threadId: el.dataset.id, messageId: el.dataset.m }; render(); },
+  "chat-image-close": () => { ui.chatImage = null; render(); },
+  /* the ONE chat action that writes `state`, and deliberately not on
+     READ_OK: see the THINGS IN A MESSAGE block */
+  "chat-import": (el) => {
+    const v = ui.chatView;
+    const m = v && chatMsgs(v.threadId).find((x) => x.messageId === v.messageId);
+    if (!m) return;
+    const got = chatImport(m, el.dataset.copy === "1");
+    if (!got) { alert(T("chat.importNothing")); return; }
+    if (m.kind === "exercise") v.done = got;
+    render();
+  },
+  /* An exercise you have, in the place it lives. The conversation is closed
+     on the way, because the exercise window is a window of the library and
+     its own buttons (Log exercise above all) lead on into the log. */
+  "chat-open-ex": (el) => {
+    const name = el.dataset.name;
+    if (!name) return;
+    ui.chatView = null; ui.chatThread = null; ui.chatMsgMenu = null;
+    ui.tab = "library";
+    ui.exWin = { name }; ui.exWinEdit = false; ui.exWinDraft = null;
+    render();
+  },
+  "chat-open-presets": () => {
+    ui.chatView = null; ui.chatThread = null; ui.chatMsgMenu = null;
+    ui.tab = "library"; ui.librarySeg = "presets";
+    render();
+  },
+  "chat-copy": () => {
+    const v = ui.chatMsgMenu;
+    const m = v && chatMsgs(v.threadId).find((x) => x.messageId === v.messageId);
+    ui.chatMsgMenu = null;
+    if (m) chatCopyText(m.body);
+    render();
+  },
+  "chat-unsend": async () => {
+    const v = ui.chatMsgMenu;
+    ui.chatMsgMenu = null;
+    render();
+    if (!v || !confirm(T("chat.unsendConfirm"))) return;
+    await chatUnsend(v.threadId, v.messageId);
+  },
+  /* never reached the server, so there is nobody else to take it back from */
+  "chat-discard": () => {
+    const v = ui.chatMsgMenu;
+    ui.chatMsgMenu = null;
+    if (v) {
+      const c = chatRead();
+      const m = (c.msgs[v.threadId] || []).find((x) => x.messageId === v.messageId);
+      if (m) {
+        c.msgs[v.threadId] = c.msgs[v.threadId].filter((x) => x !== m);
+        chatUploads.delete(m.clientId);
+        chatRelast(v.threadId);
+        chatWrite();
+      }
+    }
+    render();
+  },
+
+  /* ── sending something from where it lives ────────────────────────── */
+  "share-open": (el) => {
+    const kinds = String(el.dataset.kinds || "").split(",").filter((k) => CHAT_THING_ICON[k]);
+    if (!kinds.length) return;
+    ui.shareTo = { kinds, kind: kinds[0], ref: el.dataset.ref };
+    render();
+    /* the list is what it was at the last poll, which may be a while */
+    if (chatSignedIn()) { chatLastPoll = 0; chatPoll(); }
+  },
+  "share-kind": (el) => { if (ui.shareTo && !ui.shareTo.busy) { ui.shareTo.kind = el.dataset.id; render(); } },
+  "share-send": async (el) => {
+    const sh = ui.shareTo;
+    if (!sh || sh.busy) return;
+    const threadId = el.dataset.id;
+    sh.busy = threadId; render();
+    const clientId = await chatSendThing(threadId, sh.kind, sh.ref);
+    if (ui.shareTo !== sh) return;
+    const row = clientId && chatMsgs(threadId).find((m) => m.clientId === clientId);
+    sh.busy = false;
+    sh.sent = threadId;
+    sh.failed = !clientId ? T("chat.thingGone") : row && row.failed ? (row.error || T("chat.errGeneric")) : null;
+    render();
+  },
+  "share-open-chat": (el) => {
+    const id = el.dataset.id;
+    ui.shareTo = null;
+    ui.exWin = null; ui.exWinEdit = false; ui.exWinDraft = null; ui.exWinAttach = null;
+    ui.presetView = null;
+    openChatThread(id);
+  },
 
   "chat-mute": async (el) => {
     const C = window.ZenofitCloud;
@@ -14240,24 +16132,70 @@ const actions = {
     } catch (e) { alert(chatErrText(e)); }
   },
 
-  /* The permission prompt, from the tap that has to trigger it: iOS
-     refuses one that was not, and Chrome penalises a site that asks on
-     load. `enablePush` never throws, so every outcome is a reason. */
-  "chat-push-on": async () => {
-    const C = window.ZenofitCloud;
-    if (!C || ui.chatPushBusy) return;
-    ui.chatPushBusy = true; render();
-    const res = await C.enablePush();
-    ui.chatPushBusy = false;
-    if (res && res.ok) ui.chatPushOn = true;
+  /* ── notifications: the one window and its switch ───────────────── */
+  "notify-open": () => {
+    ui.notifyWin = true;
+    ui.notifyDiag = { loading: true };
     render();
-    if (!res || !res.ok) {
-      const why = res && res.reason;
-      alert(T(why === "denied" ? "chat.pushDenied"
-        : why === "ios-needs-install" ? "chat.pushIos"
-        : why === "server-not-configured" ? "chat.pushNoServer"
-        : "chat.pushFailed"));
+    notifyDiagLoad();
+  },
+  "notify-close": () => { ui.notifyWin = false; ui.notifyDiag = null; render(); },
+  /* the permission prompt comes from THIS tap, which is the only kind iOS
+     accepts; notifyEnable never throws, so every outcome is a reason */
+  "notify-set": async (el) => {
+    if (el.dataset.id === "on") {
+      if (ui.notifyOn) return;
+      const res = await notifyEnable();
+      const why = res.ok ? "" : notifyFailText(res);
+      if (why) alert(why);
+    } else if (ui.notifyOn) {
+      await notifyDisable();
     }
+  },
+  "notify-kind": (el) => {
+    if (!ui.notifyOn) return;
+    const k = el.dataset.k;
+    notifySetKind(k, notifyPrefs().off.includes(k));
+  },
+  /* Straight from the server to every device on the account: the only
+     honest answer to "does push reach this phone", which is a question no
+     amount of looking at settings can settle. */
+  "notify-test": async () => {
+    const C = window.ZenofitCloud;
+    const d = ui.notifyDiag || (ui.notifyDiag = {});
+    if (!C || d.testing) return;
+    d.testing = true; d.msg = null; render();
+    try {
+      const r = await C.testPush();
+      d.ok = !!(r && r.sent > 0);
+      d.msg = d.ok ? T("notify.testSent") : T("notify.testNone");
+    } catch (e) {
+      d.ok = false; d.msg = T("notify.testFailed", { msg: chatErrText(e) });
+    }
+    d.testing = false;
+    render();
+    notifyDiagLoad();
+  },
+  /* Booked on the server and fired by it a minute later, whether or not this
+     page is still alive, which is exactly the situation a rest timer is in
+     once the phone is locked. The duration goes as a duration: see
+     scheduleTimer. */
+  "notify-test-timer": async () => {
+    const C = window.ZenofitCloud;
+    const d = ui.notifyDiag || (ui.notifyDiag = {});
+    if (!C || d.testing) return;
+    d.testing = true; d.msg = null; render();
+    const at = new Date(Date.now() + 60000);
+    const t = await C.scheduleTimer({
+      inMs: 60000, label: T("notify.testTimerTitle"),
+      title: T("notify.testTimerTitle"), body: T("notify.testTimerBody"),
+    });
+    d.testing = false;
+    d.ok = !!t;
+    d.msg = t
+      ? T("notify.testTimerSet", { time: at.toLocaleTimeString(localeTag(), { hour: "2-digit", minute: "2-digit", second: "2-digit" }) })
+      : T("notify.testFailed", { msg: T("chat.errGeneric") });
+    render();
   },
 
   "library-seg": (el) => { ui.librarySeg = el.dataset.id; ui.presetOrder = false; render(); },
@@ -14741,7 +16679,16 @@ const actions = {
 const READ_OK = new Set([
   "nav", "fab", "log-seg", "timer-seg", "library-seg", "prog-seg", "picker-seg", "lib-filter",
   "chat-open", "chat-close", "chat-send", "chat-start", "chat-find-clear", "chat-earlier",
-  "chat-retry", "chat-menu", "chat-mute", "chat-block", "chat-leave", "chat-push-on",
+  "chat-retry", "chat-menu", "chat-mute", "chat-block", "chat-leave",
+  /* looking at and sending things is chat; ADDING one to your library is a
+     write, and chat-import is deliberately not here */
+  "chat-attach", "chat-attach-step", "chat-attach-send", "chat-view", "chat-view-close",
+  "chat-image", "chat-image-close", "chat-open-ex", "chat-open-presets",
+  "chat-copy", "chat-unsend", "chat-discard",
+  "share-open", "share-kind", "share-send", "share-open-chat",
+  /* notifications belong to the phone, like the timers: nothing in them is
+     training and nothing in them is written to `state` */
+  "notify-open", "notify-close", "notify-set", "notify-kind", "notify-test", "notify-test-timer",
   "cal-day", "cal-next", "cal-prev", "vol-next", "vol-prev", "toggle-accordion",
   "open-exercise-window", "exwin-close", "exwin-cancel", "open-log-day", "log-day",
   "open-picker", "close-picker", "overlay-close", "close-worksheet", "close-entry",
@@ -14754,7 +16701,7 @@ const READ_OK = new Set([
   "open-account", "acct-signout", "login-go", "login-create", "login-cancel", "first-profile-create",
   "stor-unlock-go",
   "live-retry", "refresh-now",
-  "open-join", "join-go", "open-push-test",
+  "open-join", "join-go",
   "chart-zoom-in", "chart-zoom-out", "chart-reset", "chart-full", "chart-exit-full", "chart-pick",
   "select-progress", "ex-hist-all", "open-preset", "plan-open", "plan-result-close",
   "calc-run", "std-check", "std-mode", "std-pick", "std-pick-open", "std-pick-close", "std-sex",
@@ -14821,6 +16768,12 @@ function handleBind(el) {
     ui.pickerQ = v;
     const list = document.getElementById("pickList");
     if (list) { list.innerHTML = renderPickerList(state.library); if (window.lucide) lucide.createIcons(); }
+  } else if (bind === "chatAttachQ") {
+    if (ui.chatAttach) {
+      ui.chatAttach.q = v;
+      const list = document.getElementById("chatAttachList");
+      if (list) { list.innerHTML = chatAttachListHTML(); if (window.lucide) lucide.createIcons(); }
+    }
   } else if (bind === "attachq") {
     if (ui.exWinAttach) {
       ui.exWinAttach.q = v;
@@ -15142,7 +17095,21 @@ function handleFile(el) {
   const file = el.files && el.files[0];
   if (!file) return;
   if (el.dataset.filebind === "exwin.image" && ui.exWinDraft) {
-    readImageScaled(file, (dataUrl) => { ui.exWinDraft.image = dataUrl; delete ui.exWinDraft.imageMissing; render(); });
+    readImageScaled(file, (dataUrl) => {
+      const d = ui.exWinDraft;
+      if (!d) return;
+      d.image = dataUrl; delete d.imageMissing; delete d.photoId;
+      render();
+      /* its id, worked out while the form is still open, so saving writes a
+         row that already names it (photoPass would get there anyway) */
+      const C = window.ZenofitCloud;
+      if (C && C.photoId) C.photoId(dataUrl).then((id) => { if (ui.exWinDraft === d && d.image === dataUrl) d.photoId = id; }).catch(() => {});
+    });
+  } else if (el.dataset.filebind === "chat.photo" && ui.chatAttach) {
+    const threadId = ui.chatAttach.threadId;
+    ui.chatAttach = null;
+    render();
+    readImageScaled(file, (dataUrl, dim) => chatSendPhoto(threadId, dataUrl, dim), { max: 1280 });
   } else if (el.dataset.filebind === "backup") {
     const r = new FileReader();
     r.onload = () => importBackup(String(r.result || ""));
@@ -15223,6 +17190,10 @@ startTimerEngine();
      signed in to come up holding the account's profiles rather than its own */
   rosterSync({ force: true });
   syncPollStart();
+  /* photos this phone has not got, and photos nobody else has: syncQuiet
+     runs the same pass when it finishes, and a profile not in the account
+     yet still wants its pictures given ids */
+  photoPass();
   /* …and the chat poll, which is a different engine on a different clock
      (see chatWantedGap) because it is answering a different question: not
      "what did my other phone do" but "has anybody written to me". It does
@@ -15233,15 +17204,35 @@ startTimerEngine();
   /* Is push already on? Only the browser knows, and only asynchronously
      (it is a question for the service worker's PushManager), so the first
      frame is drawn assuming not and corrected once the answer lands. That
-     order is deliberate: a launch must not wait on it, and the cost of
-     getting it wrong for one frame is a strip that offers something
-     already granted for a fraction of a second. */
+     order is deliberate: a launch must not wait on it.
+
+     And if it is NOT on while the browser has already said yes — the old
+     first-timer prompt asked for exactly that permission and stopped short
+     of subscribing — the switch is on as far as anybody decided, so the
+     subscription that makes a locked phone ring is made now, quietly. No
+     prompt can appear: the browser only prompts while the answer is still
+     "default". A device that was switched OFF is left off. */
   const C = window.ZenofitCloud;
   if (C && C.pushEnabled) {
-    C.pushEnabled().then((on) => {
-      if (!on || ui.chatPushOn) return;
-      ui.chatPushOn = true;
-      if (!syncTyping()) render();
-    }).catch(() => { /* unsupported, or blocked: the strip says which */ });
+    C.pushEnabled().then(async (on) => {
+      /* switched off here, and a subscription survived it (a disable that
+         failed half way): "off" is what was said, so finish saying it */
+      if (on && notifyPrefs().want === false) { C.disablePush().catch(() => {}); return; }
+      if (on) {
+        ui.notifyOn = true;
+        notifySyncPrefs();
+        if (!syncTyping()) render();
+        return;
+      }
+      const prefs = notifyPrefs();
+      if (prefs.want === false || C.pushBlockedReason()) return;
+      if (!window.Notification || Notification.permission !== "granted") return;
+      const res = await C.enablePush({ off: prefs.off });
+      if (res && res.ok) {
+        ui.notifyOn = true;
+        notifySave({ want: true, sent: notifyOffKey(prefs.off) });
+        if (!syncTyping()) render();
+      }
+    }).catch(() => { /* unsupported, or blocked: the window says which */ });
   }
 })();

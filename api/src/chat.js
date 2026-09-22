@@ -20,9 +20,32 @@
  * the same row instead of sending twice.
  */
 
+import { limited } from "./limits.js";
+import { cleanDataUrl, sha256Hex, storePhoto } from "./photos.js";
+
 /* Long enough for anything anybody types into a gym app, short enough that
    a thread is never a payload problem. */
 export const MAX_BODY = 2000;
+
+/* ── WHAT A MESSAGE CAN CARRY ──────────────────────────────────────────
+   Words, or a thing from the app: an exercise, a preset, a logged day, a
+   personal record, a strength-standard rank, a photo. The thing travels as
+   a SNAPSHOT the sender's app built, not as a pointer into their profile,
+   because the person receiving it has no access to that profile and never
+   should: they get a copy, look at it, and may keep one of their own.
+
+   The server does not read these. It checks the kind is one it knows, the
+   payload is an object and not an essay, and -- for a photo -- that the
+   picture it names was uploaded into THIS thread, so nobody can point a
+   message at a photo from somebody else's conversation. Everything else
+   about a payload is the app's business, and the app treats one arriving
+   from somebody else as data to be escaped, never as markup. */
+export const KINDS = new Set(["text", "image", "exercise", "preset", "workout", "record", "rank"]);
+export const MAX_PAYLOAD = 32 * 1024;
+
+/* A photo sent in a conversation lives in the photo store with its thread
+   on it (see photos.js), readable by that thread's members and nobody else. */
+export const chatPhotoId = (threadId, data) => sha256Hex(threadId + ":" + data);
 export const PAGE_DEFAULT = 60;
 export const PAGE_MAX = 200;
 
@@ -54,26 +77,6 @@ export const dmKey = (a, b) => (a < b ? a + ":" + b : b + ":" + a);
 
 const preview = (s) => (s.length > PREVIEW ? s.slice(0, PREVIEW - 1) + "…" : s);
 
-/* A sliding-ish window on one key. Same crudeness as joinRateLimited, and
-   enough for the same reason. */
-async function limited(env, key, windowMs, max) {
-  const now = Date.now();
-  const row = await env.DB.prepare(
-    "SELECT window_start, count FROM rate_limits WHERE key = ?"
-  ).bind(key).first();
-
-  if (!row || now - row.window_start > windowMs) {
-    await env.DB.prepare(
-      "INSERT INTO rate_limits (key, window_start, count) VALUES (?, ?, 1) " +
-      "ON CONFLICT(key) DO UPDATE SET window_start = excluded.window_start, count = 1"
-    ).bind(key, now).run();
-    return false;
-  }
-  if (row.count >= max) return true;
-  await env.DB.prepare("UPDATE rate_limits SET count = count + 1 WHERE key = ?").bind(key).run();
-  return false;
-}
-
 /* Membership is the only access rule chat has. A thread you are not in is
    reported as absent rather than forbidden, exactly as a profile is: a 403
    would confirm the thread exists to somebody guessing ids. */
@@ -84,11 +87,18 @@ async function membership(env, threadId, userId) {
   ).bind(threadId, userId).first();
 }
 
+function parsePayload(text) {
+  if (text == null) return null;
+  try { const v = JSON.parse(text); return v && typeof v === "object" ? v : null; } catch { return null; }
+}
+
 const shapeMessage = (r) => ({
   messageId: r.id,
   threadId: r.thread_id,
   from: r.sender_id,
   body: r.deleted ? null : r.body,
+  kind: r.kind || "text",
+  payload: r.deleted ? null : parsePayload(r.payload),
   at: r.created_at,
   clientId: r.client_id || null,
   deleted: !!r.deleted,
@@ -201,11 +211,22 @@ export async function chatRoute(ctx) {
       "  (SELECT x.body FROM chat_messages x WHERE x.thread_id = t.id AND x.deleted = 0 " +
       "     ORDER BY x.created_at DESC, x.id DESC LIMIT 1) AS last_body, " +
       "  (SELECT x.sender_id FROM chat_messages x WHERE x.thread_id = t.id AND x.deleted = 0 " +
-      "     ORDER BY x.created_at DESC, x.id DESC LIMIT 1) AS last_from " +
+      "     ORDER BY x.created_at DESC, x.id DESC LIMIT 1) AS last_from, " +
+      "  (SELECT x.kind FROM chat_messages x WHERE x.thread_id = t.id AND x.deleted = 0 " +
+      "     ORDER BY x.created_at DESC, x.id DESC LIMIT 1) AS last_kind " +
       "FROM chat_members m JOIN chat_threads t ON t.id = m.thread_id " +
       "WHERE m.user_id = ? AND m.left_at IS NULL " +
+      /* ── A CONVERSATION NOBODY HAS SAID ANYTHING IN IS NOT IN YOUR LIST ──
+         unless you opened it yourself. Tapping somebody's name makes the
+         thread for both people, and used to put an empty conversation in
+         the OTHER person's list before a word was written. With unsending
+         it matters more: take back the only message you sent and they
+         would be left looking at a chat with you in it and nothing in it,
+         which is not "as if it was never sent". last_message_at is NULL
+         exactly when there is nothing live in the thread. */
+      "  AND (t.last_message_at IS NOT NULL OR t.created_by = ? OR m.opened_at IS NOT NULL) " +
       "ORDER BY COALESCE(t.last_message_at, t.created_at) DESC LIMIT 100"
-    ).bind(user.id, user.id).all();
+    ).bind(user.id, user.id, user.id).all();
 
     const threads = rows.results || [];
     if (!threads.length) return json({ chats: [], serverNow: Date.now() });
@@ -236,7 +257,7 @@ export async function chatRoute(ctx) {
         muted: !!t.muted,
         lastReadAt: t.last_read_at,
         lastMessage: t.last_body == null ? null
-          : { body: t.last_body, from: t.last_from, at: t.last_message_at },
+          : { body: t.last_body, from: t.last_from, at: t.last_message_at, kind: t.last_kind || "text" },
         createdAt: t.created_at,
         lastMessageAt: t.last_message_at,
       })),
@@ -289,11 +310,14 @@ export async function chatRoute(ctx) {
     /* Both rows, every time. Clearing `left_at` on conflict is what makes
        writing to somebody you had previously cleared out of your list put
        the thread back, for both of you, without making a second one. */
+    /* `opened_at` is on the caller's row only: it is what keeps a thread
+       with nothing in it yet in the list of the person who asked for it,
+       and out of the list of the person who has not heard from them. */
     await env.DB.batch([
       env.DB.prepare(
-        "INSERT INTO chat_members (thread_id, user_id, joined_at) VALUES (?, ?, ?) " +
-        "ON CONFLICT(thread_id, user_id) DO UPDATE SET left_at = NULL"
-      ).bind(threadId, user.id, now),
+        "INSERT INTO chat_members (thread_id, user_id, joined_at, opened_at) VALUES (?, ?, ?, ?) " +
+        "ON CONFLICT(thread_id, user_id) DO UPDATE SET left_at = NULL, opened_at = excluded.opened_at"
+      ).bind(threadId, user.id, now, now),
       env.DB.prepare(
         "INSERT INTO chat_members (thread_id, user_id, joined_at) VALUES (?, ?, ?) " +
         "ON CONFLICT(thread_id, user_id) DO UPDATE SET left_at = NULL"
@@ -322,6 +346,16 @@ export async function chatRoute(ctx) {
      * inclusive of its boundary millisecond and the app dedupes by id, for
      * the reason the change feed gives: a repeat is harmless and a gap is
      * not.
+     *
+     * AN UNSENT MESSAGE IS NOT IN ANY PAGE. It is not drawn as a "message
+     * deleted" row either: unsending means the other person sees what they
+     * would have seen had it never been sent. So every page leaves them
+     * out, and a `since` pull also names the ones unsent since then
+     * (`unsent`), because a message is unsent AFTER it was fetched and its
+     * `created_at` never moves -- without the list, the copy already on the
+     * other phone would stay there for ever. A tail or a `before` page
+     * needs no list: it is a complete window, and the app drops anything it
+     * holds inside that window that the page does not mention.
      */
     if (seg[3] === "messages" && seg.length === 4 && method === "GET") {
       const limit = Math.min(PAGE_MAX, Math.max(1, Number(url.searchParams.get("limit")) || PAGE_DEFAULT));
@@ -332,19 +366,19 @@ export async function chatRoute(ctx) {
       let rows;
       if (isSince) {
         rows = await env.DB.prepare(
-          "SELECT * FROM chat_messages WHERE thread_id = ? AND created_at >= ? " +
+          "SELECT * FROM chat_messages WHERE thread_id = ? AND deleted = 0 AND created_at >= ? " +
           "ORDER BY created_at, id LIMIT ?"
         ).bind(threadId, since, limit + 1).all();
       } else if (Number.isFinite(before) && before > 0) {
         /* newest-first off the index, then flipped, so "the 60 before this"
            is one query rather than a count and an offset */
         rows = await env.DB.prepare(
-          "SELECT * FROM chat_messages WHERE thread_id = ? AND created_at < ? " +
+          "SELECT * FROM chat_messages WHERE thread_id = ? AND deleted = 0 AND created_at < ? " +
           "ORDER BY created_at DESC, id DESC LIMIT ?"
         ).bind(threadId, before, limit + 1).all();
       } else {
         rows = await env.DB.prepare(
-          "SELECT * FROM chat_messages WHERE thread_id = ? ORDER BY created_at DESC, id DESC LIMIT ?"
+          "SELECT * FROM chat_messages WHERE thread_id = ? AND deleted = 0 ORDER BY created_at DESC, id DESC LIMIT ?"
         ).bind(threadId, limit + 1).all();
       }
 
@@ -354,13 +388,38 @@ export async function chatRoute(ctx) {
       /* always handed over oldest-first, whichever way it was read */
       const asc = isSince ? list : list.slice().reverse();
 
+      let unsent = [];
+      if (isSince) {
+        const gone = await env.DB.prepare(
+          "SELECT id FROM chat_messages WHERE thread_id = ? AND deleted_at IS NOT NULL AND deleted_at >= ?"
+        ).bind(threadId, since).all();
+        unsent = (gone.results || []).map((r) => r.id);
+      }
+
       return json({
         threadId,
         messages: asc.map(shapeMessage),
+        unsent,
         hasMore,
         lastReadAt: mine.last_read_at,
         serverNow: Date.now(),
       });
+    }
+
+    /* ---- a photo for this conversation ----------------------------------
+     * Uploaded before the message that shows it, and filed under the
+     * thread: only its members can read it (photos.js), and unsending the
+     * message deletes it. The id is a hash of the thread and the picture,
+     * so a retried upload lands on the row the first one made.
+     */
+    if (seg[3] === "photos" && seg.length === 4 && method === "POST") {
+      let body;
+      try { body = await readJson(request, 1_500_000); }
+      catch { return fail(413, "too_large", "That photo is too big."); }
+      const data = cleanDataUrl(body && body.data);
+      if (!data) return fail(400, "bad_photo", "That is not a JPEG, PNG or WebP data URL, or it is too big.");
+      const res = await storePhoto(env, user, await chatPhotoId(threadId, data), data, threadId);
+      return json(res.body, res.status);
     }
 
     /* ---- send -----------------------------------------------------------
@@ -378,6 +437,26 @@ export async function chatRoute(ctx) {
       const text = cleanBody(body.body);
       if (!text) return fail(400, "empty", "There is nothing in that message.");
       const clientId = cleanClientId(body.clientId);
+
+      /* A thing, if it carries one. `body` is still required: it is the
+         one line the notification, the chat list and an older build show. */
+      const kind = body.kind == null ? "text" : String(body.kind);
+      if (!KINDS.has(kind)) return fail(400, "bad_kind", "Unknown message kind: " + kind.slice(0, 40));
+      let payload = null;
+      if (kind !== "text") {
+        if (!body.payload || typeof body.payload !== "object" || Array.isArray(body.payload)) {
+          return fail(400, "bad_payload", "A " + kind + " message needs a payload object.");
+        }
+        payload = JSON.stringify(body.payload);
+        if (payload.length > MAX_PAYLOAD) return fail(400, "bad_payload", "That is too much to send in one message.");
+        if (kind === "image") {
+          const pid = body.payload.photo;
+          const ok = typeof pid === "string" && await env.DB.prepare(
+            "SELECT 1 AS ok FROM photos WHERE id = ? AND thread_id = ?"
+          ).bind(pid, threadId).first();
+          if (!ok) return fail(400, "bad_payload", "Upload the photo to this chat before sending it.");
+        }
+      }
 
       /* Who else is here, and does any of them refuse to hear from me. A DM
          has exactly one other person, so a block is the whole answer; a
@@ -401,8 +480,8 @@ export async function chatRoute(ctx) {
 
       try {
         await env.DB.prepare(
-          "INSERT INTO chat_messages (id, thread_id, sender_id, body, created_at, client_id) VALUES (?, ?, ?, ?, ?, ?)"
-        ).bind(id, threadId, user.id, text, now, clientId).run();
+          "INSERT INTO chat_messages (id, thread_id, sender_id, body, created_at, client_id, kind, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        ).bind(id, threadId, user.id, text, now, clientId, kind === "text" ? null : kind, payload).run();
       } catch (e) {
         /* The UNIQUE index on (thread, sender, clientId) fired: this is a
            retry of a message that already landed. Hand back the one that is
@@ -458,10 +537,63 @@ export async function chatRoute(ctx) {
         message: shapeMessage({
           id, thread_id: threadId, sender_id: user.id, body: text,
           created_at: now, client_id: clientId, deleted: 0,
+          kind: kind === "text" ? null : kind, payload,
         }),
         recipients: recipients.length,
         serverNow: now,
       }, 201);
+    }
+
+    /* ---- unsend ----------------------------------------------------------
+     * DELETE FOR EVERYONE, and only by the person who sent it. The row
+     * stays as a tombstone -- body and payload gone, `deleted_at` stamped --
+     * because the other phone may already hold the message and has to be
+     * told to drop it (see the `unsent` list above); a row that is gone
+     * cannot be reported. Everything that counts or previews a thread
+     * already reads live messages only, so the unread badge, the chat
+     * list's last line and its order all fall back to whatever was there
+     * before, which is exactly "as if it was never sent".
+     *
+     * A photo sent with it is deleted outright: it was uploaded into this
+     * thread for this message, and keeping the picture after the message
+     * is unsent would keep the one thing somebody most wanted gone.
+     */
+    if (seg[3] === "messages" && seg.length === 5 && method === "DELETE") {
+      const row = await env.DB.prepare(
+        "SELECT id, sender_id, kind, payload, deleted, deleted_at FROM chat_messages WHERE id = ? AND thread_id = ?"
+      ).bind(seg[4], threadId).first();
+      if (!row) return fail(404, "not_found", "No such message.");
+      if (row.sender_id !== user.id) {
+        return fail(403, "not_yours", "Only the person who sent a message can delete it.");
+      }
+      /* twice is fine: the second tap on a flaky connection is the same wish */
+      if (row.deleted) return json({ threadId, messageId: row.id, unsent: true, deletedAt: row.deleted_at });
+
+      const now = Date.now();
+      await env.DB.batch([
+        env.DB.prepare(
+          "UPDATE chat_messages SET deleted = 1, body = NULL, payload = NULL, deleted_at = ? WHERE id = ?"
+        ).bind(now, row.id),
+        /* the list sorts by the newest LIVE message, and NULL is what hides
+           a thread with nothing left in it from somebody who never opened it */
+        env.DB.prepare(
+          "UPDATE chat_threads SET last_message_at = " +
+          "(SELECT MAX(created_at) FROM chat_messages WHERE thread_id = ? AND deleted = 0) WHERE id = ?"
+        ).bind(threadId, threadId),
+      ]);
+
+      const pid = row.kind === "image" ? (parsePayload(row.payload) || {}).photo : null;
+      if (typeof pid === "string") {
+        /* unless another live message in the same thread still shows it,
+           which only a retry that landed twice could have produced */
+        const still = await env.DB.prepare(
+          "SELECT 1 AS ok FROM chat_messages WHERE thread_id = ? AND deleted = 0 AND kind = 'image' AND payload LIKE ? LIMIT 1"
+        ).bind(threadId, "%" + pid + "%").first();
+        if (!still) {
+          await env.DB.prepare("DELETE FROM photos WHERE id = ? AND thread_id = ?").bind(pid, threadId).run();
+        }
+      }
+      return json({ threadId, messageId: row.id, unsent: true, deletedAt: now });
     }
 
     /* ---- how far I have read --------------------------------------------

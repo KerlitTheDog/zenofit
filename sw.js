@@ -8,7 +8,12 @@
    Scope note: this file must stay in the repo root. A service worker can only
    control pages at or below its own URL, and the app lives at /zenofit/.       */
 
-const VERSION = "zenofit-v26";
+const VERSION = "zenofit-v27";
+/* Fetched photos, keyed by id (see the PHOTOS block in app.js). Not part of
+   the shell and not versioned with it: a photo's id IS its content, so a
+   new build has nothing to invalidate, and clearing it on every deploy
+   would re-download every picture on the next launch. */
+const PHOTO_CACHE = "zenofit-photos";
 const SHELL = [
   "./",
   "./index.html",
@@ -35,7 +40,7 @@ self.addEventListener("install", (e) => {
 self.addEventListener("activate", (e) => {
   e.waitUntil(
     caches.keys()
-      .then((keys) => Promise.all(keys.filter((k) => k !== VERSION).map((k) => caches.delete(k))))
+      .then((keys) => Promise.all(keys.filter((k) => k !== VERSION && k !== PHOTO_CACHE).map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });

@@ -128,8 +128,37 @@
       location.reload();
     });
 
+    /* ── A DEPLOY HAS TO REACH AN APP THAT IS NEVER CLOSED ──────────────
+       Everything above only starts once the browser has NOTICED a new
+       sw.js, and it looks for one on navigation. An installed app is
+       resumed far more often than it is launched, so it can sit on a
+       version for days with nothing on screen saying so.
+
+       That is invisible from the inside and it reads as "the fix you
+       shipped does not work". It is worse than cosmetic for anything that
+       travels: syncApply skips a collection this build has never heard
+       of, by design and correctly, so an old copy quietly drops whatever
+       the new version added rather than failing at it. One phone a
+       version behind therefore looks exactly like a sync bug.
+
+       So ask whenever the app comes back to the front. reg.update() is a
+       conditional request against a file of a few kilobytes: unchanged, it
+       is a 304 and nothing happens. Throttled so that flicking between
+       apps is not a request each time, and never while offline. */
+    var reg = null, lastLook = 0;
+    function lookForUpdate() {
+      if (!reg || document.visibilityState !== "visible") return;
+      if (navigator.onLine === false) return;
+      if (Date.now() - lastLook < 60000) return;
+      lastLook = Date.now();
+      reg.update().catch(function () { /* offline or blocked: the cached app stands */ });
+    }
+    document.addEventListener("visibilitychange", lookForUpdate);
+
     window.addEventListener("load", function () {
-      navigator.serviceWorker.register("sw.js").then(function (reg) {
+      navigator.serviceWorker.register("sw.js").then(function (r) {
+        reg = r;
+        lastLook = Date.now();          // registering IS this launch's look
         if (reg.waiting && navigator.serviceWorker.controller) banner(reg);
         reg.addEventListener("updatefound", function () {
           var sw = reg.installing;

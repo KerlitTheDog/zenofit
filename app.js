@@ -8281,7 +8281,7 @@ function entryComputed() {
   const onRecord = entryOnRecord(f, isDraft);
   const lineUp = isDraft && !planning && !onRecord && !entryHasData(f);
   const valid = planning || onRecord || isDraft || entryHasData(f);
-  return { cardio, metric, lastMetric, bestMetric, lastDate, valid, onRecord, lineUp };
+  return { cardio, metric, lastMetric, bestMetric, lastDate, valid, onRecord, lineUp, planning };
 }
 
 /* Those two bars, drawn: LAST TIME on the left, BEST EVER on the right,
@@ -8734,12 +8734,12 @@ function renderEntryFields(form, unit) {
     </div>
 
     <div data-footer-for="entryform" style="position:absolute;bottom:0;left:0;right:0;padding:12px 16px calc(18px + var(--pb-sab));background:linear-gradient(transparent, var(--bg) 30%)">
-      <button id="entrySaveBtn" data-action="save-entry-form" ${valid ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:15px 0;font-size:16px;opacity:${valid ? 1 : 0.45}">
-        ${icon(lineUp ? "clock" : "check", 18)} ${planning ? T("plan.addToPlan")
-          : lineUp ? T("entry.lineUp")
-          : onRecord && !entryHasData(f) ? T("entry.saveNotDone")
-          : isDraft ? T("entry.addToWorkout") : T("common.saveChanges")}
-      </button>
+      ${(() => {
+        const face = entrySaveFace(f, { planning, lineUp, onRecord });
+        return `<button id="entrySaveBtn" data-action="save-entry-form" data-face="${esc(face.glyph + "|" + face.label)}" ${valid ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:15px 0;font-size:16px;opacity:${valid ? 1 : 0.45}">
+        ${icon(face.glyph, 18)} ${face.label}
+      </button>`;
+      })()}
     </div>
   `, "entryForm");
 }
@@ -8994,9 +8994,36 @@ function updateSetPreview() {
   if (btn) { const ok = setHasData(s, k); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
 }
 
+/* ── WHAT THE SAVE BUTTON SAYS ───────────────────────────────
+   Two things read this — the paint, and updateEntryPreview patching the
+   button as you type — so it is worked out once rather than written out
+   twice.
+
+   CARDIO IS WHY IT HAS TO BE PATCHED AT ALL. Every other kind puts its
+   numbers in through the set editor, which closes with a full render, so
+   the button was always redrawn between "empty" and "filled". Cardio is
+   the one kind typed straight into this form, and typing deliberately
+   does NOT re-render (it would throw away the field the caret is in). So
+   the button kept the face it was painted with: ten minutes at RPE 10 on
+   screen, session load reading 100 beside it, and the button still
+   offering to line the lift up for later. It saved the numbers correctly
+   — it was only ever the label that was stale — but a button that
+   misdescribes what it is about to do is a button nobody should trust. */
+function entrySaveFace(f, c) {
+  return {
+    glyph: c.lineUp ? "clock" : "check",
+    label: c.planning ? T("plan.addToPlan")
+      : c.lineUp ? T("entry.lineUp")
+      : c.onRecord && !entryHasData(f) ? T("entry.saveNotDone")
+      : ui.entryForm && ui.entryForm.isDraft ? T("entry.addToWorkout")
+      : T("common.saveChanges"),
+  };
+}
+
 function updateEntryPreview() {
   if (!ui.entryForm) return;
-  const { metric, lastMetric, bestMetric, valid } = entryComputed();
+  const c = entryComputed();
+  const { metric, lastMetric, bestMetric, valid } = c;
   const m = document.getElementById("entryMetric");
   const b = document.getElementById("entryBadge");
   const s = document.getElementById("entrySaveBtn");
@@ -9005,7 +9032,18 @@ function updateEntryPreview() {
      type, but which side of them you are on does not, and the colour is
      the answer this row exists to give */
   if (b) b.innerHTML = entryRefCols(metric, lastMetric, bestMetric);
-  if (s) { s.disabled = !valid; s.style.opacity = valid ? 1 : 0.45; }
+  if (s) {
+    s.disabled = !valid; s.style.opacity = valid ? 1 : 0.45;
+    /* Rewritten only when it actually changes: lucide.createIcons() walks
+       the document, and this runs on every keystroke. */
+    const face = entrySaveFace(ui.entryForm.f, c);
+    const key = face.glyph + "|" + face.label;
+    if (s.dataset.face !== key) {
+      s.dataset.face = key;
+      s.innerHTML = `${icon(face.glyph, 18)} ${face.label}`;
+      if (window.lucide) lucide.createIcons();
+    }
+  }
 }
 
 /* ───────────────────── BODY MEASUREMENTS (window) ───────────────────

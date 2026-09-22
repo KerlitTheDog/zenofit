@@ -276,6 +276,29 @@ async function route(request, env, url, ctx) {
     return json({ userId: row.id, username: row.username, token });
   }
 
+  /* ── PROVING YOU KNOW A PASSWORD, WITHOUT SIGNING IN ─────────────────
+     Storage check holds training left on a phone by accounts that are not
+     signed in there any more, and handing that out is gated on the
+     password of the account it belongs to. Login would answer the
+     question too, but it mints a token every time it is asked, and a
+     token nobody will ever use is a credential left lying around. So this
+     is login's check and nothing after it: same one reply for every
+     failure, same work either way, and no row written. */
+  if (p === "/v1/auth/verify" && method === "POST") {
+    const body = await readJson(request).catch(() => ({}));
+    const username = cleanUsername(body.username);
+    const key = cleanKey(body.key);
+    const row = username && key
+      ? await env.DB.prepare("SELECT id, username, pw_hash, pw_salt FROM users WHERE username_lc = ?").bind(username.toLowerCase()).first()
+      : null;
+    const salt = (row && row.pw_salt) || "00000000000000000000000000000000";
+    const attempt = await hashKey(salt, key || "0".repeat(64));
+    if (!row || !row.pw_hash || !sameHash(attempt, row.pw_hash)) {
+      return fail(401, "bad_login", "That username and password do not match an account.");
+    }
+    return json({ userId: row.id, username: row.username });
+  }
+
   /* Is this name free? Asked while somebody is still typing it, so it is
      cheap and says nothing a registration attempt would not say a second
      later anyway. */

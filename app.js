@@ -1917,62 +1917,207 @@ function hydrate(saved) {
   return migrate(merged);
 }
 
-/* \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550 PROFILES \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
-   One device, several separate trainings. A second block of a program you
-   want to try without touching the one you are in, or a friend at the same
-   gym with no phone on them. A profile is a WHOLE STATE: log, library,
-   groups, presets, timers, goals, body, plans, settings, everything the
-   backup file carries, because "everything" is the only line that does not
-   need maintaining as the app grows.
+/* ══════════════════════ PROFILES ═════════════════════════
+   Several separate trainings. A second block of a program you want to try
+   without touching the one you are in, or a friend at the same gym with no
+   phone on them. A profile is a WHOLE STATE: log, library, groups, presets,
+   timers, goals, body, plans, settings, everything the backup file
+   carries, because "everything" is the only line that does not need
+   maintaining as the app grows.
 
-   Storage is one small index plus one key per profile:
+   ── A PROFILE LIST BELONGS TO AN ACCOUNT, NEVER TO A PHONE ────────────
+   There used to be one list per device, and every account that was ever
+   signed in on that device read it as its own. That single fact is what
+   produced every roster bug on record: a profile from one account sitting
+   in another's list, a sign-out that left a list behind for whoever came
+   next, a sign-in that uploaded somebody else's training into the account
+   that had just arrived. Each fix was another rule about which records to
+   believe, and the list stayed shared.
 
-     powerbuild-tracker:profiles   {active, list:[{id, name}]}
-     powerbuild-tracker:state:<id> that profile's state
+   So there is no device list any more. Each account has its own:
 
-   One key each, rather than all of them under one, for a reason worth
-   keeping: every save rewrites its key, and localStorage is a few megabytes
-   with exercise photos already in it. Writing four profiles to disk because
-   one of them gained a set would be three times the work and three times
-   the quota risk on every keystroke's debounce.
+     powerbuild-tracker:roster:<userId>  {active, list:[{id, name}]}
+     powerbuild-tracker:state:<id>       one profile's state
 
-   The single-profile key everyone is currently on becomes profile one, and
-   is only let go of once the new key has been read back. */
-const PROFILES_KEY = "powerbuild-tracker:profiles";
+   Signed in, `profiles` is that account's list and nothing else. Signed
+   out, it is EMPTY and the app shows the login screen, because there is no
+   account for a profile to belong to. Log out of one account and in to
+   another and you get the second account's list, never a merge. Log back
+   in to the first and its list is still here, straight away, with no
+   signal needed, and the roster brings it up to date once there is one.
+
+   One key per profile, rather than all of them under one, for a reason
+   worth keeping: every save rewrites its key, and localStorage is a few
+   megabytes with exercise photos already in it. Writing four profiles to
+   disk because one of them gained a set would be three times the work and
+   three times the quota risk on every keystroke's debounce.
+
+   NOTHING HERE DELETES A SAVE BECAUSE SOMEBODY LOGGED OUT. The state keys
+   stay exactly where they are. They are simply in no list the screen is
+   showing, and Storage check is the one place that can still reach them,
+   behind the password of the account they belong to. */
+const PROFILES_KEY = "powerbuild-tracker:profiles";   // the old device-wide list; see migrateDeviceList
+const ROSTER_PREFIX = "powerbuild-tracker:roster:";
 const stateKeyFor = (id) => "powerbuild-tracker:state:" + id;
+const rosterKeyFor = (userId) => ROSTER_PREFIX + userId;
 
-function loadProfiles() {
+/* Who is signed in, read off the cloud client's own record. Null for a
+   device that has never logged in, and for one whose account has not been
+   claimed with a username: that was never an account anybody could log in
+   to again, so it cannot own a list. */
+function signedInAs() {
+  const C = window.ZenofitCloud;
+  const a = C && C.account ? C.account() : null;
+  return a && a.username && a.userId ? a : null;
+}
+
+/* ── WHOSE EACH SAVE IS, FOR STORAGE CHECK AND NOTHING ELSE ─────────────
+   A state key does not say which account it belongs to, and once it has
+   left every list nothing else on the phone does either. Storage check
+   needs exactly that answer — it asks for the owning account's password
+   before handing the training out — so it is written down here the moment
+   a profile joins a list, and kept for as long as the key exists.
+   Outside `state` for the same reason `zenofit:device` is: a backup is a
+   file people share. */
+const OWNERS_KEY = "zenofit:owners";
+function ownersAll() {
+  try { return JSON.parse(localStorage.getItem(OWNERS_KEY)) || {}; } catch { return {}; }
+}
+function ownersSave(all) {
+  try { localStorage.setItem(OWNERS_KEY, JSON.stringify(all)); } catch (e) { console.error("owner index save failed", e); }
+}
+function ownerSet(localId, userId, username) {
+  if (!localId || !userId) return;
+  const all = ownersAll();
+  all[localId] = { userId, username: username || (all[localId] || {}).username || null };
+  ownersSave(all);
+}
+function ownerForget(localId) {
+  const all = ownersAll();
+  if (!(localId in all)) return;
+  delete all[localId];
+  ownersSave(all);
+}
+/* A name learned at login is written onto every save that account owns,
+   so Storage check can say "testing1" instead of an id, and can ask for
+   the password without asking which account first. */
+function ownerNameLearn(userId, username) {
+  if (!userId || !username) return;
+  const all = ownersAll();
+  let moved = false;
+  for (const k of Object.keys(all)) {
+    if (all[k] && all[k].userId === userId && all[k].username !== username) { all[k].username = username; moved = true; }
+  }
+  if (moved) ownersSave(all);
+}
+
+function readRoster(userId) {
   try {
-    const p = JSON.parse(localStorage.getItem(PROFILES_KEY));
-    if (p && Array.isArray(p.list) && p.list.length) {
+    const p = JSON.parse(localStorage.getItem(rosterKeyFor(userId)));
+    if (p && Array.isArray(p.list)) {
+      const list = p.list.filter((x) => x && x.id).map((x) => ({ id: x.id, name: x.name || "" }));
       /* an active id pointing at a profile that is gone would leave the app
-         with no state to load at all, so it is coerced back into the list */
-      if (!p.list.some((x) => x.id === p.active)) p.active = p.list[0].id;
-      return { active: p.active, list: p.list.map((x) => ({ id: x.id, name: x.name || "" })) };
+         with no state to load, so it is coerced back into the list */
+      const active = list.some((x) => x.id === p.active) ? p.active : (list[0] ? list[0].id : null);
+      return { userId, active, list };
     }
-  } catch { /* no index yet: first run under profiles */ }
+  } catch { /* no list yet: an account this device has not held before */ }
+  return { userId, active: null, list: [] };
+}
 
-  /* not uid(): that lives with the ui block, a long way below this, and
-     this runs while the module is still being evaluated */
-  const id = "p" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-  const made = { active: id, list: [{ id, name: "" }] };
-  try {
-    const legacy = localStorage.getItem(STORE_KEY);
-    if (legacy != null) {
-      localStorage.setItem(stateKeyFor(id), legacy);
-      /* only now, and only if it really landed: a half-done move here costs
-         somebody every session they have ever logged */
-      if (localStorage.getItem(stateKeyFor(id)) === legacy) localStorage.removeItem(STORE_KEY);
+/* ── THE ONE-TIME MOVE OFF THE DEVICE LIST ───────────────────────────────
+   Every profile the old shared list named is filed under the account it
+   actually belongs to, which the sync records already know:
+
+     · linked to an account (a remoteId) → that account's list, whichever
+       account it was, signed in here or not;
+     · only on this phone, with a name or training in it, while somebody
+       is signed in → that account's list, which is where the old roster
+       would have uploaded it on its next pass anyway;
+     · the first-run blank (no link, no name, nothing in it) → deleted,
+       because it is not anybody's training and is the thing that used to
+       put a stray "Profile 1" in every account;
+     · anything else — sync deliberately turned off, or only on this
+       phone with nobody signed in — goes in NO list. It stays on the disk
+       untouched, and Storage check offers it back, with no password,
+       since no account ever owned it.
+
+   Runs before a single line below reads a list, and is careful to use
+   nothing declared further down: this is module evaluation, and `state`,
+   the sync block's constants and uid() are all still out of reach. The old
+   key only goes once every list it fed has been written. */
+function migrateDeviceList() {
+  let old = null;
+  try { old = JSON.parse(localStorage.getItem(PROFILES_KEY)); } catch { old = null; }
+  if (!old || !Array.isArray(old.list)) return;
+
+  let recs = {};
+  try { recs = JSON.parse(localStorage.getItem("zenofit:profiles")) || {}; } catch { recs = {}; }
+  const me = signedInAs();
+  const meId = me ? me.userId : null;
+  const owners = ownersAll();
+  const rosters = {};
+
+  const hasContent = (id) => {
+    let raw = null;
+    try { raw = localStorage.getItem(stateKeyFor(id)); } catch { return true; }
+    if (!raw) return false;
+    let d;
+    try { d = JSON.parse(raw); } catch { return true; }   // will not parse: precious until proven otherwise
+    if (!d || typeof d !== "object") return false;
+    const some = (k) => Array.isArray(d[k]) && d[k].length > 0;
+    const someMap = (k) => !!(d[k] && typeof d[k] === "object" && Object.keys(d[k]).length);
+    return some("log") || some("body") || some("plans") || some("dayDrafts") || some("unlogged") ||
+      some("deloads") || some("presets") || someMap("goals") || someMap("volumeGoals") || someMap("dayNotes");
+  };
+
+  for (const p of old.list) {
+    if (!p || !p.id) continue;
+    const rec = recs[p.id] || {};
+    let who = null;
+    if (rec.remoteId) who = rec.acct || meId;
+    else if (!rec.noSync && meId && ((p.name || "").trim() || hasContent(p.id))) who = meId;
+
+    if (who) {
+      const r = rosters[who] || (rosters[who] = readRoster(who));
+      if (!r.list.some((x) => x.id === p.id)) r.list.push({ id: p.id, name: p.name || "" });
+      if (p.id === old.active || !r.active) r.active = p.id;
+      owners[p.id] = { userId: who, username: who === meId ? me.username : ((owners[p.id] || {}).username || null) };
+      /* Linked before this ran, so it is not a join still racing its own
+         listing: the next roster pass may take it out of the list if the
+         account no longer has it. Without the mark, a link older than the
+         `seen` field would sit in the list for ever, which is precisely a
+         profile the account does not have. */
+      if (rec.remoteId) recs[p.id] = { ...rec, seen: true, acct: who };
+    } else if (!rec.remoteId && !(p.name || "").trim() && !hasContent(p.id)) {
+      try { localStorage.removeItem(stateKeyFor(p.id)); } catch { /* already gone */ }
+      delete owners[p.id];
     }
-    localStorage.setItem(PROFILES_KEY, JSON.stringify(made));
-  } catch (e) { console.error("profile setup failed", e); }
-  return made;
+  }
+
+  try {
+    for (const userId of Object.keys(rosters)) {
+      const r = rosters[userId];
+      localStorage.setItem(rosterKeyFor(userId), JSON.stringify({ active: r.active, list: r.list }));
+    }
+    ownersSave(owners);
+    localStorage.setItem("zenofit:profiles", JSON.stringify(recs));
+    localStorage.removeItem(PROFILES_KEY);
+  } catch (e) { console.error("profile list move failed; the old list is kept and it will be tried again", e); }
+}
+
+/* Whoever is signed in gets their own list; nobody signed in gets none. */
+function loadProfiles() {
+  migrateDeviceList();
+  const me = signedInAs();
+  return me ? readRoster(me.userId) : { userId: null, active: null, list: [] };
 }
 
 let profiles = loadProfiles();
 
 const saveProfiles = () => {
-  try { localStorage.setItem(PROFILES_KEY, JSON.stringify(profiles)); }
+  if (!profiles.userId) return;          // no account, no list to keep
+  try { localStorage.setItem(rosterKeyFor(profiles.userId), JSON.stringify({ active: profiles.active, list: profiles.list })); }
   catch (e) { console.error("profile index save failed", e); }
 };
 
@@ -2024,6 +2169,7 @@ let unreadable = null;            // profile id whose stored save will not open
 let unreadableWhy = null;         // "parse" (the bytes) | "migrate" (us)
 
 function readProfileState(id) {
+  if (!id) return defaultState();         // logged out, or an account with no profiles yet
   let raw = null;
   try { raw = localStorage.getItem(stateKeyFor(id)); }
   catch (e) { console.error("profile load failed", e); }
@@ -2128,6 +2274,10 @@ function writeNow() {
      worth a byte on a device that is short of them. Reported as TRUE: the
      rows are exactly as kept as they are ever meant to be. */
   if (typeof syncLive === "function" && syncLive(profiles.active)) return true;
+  /* No profile open — logged out, or an account that has none yet. What is
+     in `state` is a placeholder the login screen sits on, and it has no key
+     to go to. */
+  if (!profiles.active) return true;
   snapshotDrafts();
   /* the whole point of the block above: what is on screen is a blank the
      app invented, and the key still holds the real thing */
@@ -2184,6 +2334,9 @@ function closeEverything() {
   /* the sync sheets name a profile by id, so leaving one open across a
      switch would point them at somebody else's */
   ui.syncSheet = null; ui.joinSheet = null; ui.syncError = null; ui.accountSheet = null;
+  /* a password given to Storage check opens that screen for that visit
+     and not for whatever comes after it */
+  ui.showStorage = false; ui.storUnlock = null; ui.storUnlocked = new Set();
 }
 
 function switchProfile(id) {
@@ -2233,6 +2386,7 @@ function switchProfile(id) {
    to the phone rather than to the training, and an empty Timer tab is
    not what anybody joining a profile is asking for. */
 function addProfile(name, opts) {
+  if (!profiles.userId) return null;      // a profile is always somebody's
   writeNow();
   const id = uid();
   const blank = opts && opts.forRemote
@@ -2242,6 +2396,7 @@ function addProfile(name, opts) {
   catch (e) { console.error("profile create failed", e); alert(T("profiles.quota")); return null; }
   profiles.list = [...profiles.list, { id, name: (name || "").trim() }];
   saveProfiles();
+  ownerSet(id, profiles.userId, (signedInAs() || {}).username);
   return id;
 }
 
@@ -2250,6 +2405,7 @@ function addProfile(name, opts) {
    crash snapshot is left behind (see backupText for why a half-typed set
    editor is not part of anybody's training). */
 function duplicateProfile(id, name) {
+  if (!profiles.userId) return null;
   if (id === profiles.active) writeNow();
   const newId = uid();
   try {
@@ -2262,20 +2418,22 @@ function duplicateProfile(id, name) {
   const row = { id: newId, name: (name || "").trim() };
   profiles.list = [...profiles.list.slice(0, at + 1), row, ...profiles.list.slice(at + 1)];
   saveProfiles();
+  ownerSet(newId, profiles.userId, (signedInAs() || {}).username);
   return newId;
 }
 
-/* Deleting the last profile would leave the app with nothing to load at
-   all, so it is refused rather than quietly recreated; deleting the one you
-   are in moves you to a neighbour first. */
+/* Deleting the one you are in moves you to a neighbour first. Deleting the
+   LAST one is allowed: an account with no profiles is a real state now (a
+   brand new account is exactly that), and the app answers it with a screen
+   asking for a first one rather than inventing a blank to keep going on. */
 function deleteProfile(id) {
-  if (profiles.list.length < 2) return;
   const wasActive = id === profiles.active;
   const rest = profiles.list.filter((p) => p.id !== id);
-  const next = wasActive ? rest[0].id : profiles.active;
-  profiles = { active: next, list: rest };
+  const next = wasActive ? (rest[0] ? rest[0].id : null) : profiles.active;
+  profiles = { ...profiles, active: next, list: rest };
   saveProfiles();
   try { localStorage.removeItem(stateKeyFor(id)); } catch { /* already gone */ }
+  ownerForget(id);
   /* and its sync link, or zenofit:profiles keeps a remoteId under a local id
      that no longer exists — which a later profile could never be given,
      since ids are minted fresh, but which sits there naming somebody's
@@ -2287,15 +2445,23 @@ function deleteProfile(id) {
     resetTransient();
     ui.tab = "home";
     applyTheme(state.settings.theme);
+    liveEnter(profiles.active);
   }
 }
+
+/* Your own profiles first, then the ones shared with you, each keeping the
+   order it already had. The two are listed under separate headings, so a
+   drag that carries a shared profile in among your own is put back on its
+   side of the line rather than leaving the list and the screen disagreeing
+   about where it is. */
+const sharedLast = (list) => [...list.filter((p) => !profileShared(p.id)), ...list.filter((p) => profileShared(p.id))];
 
 function reorderProfiles(from, to) {
   const all = [...profiles.list];
   if (from >= all.length || to >= all.length) return;
   const [moved] = all.splice(from, 1);
   all.splice(to, 0, moved);
-  profiles.list = all;
+  profiles.list = sharedLast(all);
   saveProfiles();
   rosterPushOrder();
   render();
@@ -2323,9 +2489,16 @@ function profileStats() {
    the app works exactly as well in a basement with no signal. Sync is a
    COPY kept somewhere else, never the store.
 
-   It is also OFF until somebody turns it on, per profile, out loud. A
-   training log is the most personal thing in here and it does not start
-   leaving the phone because an update landed.
+   It is ALWAYS ON, for every profile in the account, and there is no
+   switch. It used to be off until somebody turned it on per profile,
+   which is exactly what made "the same profiles on every device" a thing
+   the app could not promise: a profile with sync off is a profile the
+   other device cannot have. An account is the thing you log in to so
+   your training follows you, so everything in it follows you — the way
+   a document follows you in any online editor, including the part where
+   what you do with no signal is kept here and goes up when there is one.
+   The word "sync" is not in the interface at all any more. What is left
+   to decide per profile is SHARING it with another account.
 
    WHAT A PROFILE IS ON EITHER SIDE. Locally a profile is a whole state
    object under its own key (see stateKeyFor). On the server it is a row
@@ -2413,25 +2586,31 @@ const withoutBigPhoto = (ex) => {
 
 const syncAll = () => { try { return JSON.parse(localStorage.getItem(SYNC_KEY)) || {}; } catch { return {}; } };
 const syncFor = (localId) => syncAll()[localId] || null;
-/* A sync record can exist WITHOUT a link: turning sync off leaves one
-   behind saying `noSync`, so the roster does not helpfully enrol the
-   profile straight back on its next pass. Everything asking "is this
-   profile in the cloud" has to ask for the remoteId, not for the record. */
+/* A sync record can exist before its link does: a profile made with no
+   signal has a record and no remoteId until the roster gets it into the
+   account. Everything asking "is this profile in the account yet" has to
+   ask for the remoteId, not for the record. */
 const syncLinked = (localId) => { const r = syncFor(localId); return r && r.remoteId ? r : null; };
-/* ── WHICH PROFILES ARE IN THE CLOUD, SAID IN THE LIST ────────────────
-   Sync is per profile and the only place that said so was inside one:
-   open it, rename-sheet, Sharing and sync, read the word, back out, next
-   one. That is four taps to answer a question about the list you were
-   already looking at. The same three states the sync sheet names are
-   drawn on the row instead — and OFF draws nothing at all, because the
-   question people ask is which ones are on, and a column of cloud-off
-   icons answers it by making every row look like it has a setting. */
-function syncState(localId) {
+/* ── YOURS, OR SHARED WITH YOU ─────────────────────────────────────────
+   The one thing the profile list still has to say about a profile, and it
+   has to say it without any room for doubt: whether this is your training
+   or somebody else's that they let you into. Everything else the list
+   used to print — backed up, on this phone, get it, syncing — described
+   machinery, and the machinery now just runs.
+
+   A profile with no link yet is yours: only this account can have made
+   it. `owned` is refreshed from the server on every roster pass; `level`
+   is the stand-in until the first one. */
+function profileShared(localId) {
   const rec = syncLinked(localId);
-  if (!rec) return { icon: null, color: "var(--faint)", label: T("sync.stateOff") };
-  const read = rec.level === "read";
-  return { icon: "cloud", color: read ? "var(--steel)" : "var(--gold)",
-           label: T(read ? "sync.stateRead" : "sync.stateOn") };
+  return !!(rec && !rec.owned && rec.level !== "owner");
+}
+/* "Shared by em · read only", for the line under a shared profile. */
+function profileShareLine(localId) {
+  const rec = syncLinked(localId) || {};
+  const who = rec.ownerName ? esc(rec.ownerName) : T("profiles.ownUnknown");
+  const how = T(rec.level === "read" ? "profiles.ownRead" : "profiles.ownWrite");
+  return T("profiles.ownTheirs", { name: who, how });
 }
 const syncedActive = () => syncFor(activeProfileId());
 /* a read grant: all of it visible, none of it ours to change */
@@ -2859,33 +3038,6 @@ async function syncPush(localId) {
   return { ok: true, sent, stale, tooBig, heldPhotos };
 }
 
-/* What the account has up there, for the list in the account sheet. Async
-   and fire-and-forget, like refreshGrants: a list that will not load leaves
-   a row saying so, never an error on top of a form somebody is still
-   filling in. Guarded on the sheet still being open and still being the
-   same one, because a round trip outlives a close. */
-function refreshCloudProfiles() {
-  const C = window.ZenofitCloud;
-  if (!ui.accountSheet || !C || !C.signedIn || !C.signedIn()) return;
-  ui.accountSheet = { ...ui.accountSheet, loading: true };
-  render();
-  C.listProfiles()
-    .then((res) => {
-      if (!ui.accountSheet) return;
-      /* `loaded` is the difference between "the account holds nothing else"
-         and "we have not asked yet", and the list reads differently in the
-         two cases: a linked profile missing from a listing that never
-         arrived means nothing at all. */
-      ui.accountSheet = { ...ui.accountSheet, loading: false, loaded: true, cloud: (res && res.profiles) || [] };
-      render();
-    })
-    .catch(() => {
-      if (!ui.accountSheet) return;
-      ui.accountSheet = { ...ui.accountSheet, loading: false };
-      render();
-    });
-}
-
 /* ── WHAT WENT WRONG, IN WORDS SOMEBODY CAN ACT ON ────────────────────
    The server is specific and this used to throw that away: it reported
    `e.code` and nothing else, so "bad_item" appeared on screen while the
@@ -3205,23 +3357,18 @@ document.addEventListener("visibilitychange", () => {
   if (Date.now() - syncLastPull > SYNC_PULL_GAP) { syncQuiet(); rosterSync(); }
 });
 window.addEventListener("pagehide", () => { clearTimeout(syncPushTimer); syncQuiet({ pull: false }); });
+/* The signal coming back is the moment everything done without it goes
+   up: profiles made in the basement, sets logged in it, a rename, a delete.
+   Waiting for the next poll would leave that for up to three minutes on a
+   phone that is about to go back in a pocket. */
+window.addEventListener("online", () => { rosterSync({ force: true }).then(() => syncQuiet()); });
 
-/* ══ THE ROSTER: ONE ACCOUNT, THE SAME PROFILES EVERYWHERE ════════════
-   Sync used to reach exactly as far as the INSIDE of a profile. Every set,
-   every lift, every check-in travelled; the list those profiles sat in did
-   not. A profile's name lived on the phone that typed it, the order lived
-   on the phone it was dragged on, and whether a profile existed here at all
-   was a decision each device made for itself with a button. So signing in
-   on a laptop gave you the right training under the wrong names, in a
-   different order, with two of them called "Profile 1" and one missing
-   entirely — and nothing on screen was wrong, exactly; the roster simply
-   was not a thing the account had an opinion about.
-
-   It is now. `profiles` on the server IS the roster: one row per profile,
-   carrying its name, when that name was typed, and where it sits in the
-   list. Every device builds its own list from that and pushes its own
-   changes back, which is the same deal the items inside a profile have
-   always had, applied one level up.
+/* ══ THE ROSTER: EVERY ACCOUNT'S LIST, THE SAME ON EVERY DEVICE ════════
+   `profiles` on the server IS the roster: one row per profile, carrying
+   its name, when that name was typed, and where it sits in the list. The
+   list on this device is the signed-in account's own (see PROFILES) and
+   this block keeps it in step with that, both ways — the same deal the
+   items inside a profile have always had, applied one level up.
 
    WHAT IS STILL LOCAL, deliberately: which profile you are LOOKING at.
    That is a property of the person holding the phone, not of the account,
@@ -3231,10 +3378,11 @@ window.addEventListener("pagehide", () => { clearTimeout(syncPushTimer); syncQui
    OFFLINE IS UNCHANGED, which is the whole reason this is safe to do.
    Nothing here is on the path of a single thing the app does: a profile is
    still a whole `state` under its own key, a set is still written to disk
-   the moment it is typed, and every one of these calls fails soft and
-   tries again on the next pass. Train for three hours in a basement and
-   the roster reconciles itself when the signal comes back, exactly as the
-   log does.
+   the moment it is typed, a profile can be made, renamed or deleted with
+   no signal at all, and every one of these calls fails soft and tries
+   again on the next pass. Train for three hours in a basement and the
+   roster reconciles itself when the signal comes back, exactly as the log
+   does.
 
    HOW A DISAGREEMENT IS SETTLED, because there are only two and both are
    worth being explicit about. A NAME carries the moment it was typed
@@ -3245,151 +3393,21 @@ window.addEventListener("pagehide", () => { clearTimeout(syncPushTimer); syncQui
    merge, because an order is one list and two people dragging it at once
    is not a case anybody can resolve without inventing an answer.
 
+   THE LIST ONLY EVER HOLDS THE ACCOUNT'S PROFILES. Every pass starts from
+   the account's listing and ends with this device's list matching it: what
+   the account has and this device does not is fetched, what this device
+   has and the account does not is either on its way up (made here, not
+   uploaded yet) or on its way out (deleted elsewhere). Nothing is taken
+   from any other list on this phone, because there is no other list this
+   pass can see — the account signed in is the only one it reads or writes.
+
    NOTHING HERE DESTROYS A SAVE. A profile removed from the account goes
-   out of the list on this device too — that is what "the same everywhere"
-   means — but its key is left exactly where it is, so Storage check lists
-   it as an unreferenced save and offers to put it back. That is the
-   difference between "gone from your account" and "gone".              */
+   out of the list on this device too, but its key is left exactly where
+   it is if there is anything in it. Storage check can still reach it, and
+   only there, behind this account's password. */
 
-/* Remote ids this device was told to stop following (Sync → Turn off), so
-   the next roster pass does not helpfully adopt them straight back. Kept
-   outside `state` with the other sync bookkeeping, for the same reason. */
-/* ══ WHOSE PROFILES THESE ARE ═════════════════════════════════════════
-   A sync record lives on the DEVICE (`zenofit:profiles`) and describes a
-   relationship with an ACCOUNT. Nothing used to write down which account,
-   and signing out does not clear the records — it only forgets the
-   credential, deliberately, because signing out must never delete
-   training. So a phone that had been signed in as one person and was then
-   signed in as another carried a list of profiles still wearing the first
-   account's `remoteId`, `level` and `owned`, and every part of the roster
-   read them as if they belonged to whoever was signed in NOW.
-
-   What that looked like, and it is exactly what was reported: a profile
-   belonging to the first account sitting in the second account's list
-   wearing a gold cloud icon, claiming to sync. Underneath, worse and
-   quieter: step 3 of the roster removes any profile the account's listing
-   does not mention, so the SECOND account's listing was being used to
-   decide that the FIRST account's profiles had been deleted — and step 4
-   uploads anything not yet in the account, so a profile that was merely
-   local on a shared phone went up into whichever account signed in next.
-   None of those are sync working badly; they are three readings of a
-   question nobody had written down.
-
-   So the device records which account its sync records belong to, and a
-   change of account is a real event with a defined outcome:
-
-     · a profile held LIVE is dropped, because it has nothing on this
-       phone — it is a copy of somebody else's log fetched with a token
-       this device no longer has, and removing it loses nothing;
-     · every other profile is SEVERED and kept: the link, the level, the
-       cursor and the change marks go, the training stays exactly where it
-       is, and it is marked `noSync` so the roster does not helpfully
-       enrol somebody else's training into the account that just arrived.
-
-   Nothing is deleted and nothing is uploaded. The profiles are still
-   there, still openable, still exportable; they are simply no longer
-   claimed by an account that never had them. Turning sync back on for one
-   is the same two taps it always was, and now it is a decision somebody
-   made rather than one the app made for them.
-
-   THE FIRST STAMP IS NOT A CHANGE. A device that predates this field has
-   records made under whoever is signed in right now, so the first pass
-   adopts the current account rather than severing everything. */
-const ACCT_KEY = "zenofit:acct";
-const acctUserId = () => {
-  const C = window.ZenofitCloud;
-  const a = C && C.account ? C.account() : null;
-  return a && a.username ? a.userId : null;    // an unclaimed device is nobody
-};
-const syncAcctOf = () => { try { return (JSON.parse(localStorage.getItem(ACCT_KEY)) || {}).userId || null; } catch { return null; } };
-const syncAcctSet = (userId) => { try { localStorage.setItem(ACCT_KEY, JSON.stringify({ userId })); } catch { /* private mode */ } };
-
-/* Everything a record says about a relationship with an account, cleared
-   in one place so a new field cannot be left behind pointing at the wrong
-   one. `undefined` rather than null where the roster tests for absence:
-   JSON.stringify drops those keys entirely. */
-const SEVERED = {
-  remoteId: null, level: null, owned: false, live: false,
-  cursor: null, marks: {}, seen: false,
-  pos: undefined, nameAt: undefined, srvName: undefined, srvNameAt: undefined,
-  ownerName: null,
-};
-
-/* ── WHOSE PROFILE IS THIS, SAID ON THE ROW ───────────────────────────
-   The list used to answer "is this syncing" and never "to whose account",
-   which is one question while a phone has only ever known one account and
-   two the moment it has known more. It is also the question somebody asks
-   when a profile they do not recognise appears: is this mine, is it one
-   somebody shared with me, or is it just sitting on this phone.
-
-   Four answers, and each of them is a fact rather than a state:
-
-     · on this phone only  — no link, nothing leaves the device
-     · your account · <you>  — yours, in the account you are signed in as
-     · shared by <them>      — somebody else's, with the level you have
-     · not signed in         — linked, but nobody is signed in to check it
-                               against, so it claims nothing
-
-   `ownerName` comes from the server (GET /v1/profiles) rather than being
-   inferred, because "not mine" is all `isOwner` can say and a name is what
-   the question was about.                                              */
-function profileOwnerLine(localId) {
-  const rec = syncFor(localId) || {};
-  const me = acctUserId();
-
-  if (!rec.remoteId) return { text: T("profiles.ownLocal"), color: "var(--faint)" };
-  if (!me) return { text: T("profiles.ownSignedOut"), color: "var(--faint)" };
-
-  if (rec.owned) {
-    const C = window.ZenofitCloud;
-    const who = (C && C.account && (C.account() || {}).username) || rec.ownerName;
-    return { text: T("profiles.ownMine", { name: esc(who || "") }), color: "var(--gold)" };
-  }
-
-  const who = rec.ownerName ? esc(rec.ownerName) : T("profiles.ownUnknown");
-  const how = T(rec.level === "read" ? "profiles.ownRead" : "profiles.ownWrite");
-  return { text: T("profiles.ownTheirs", { name: who, how }), color: "var(--steel)" };
-}
-
-function reconcileAccount() {
-  const uid = acctUserId();
-  if (!uid) return false;                 // signed out: decided when somebody signs in
-  const was = syncAcctOf();
-  if (was === uid) return false;
-
-  syncAcctSet(uid);
-
-  /* First time this device has ever written the field. Whoever is signed
-     in now is who these records were made under, so they are stamped
-     rather than severed — anything else would cut every existing install
-     loose on the first launch after this shipped. */
-  if (!was) {
-    for (const p of profileList()) if (syncFor(p.id)) syncSet(p.id, { acct: uid });
-    return false;
-  }
-
-  let changed = false;
-  for (const p of profileList().slice()) {
-    const rec = syncFor(p.id);
-    if (rec && rec.acct === uid) continue;          // already this account's
-    /* A live profile holds nothing here. Dropping it is the honest move,
-       and dropLocalProfile refuses to empty the list, so a phone holding
-       only that one keeps it and it is severed below instead. */
-    if (rec && rec.live && dropLocalProfile(p.id)) { changed = true; continue; }
-    syncSet(p.id, { ...SEVERED, acct: uid, noSync: true });
-    changed = true;
-  }
-  return changed;
-}
-
-const DROP_KEY = "zenofit:dropped";
-const droppedRemotes = () => { try { return JSON.parse(localStorage.getItem(DROP_KEY)) || []; } catch { return []; } };
-function dropRemote(remoteId, on) {
-  if (!remoteId) return;
-  const next = droppedRemotes().filter((x) => x !== remoteId);
-  if (on) next.push(remoteId);
-  try { localStorage.setItem(DROP_KEY, JSON.stringify(next)); } catch { /* nothing to remember with */ }
-}
+const acctUserId = () => { const a = signedInAs(); return a ? a.userId : null; };
+const accountOn = () => !!signedInAs();
 
 /* ── REMOVING A PROFILE IS A PROMISE, NOT A REQUEST ───────────────────
    Deleting used to be `C.deleteProfile(id).catch(() => {})` — fire and
@@ -3397,7 +3415,7 @@ function dropRemote(remoteId, on) {
    is already gone from this device by the time that request goes out, so
    a failure is invisible AND permanent: no retry, nothing on screen, and
    the profile sits in the account for ever while every other device goes
-   on holding its copy. Delete something in a lift with no signal and it
+   on holding its copy. Delete something in a gym with no signal and it
    comes back everywhere else, silently, for good.
 
    So a removal is queued and survives being closed. The queue is drained
@@ -3405,20 +3423,28 @@ function dropRemote(remoteId, on) {
    server has actually agreed — or when it answers 404, which is the same
    thing said differently: it is already gone.
 
+   EACH ENTRY SAYS WHICH ACCOUNT MADE IT, and is only ever sent as that
+   account. Without that, deleting a profile with no signal, logging out
+   and logging in as somebody else sent the delete with the second
+   account's token, got the 404 that "not yours" earns, read it as done,
+   and dropped the one request that mattered.
+
    Two verbs, because "this is not in my account any more" is two
    different facts depending on whose profile it is. Yours is DELETED and
    tombstoned for everybody. Somebody else's is LEFT: your grant is
    revoked, their profile is untouched, and it stops being in your account
-   on every device you are signed in on — which a local unlink never did,
-   and which is the bug that made "I deleted this on my phone" mean
-   nothing at all on the laptop.                                       */
+   on every device you are logged in on.                               */
 const PEND_KEY = "zenofit:pending";
 const pendingOps = () => { try { return JSON.parse(localStorage.getItem(PEND_KEY)) || []; } catch { return []; } };
 const setPendingOps = (list) => { try { localStorage.setItem(PEND_KEY, JSON.stringify(list)); } catch { /* nothing to remember with */ } };
-const pendingFor = (remoteId) => (remoteId ? pendingOps().some((x) => x.remoteId === remoteId) : false);
+/* an entry from before entries said whose they were is the signed-in
+   account's: that is who was signed in when every one of them was made */
+const pendingMine = () => { const me = acctUserId(); return pendingOps().filter((x) => !x.acct || x.acct === me); };
+const pendingFor = (remoteId) => (remoteId ? pendingMine().some((x) => x.remoteId === remoteId) : false);
 function queueRemoval(remoteId, op) {
   if (!remoteId) return;
-  setPendingOps([...pendingOps().filter((x) => x.remoteId !== remoteId), { remoteId, op, at: Date.now() }]);
+  setPendingOps([...pendingOps().filter((x) => x.remoteId !== remoteId),
+    { remoteId, op, at: Date.now(), acct: acctUserId() }]);
 }
 function clearRemoval(remoteId) {
   setPendingOps(pendingOps().filter((x) => x.remoteId !== remoteId));
@@ -3430,7 +3456,7 @@ async function runPendingRemovals() {
   const C = window.ZenofitCloud;
   if (!C) return false;
   let any = false;
-  for (const p of pendingOps()) {
+  for (const p of pendingMine()) {
     try {
       if (p.op === "leave") await C.leaveProfile(p.remoteId);
       else await C.deleteProfile(p.remoteId);
@@ -3447,8 +3473,6 @@ async function runPendingRemovals() {
   return any;
 }
 
-const accountOn = () => { const C = window.ZenofitCloud; return !!(C && C.signedIn && C.signedIn()); };
-
 /* The name in the index, changed in one place so every caller stamps the
    clock the same way. `at` is the moment it was TYPED, which is what the
    server compares; a name applied FROM the server passes the server's. */
@@ -3458,13 +3482,6 @@ function renameLocalProfile(id, name, at) {
   if (at) syncSet(id, { nameAt: at });
 }
 
-/* ── THE FIRST-RUN BLANK, WHICH IS NOT DATA ───────────────────────────
-   Every install makes one empty unnamed profile before anybody has done
-   anything. Enrolling that is exactly how an account ends up with a stray
-   "Profile 1" beside the real ones for every device that ever signed in —
-   which is precisely what happened here. It has no name and nothing in it,
-   so it is dropped rather than uploaded; a profile that is LINKED, named,
-   or holds a single row of anything is never this. */
 /* Is there anything in this profile a person would miss? Deliberately the
    things somebody PUT there, never the seeded library or groups, which
    every profile is born holding and which nobody would call their data. */
@@ -3480,33 +3497,37 @@ function profileHasContent(id) {
          someMap("goals") || someMap("volumeGoals") || someMap("dayNotes");
 }
 
-function profileIsUntouched(id) {
-  const rec = syncFor(id);
-  if (rec && rec.remoteId) return false;
-  const p = profileList().find((x) => x.id === id);
-  if (!p || (p.name || "").trim()) return false;
-  return !profileHasContent(id);
-}
-
 /* Out of the list, NOT off the disk — unless there is nothing on the disk
-   worth keeping. Storage check exists to hand back a save the index has
-   stopped naming, and a trail of empty keys is how that screen stops being
-   worth reading: every row on it should be a row somebody might want. */
+   worth keeping. Storage check exists to hand back a save no list names,
+   and a trail of empty keys is how that screen stops being worth reading:
+   every row on it should be a row somebody might want.
+
+   The list CAN end up empty this way. It used to refuse, and keep the
+   last profile on this device even after the account had lost it, which
+   is precisely a profile in the list that is not in the account. An
+   account with nothing in it gets the screen that asks for a first one. */
 function dropLocalProfile(id) {
-  if (profileList().length < 2) return false;     // never leave the app with nothing to load
-  const keep = profileHasContent(id);
   const wasActive = id === profiles.active;
+  /* the profile being dropped might be the one on screen, with a set typed
+     a moment ago still inside the save debounce: that goes to its key first,
+     so what Storage check keeps is what was on screen */
+  if (wasActive) { if (ui.workoutSheet) closeWorksheet(); writeNow(); }
+  const keep = profileHasContent(id);
   const rest = profileList().filter((p) => p.id !== id);
-  profiles = { active: wasActive ? rest[0].id : profiles.active, list: rest };
+  profiles = { ...profiles, active: wasActive ? (rest[0] ? rest[0].id : null) : profiles.active, list: rest };
   saveProfiles();
   syncForget(id);
-  if (!keep) { try { localStorage.removeItem(stateKeyFor(id)); } catch { /* already gone */ } }
+  if (!keep) {
+    try { localStorage.removeItem(stateKeyFor(id)); } catch { /* already gone */ }
+    ownerForget(id);
+  }
   if (wasActive) {
     state = loadState();
     closeEverything();
     resetTransient();
     ui.tab = "home";
     applyTheme(state.settings.theme);
+    liveEnter(profiles.active);
   }
   return true;
 }
@@ -3526,40 +3547,61 @@ function rosterPushOrder() {
   if (ids.length) C.setProfileOrder(ids).catch(() => { /* the next pass will */ });
 }
 
+/* An account whose list was empty when this device got it — a first login
+   here, before the listing had arrived — has nothing open. Once the roster
+   has brought something in, the first one is opened, the way a new
+   device arrives on a profile rather than on a screen asking for one. */
+function landOnFirstProfile() {
+  if (profiles.active || !profiles.list.length) return false;
+  profiles.active = profiles.list[0].id;
+  saveProfiles();
+  state = loadState();
+  closeEverything();
+  resetTransient();
+  ui.tab = "home";
+  applyTheme(state.settings.theme);
+  restoreDrafts();
+  liveEnter(profiles.active);
+  return true;
+}
+
 const ROSTER_GAP = 20000;          // the most often a poll will ask for the list
 let rosterBusy = false, rosterAt = 0;
 
 async function rosterSync(opts) {
   const C = window.ZenofitCloud;
-  if (!C || !accountOn() || rosterBusy) return { ok: false, reason: "off" };
+  const myId = acctUserId();
+  if (!C || !myId || profiles.userId !== myId || rosterBusy) return { ok: false, reason: "off" };
   if (!(opts && opts.force) && Date.now() - rosterAt < ROSTER_GAP) return { ok: false, reason: "too-soon" };
+
+  /* Every await below is a moment somebody can log out, or out and in as
+     somebody else. Carrying on past one of those would file this
+     account's listing under the next account's list, which is the one bug
+     this whole block is built to make impossible. */
+  const stillMe = () => acctUserId() === myId && profiles.userId === myId;
 
   rosterBusy = true;
   let changed = false;
   try {
-    /* Before anything is read: whatever this device has promised to
-       remove. Done first so the listing below already reflects it, and
-       so a delete made with no signal finally lands the moment there is
-       one, on whichever device happens to be open. */
+    /* Before anything is read: whatever this account has promised to
+       remove. Done first so the listing below already reflects it, and so
+       a delete made with no signal finally lands the moment there is one,
+       on whichever of the account's devices happens to be open. */
     await runPendingRemovals();
-    /* Before a single line of the listing is believed: has this device
-       changed hands? Everything below reads a local record as if it
-       described a relationship with the account that is signed in now,
-       and that is only true once this has said so. */
-    if (reconcileAccount()) changed = true;
-    const myId = acctUserId();
+    if (!stillMe()) return { ok: false, reason: "switched" };
     const res = await C.listProfiles();
+    if (!stillMe()) return { ok: false, reason: "switched" };
     const cloud = (res && res.profiles) || [];
     rosterAt = Date.now();
     const byRemote = new Map(cloud.map((p) => [p.profileId, p]));
-    const gone = new Set(droppedRemotes());
     const linked = (lp) => (syncFor(lp.id) || {}).remoteId;
+    const meName = (signedInAs() || {}).username || null;
 
     /* ── 1. what the account has and this device does not ──────────────
-       This is the half that makes signing in on a second device do
-       anything at all. It used to be a button per profile. */
+       This is the half that makes logging in on a second device do
+       anything at all. Your own profiles and the ones shared with you
+       both arrive; the list draws them under separate headings. */
     for (const cp of cloud) {
-      if (gone.has(cp.profileId)) continue;
       /* a removal this device has promised but not yet managed to send:
          adopting it back is how a delete undoes itself */
       if (pendingFor(cp.profileId)) continue;
@@ -3572,9 +3614,7 @@ async function rosterSync(opts) {
         live: level === "read",
         nameAt: cp.nameUpdatedAt || 0, srvName: cp.name || "", srvNameAt: cp.nameUpdatedAt || 0,
         pos: cp.position, seen: true,
-        /* which account this link belongs to, and whose profile it is by
-           NAME rather than merely "not yours" -- see profileOwnerLine */
-        acct: myId, ownerName: cp.ownerName || null,
+        acct: myId, ownerName: cp.isOwner ? meName : (cp.ownerName || null),
       });
       /* a read grant is held live, exactly as joining one is */
       if (level === "read") { try { localStorage.removeItem(stateKeyFor(localId)); } catch { /* none yet */ } }
@@ -3593,18 +3633,18 @@ async function rosterSync(opts) {
       const lp = profileList()[i];
 
       /* Whose it is, straight from the server, every pass. Delete-vs-leave
-         turns on this one field and a stale answer sends the wrong verb. */
-      syncSet(id, { owned: !!cp.isOwner, acct: myId, ownerName: cp.ownerName || null });
+         turns on this one field and a stale answer sends the wrong verb;
+         the list's "shared by" line turns on it too. */
+      syncSet(id, { owned: !!cp.isOwner, acct: myId, ownerName: cp.isOwner ? meName : (cp.ownerName || null) });
 
       /* ── A PROFILE YOU ONLY READ WEARS ITS OWNER'S NAME ─────────────
          Renaming one locally was allowed, and the nickname went nowhere:
          it is not your profile, so the server will not take the name,
          and the result was one profile reading "Em" on the phone,
-         "Profile 1" on the laptop, and "Profile 1" in the account sheet
-         on both. Three names for one thing. The list is supposed to be
-         the same everywhere, so a read grant simply follows the owner's
-         name — and profile-form-save refuses the rename rather than
-         accepting one it knows it cannot keep. */
+         "Profile 1" on the laptop. The list is supposed to be the same
+         everywhere, so a read grant simply follows the owner's name — and
+         profile-form-save refuses the rename rather than accepting one it
+         knows it cannot keep. */
       if (rec.level === "read") {
         if ((cp.name || "") !== (lp.name || "")) { renameLocalProfile(id, cp.name || ""); changed = true; }
         syncSet(id, { nameAt: cp.nameUpdatedAt || 0, srvName: cp.name || "",
@@ -3612,45 +3652,27 @@ async function rosterSync(opts) {
         continue;
       }
 
-      /* ── THE FIRST PASS OVER A PROFILE THAT PREDATES ALL THIS ───────
+      /* ── THE FIRST PASS OVER A PROFILE THAT PREDATES NAME STAMPS ─────
          Its record has no stamp at all, and the server's is back-filled
-         from created_at by the migration — a real number, so a plain
+         from created_at by migration 0005 — a real number, so a plain
          comparison would say the server wins and hand the phone back the
-         name the profile was CREATED with. That is exactly backwards:
-         the cloud name was set once when sync was turned on and never
-         maintained afterwards (which is the whole reason one profile
-         read "Main" here and "Profile 1" there), while the local one is
-         what somebody typed and has been reading since.
-
-         The bootstrap is therefore gated on the server's name still
-         being the ORIGINAL one — `nameUpdatedAt` still equal to
-         `createdAt`, meaning nothing has ever deliberately set it. That
-         gate is what makes the outcome the same whichever device syncs
-         first, which a bare "local wins" rule is not:
+         name the profile was CREATED with. The bootstrap is gated on the
+         server's name still being the ORIGINAL one (`nameUpdatedAt` still
+         equal to `createdAt`, meaning nothing has deliberately set it):
 
            · the device whose local name DIFFERS from the original typed
              that name, so it is stamped now and pushed;
            · the device whose local name IS the original never typed
-             anything — it got that name from the server in the first
-             place — so it adopts the server's stamp and pushes nothing.
+             anything, so it adopts the server's stamp and pushes nothing.
 
          Once any device has set the name, the gate closes and everything
-         after it is judged on real clocks, where an unstamped local name
-         reads as 0 and loses to a deliberate rename. So the phone's
-         "Main" wins, the laptop takes it, and it does not matter which
-         of them opened the app first. */
+         after it is judged on real clocks. */
       if (rec.nameAt === undefined) {
         const original = (cp.nameUpdatedAt || 0) === (cp.createdAt || -1);
         const differs = profileLabel(lp, i) !== (cp.name || "");
         if (original && differs) {
-          /* somebody typed this one here: claim it now, and the push
-             below carries it up */
           syncSet(id, { nameAt: Date.now() });
         } else {
-          /* this device never typed a name for this profile, so the
-             server's is the answer — and it has to be taken NOW rather
-             than left to the comparison below, because adopting the
-             stamp makes the two equal and neither branch would fire */
           if (differs) { renameLocalProfile(id, cp.name || ""); changed = true; }
           syncSet(id, { nameAt: cp.nameUpdatedAt || 0 });
         }
@@ -3668,9 +3690,10 @@ async function rosterSync(opts) {
       syncSet(id, { srvName: cp.name || "", srvNameAt: theirs, pos: cp.position, seen: true });
       /* ours is newer and different: push it, and take the answer, since
          a rename refused as stale comes back 200 with the name that won */
-      if (rec.level !== "read" && mine > theirs && profileLabel(lpNow, i) !== (cp.name || "")) {
+      if (mine > theirs && profileLabel(lpNow, i) !== (cp.name || "")) {
         try {
           const out = await C.renameProfile(rec.remoteId, profileLabel(lpNow, i), mine);
+          if (!stillMe()) return { ok: false, reason: "switched" };
           if (out && out.stale) { renameLocalProfile(id, out.name); changed = true; }
           syncSet(id, { srvName: out ? out.name : profileLabel(lpNow, i), srvNameAt: (out && out.nameUpdatedAt) || mine,
             nameAt: out && out.stale ? out.nameUpdatedAt : mine });
@@ -3679,41 +3702,36 @@ async function rosterSync(opts) {
     }
 
     /* ── 3. what left the account leaves this device's list ─────────────
-       Only a profile we have SEEN in a listing before, so a profile
-       enrolled seconds ago by another device cannot be removed by a
-       listing that predates it. The save itself is left on disk. */
+       Only a profile we have SEEN in a listing before, so a profile added
+       seconds ago by another device cannot be removed by a listing that
+       predates it. The save itself is left on disk. */
     for (const id of profileList().map((p) => p.id)) {
       const rec = syncFor(id);
       if (!rec || !rec.remoteId || !rec.seen) continue;
-      /* A record belonging to another account is not evidence of anything
-         this listing says. reconcileAccount has already severed those, so
-         this is the belt to that braces -- and getting it wrong means
-         deleting a profile from the list because somebody ELSE'S account
-         has never heard of it. */
-      if (rec.acct && rec.acct !== myId) continue;
       if (byRemote.has(rec.remoteId)) continue;
       if (dropLocalProfile(id)) changed = true;
     }
 
-    /* ── 4. what this device has and the account does not ──────────────
-       Signing in is the act that says "this account holds my training",
-       so everything here goes up — minus the first-run blank, which is
-       not training and is what put "Profile 1" in the account twice. */
+    /* ── 4. what this device has and the account does not yet ──────────
+       A profile made here with no signal, or a moment ago: it is already
+       in the account's list, so it goes up to the account. Nothing that is
+       not in this account's list is ever looked at. */
+    let enrolled = false;
     for (const id of profileList().map((p) => p.id)) {
-      const rec = syncFor(id) || {};
-      if (rec.remoteId || rec.noSync) continue;
-      if (profileIsUntouched(id) && cloud.length) { if (dropLocalProfile(id)) changed = true; continue; }
+      if ((syncFor(id) || {}).remoteId) continue;
       const i = profileList().findIndex((x) => x.id === id);
       if (i < 0) continue;
-      const at = Date.now();
+      const at = (syncFor(id) || {}).nameAt || Date.now();
       try {
         const made = await C.createProfile(profileLabel(profileList()[i], i), { position: i, nameUpdatedAt: at });
+        if (!stillMe()) return { ok: false, reason: "switched" };
         const remoteId = made.profileId || made.id;
         /* linked BEFORE the push, so one that dies half way leaves a
            profile that knows where it lives rather than an orphan */
         syncSet(id, { remoteId, level: "owner", owned: true, marks: {}, cursor: null,
           nameAt: at, srvName: made.name, srvNameAt: at, pos: i, seen: true,
-          acct: myId, ownerName: (window.ZenofitCloud.account() || {}).username || null });
+          acct: myId, ownerName: meName });
+        enrolled = true;
         await syncPush(id);
         changed = true;
       } catch { /* next pass */ }
@@ -3721,29 +3739,30 @@ async function rosterSync(opts) {
 
     /* ── 5. the order the account holds ────────────────────────────────
        Positions the server never set sort last, keeping the order they
-       already had, so a list that predates all of this does not shuffle. */
+       already had, so a list that predates all of this does not shuffle.
+       Your own profiles stay ahead of the ones shared with you, because
+       that is how the list is drawn. */
+    /* A profile that has just gone up took its index as its position, and
+       that index can tie with one the account already had there — the
+       server breaks the tie by age, this list by where the row sits, and
+       the two lists then disagree for ever. So the moment anything has
+       gone up, the whole order goes up with it, as a drag would send it. */
+    if (enrolled) rosterPushOrder();
     const before = profileList().map((p) => p.id);
     const posOf = (lp) => { const r = syncFor(lp.id) || {}; return Number.isFinite(r.pos) ? r.pos : Number.MAX_SAFE_INTEGER; };
-    const sorted = profileList()
+    const sorted = sharedLast(profileList()
       .map((lp, i) => ({ lp, i }))
       .sort((a, b) => (posOf(a.lp) - posOf(b.lp)) || (a.i - b.i))
-      .map((x) => x.lp);
+      .map((x) => x.lp));
     if (sorted.some((lp, i) => lp.id !== before[i])) { profiles.list = sorted; saveProfiles(); changed = true; }
 
     /* ── 6. and fill the ones that arrived empty ───────────────────────
        A profile adopted above has a link and nothing in it. Pulling it
        here rather than waiting for somebody to switch to it is what makes
-       a second device READY rather than merely populated with names: the
-       counts on the Profiles screen are real, and opening one is instant.
-       A pass somebody ASKED for (signing in, Refresh) fills all of them,
+       a second device READY rather than merely populated with names. A
+       pass somebody ASKED for (logging in, Refresh) fills all of them,
        because that is the moment they are stood there waiting; the poll
-       takes one at a time, so a device holding six does not fire six round
-       trips into a pocket. */
-    /* No cursor means never fetched, which is exactly what an adopted
-       profile is. The ACTIVE one is in here too, and deliberately: the
-       profile this device lands on after signing in is usually one the
-       roster invented a second ago, so leaving it to the ordinary poll
-       means the first thing somebody sees is their own log, empty. */
+       takes one at a time. The ACTIVE one is in here too, deliberately. */
     const needsFilling = () => profileList().filter((lp) => {
       const r = syncFor(lp.id) || {};
       return r.remoteId && !r.cursor && !r.live;
@@ -3752,8 +3771,10 @@ async function rosterSync(opts) {
     for (const lp of queue) {
       try { if ((await syncPull(lp.id)).applied) changed = true; }
       catch { /* next pass */ }
+      if (!stillMe()) return { ok: false, reason: "switched" };
     }
 
+    if (landOnFirstProfile()) changed = true;
     if (changed && !syncTyping()) {
       if (ui.profilesWin) ui.profileStats = profileStats();
       render();
@@ -3765,6 +3786,115 @@ async function rosterSync(opts) {
   } finally {
     rosterBusy = false;
   }
+}
+
+/* ══ LOGGING IN AND OUT ═══════════════════════════════════════════════
+   Both are a change of whose list is on screen, and both go through here
+   so there is one answer to what that change involves. */
+
+/* A chat cache belongs to an account (see chatRead), so it goes whenever
+   the account does: a friend logging in on a borrowed phone must not be
+   handed the last person's conversations while the first poll is still in
+   flight. */
+function chatReset() {
+  chatForget();
+  ui.chatThread = null; ui.chatMenu = null; ui.chatFind = ""; ui.chatResults = null;
+}
+
+/* Just logged in. The account's own list, from this device if it has held
+   it before — instantly, with no signal needed — and then brought up to
+   date by a roster pass that also fetches anything this device has not
+   got. A first login here starts on "getting your profiles" rather than
+   on an empty list, since the listing is on its way. */
+async function enterAccount() {
+  const me = signedInAs();
+  if (!me) return;
+  chatReset();
+  ownerNameLearn(me.userId, me.username);
+  profiles = loadProfiles();
+  state = loadState();
+  closeEverything();
+  resetTransient();
+  ui.tab = "home";
+  ui.login = null;
+  ui.rosterLoading = !profiles.list.length;
+  applyTheme(state.settings.theme);
+  restoreDrafts();
+  render();
+  liveEnter(profiles.active);
+  chatLastPoll = 0;
+  chatPoll();
+  await rosterSync({ force: true });
+  ui.rosterLoading = false;
+  if (!syncLive(activeProfileId())) syncQuiet();
+  render();
+}
+
+/* ── WHAT HAS NOT REACHED THE ACCOUNT YET ─────────────────────────────
+   Counted, not guessed, for the one moment it matters: logging out. It
+   is the same arithmetic a push does — a row whose hash no longer matches
+   its mark, a mark whose row is gone — plus the three things that live
+   above the rows: a profile not in the account yet, a removal still
+   queued, a rename not yet sent. Rows a push would refuse to send are
+   left out; they would never stop being counted, and the warning would
+   become a thing people learn to dismiss. */
+function syncDirtyCount(localId) {
+  const rec = syncFor(localId);
+  if (!rec || !rec.remoteId) return 1;              // the whole profile is still only here
+  if (rec.level === "read" || rec.live || unreadable === localId) return 0;
+  const marks = rec.marks || {};
+  const seen = new Set();
+  let n = 0;
+  for (const it of syncLocalItems(profileStateFor(localId))) {
+    const key = it.collection + "/" + it.itemId;
+    seen.add(key);
+    const body = JSON.stringify(it.json);
+    if (it.itemId.length > SYNC_MAX_ID || body.length > SYNC_MAX_ITEM) continue;
+    if (!marks[key] || marks[key][0] !== syncHash(body)) n++;
+  }
+  for (const key of Object.keys(marks)) if (!seen.has(key)) n++;
+  if ((rec.nameAt || 0) > (rec.srvNameAt || 0)) n++;
+  return n;
+}
+const accountUnsynced = () =>
+  pendingMine().length + profileList().reduce((n, lp) => n + syncDirtyCount(lp.id), 0);
+
+/* Everything this account has done on this device, sent now rather than
+   on the next timer: the list first (profiles made here, removals, names),
+   then every profile's rows, not only the one on screen. */
+async function flushAccount() {
+  writeNow();
+  clearTimeout(syncPushTimer); syncPushTimer = null;
+  for (let i = 0; rosterBusy && i < 100; i++) await new Promise((r) => setTimeout(r, 100));
+  try { await rosterSync({ force: true }); } catch { /* counted below */ }
+  for (const lp of profileList()) {
+    const rec = syncFor(lp.id);
+    if (!rec || !rec.remoteId || rec.level === "read" || rec.live) continue;
+    try { await syncPush(lp.id); } catch { /* counted below */ }
+  }
+}
+
+/* Logged out. The list goes from the screen and NOTHING goes from the
+   disk: every profile's save stays under its key, this account's list
+   stays under its own, and logging back in brings all of it straight back.
+   Until then the only way to any of it is Storage check, behind this
+   account's password. */
+function leaveAccount() {
+  if (ui.workoutSheet) closeWorksheet();
+  writeNow();
+  clearTimeout(syncPushTimer); syncPushTimer = null;
+  const C = window.ZenofitCloud;
+  if (C) C.signOut();
+  chatReset();
+  profiles = { userId: null, active: null, list: [] };
+  state = defaultState();
+  closeEverything();
+  resetTransient();
+  ui.tab = "home";
+  ui.rosterLoading = false;
+  ui.syncError = null;
+  ui.login = freshLogin();
+  render();
 }
 
 /* ══ CHAT: MESSAGES, AND WHY THEY ARE NOT IN `state` ══════════════════
@@ -4575,60 +4705,116 @@ function importBackup(text) {
 
      · the data is gone (storage cleared, evicted, reset),
      · the data is fine but this is not the address it was saved at,
-     · the data is fine and right here, but the profile index no longer
-       points at it, so the app cannot see its own save.
+     · the data is fine and right here, but no list points at it, so the
+       app cannot see its own save.
 
    The third one is recoverable in one tap and used to be indistinguishable
    from the first, which is the worst way for it to fail: somebody grieves a
    year of training that is sitting in the same browser, unreferenced. So
-   this reads every Zenofit key there is, says which profile each one is,
-   how much training is in it, and whether the index knows about it.
+   this reads every Zenofit save there is, says how much training is in
+   each one and whose account it belongs to.
+
+   ── A BACK POCKET, NOT A PART OF THE APP ──────────────────────────────
+   Nothing outside this screen reads what it finds, and nothing it finds
+   reaches anywhere else unless somebody is stood on this screen pressing
+   Recover. It used to be wired into the rest of the app — the account
+   sheet listed every save on the phone beside the account's profiles —
+   and that is how training from one account kept surfacing in another's
+   list. The profile list is the account's; this is the phone's.
+
+   AND IT IS LOCKED PER ACCOUNT. Logging out leaves every save exactly
+   where it was (nothing is deleted because a session ended), which means
+   this phone is holding training for accounts that are not logged in to
+   it. Recovering one, exporting it or sharing it asks for the password of
+   the account it belongs to. Saves that belong to the account you are in
+   open without asking, and so do saves no account has ever owned.
+
+   ── WHAT THE LOCK IS, AND WHAT IT IS NOT ─────────────────────────────
+   It is a door in the app, not a safe. The bytes behind it are the same
+   plain JSON as every other save, and anybody who can open the browser's
+   developer tools on this phone can read them without a password. That is
+   a deliberate choice for now: there are a handful of users and the point
+   is that the app itself never hands somebody else's training over.
+   THE STRONGER VERSION, when it matters: encrypt a profile's save at the
+   moment its account logs out, with a key derived from that account's
+   password (PBKDF2 → AES-GCM through WebCrypto, the same derivation
+   zenofit-cloud.js already runs), and decrypt on login or on unlock here.
+   The catch that has to be designed for rather than discovered: logging
+   out must then have the password in hand (ask for it, or keep a wrapped
+   key from login), and a phone with a save encrypted under a password
+   nobody remembers holds nothing recoverable at all.
 
    It reads. The only thing on this screen that writes is Recover, and all
-   Recover does is ADD: it puts an unlisted save back in the index and
-   switches to it. Nothing here overwrites, deletes or merges anything,
-   because the one guaranteed way to make a bad day worse is a repair tool
-   that can destroy the thing it was opened to rescue. */
+   Recover does is ADD: it puts a save into the account you are logged in
+   to and switches to it. Nothing here overwrites, deletes or merges
+   anything, because the one guaranteed way to make a bad day worse is a
+   repair tool that can destroy the thing it was opened to rescue. */
 const STATE_PREFIX = "powerbuild-tracker:state:";
 
 function storageScan() {
-  const out = { origin: "", rows: [], total: 0, indexOk: false, readable: true };
+  const out = { origin: "", rows: [], total: 0, readable: true };
   try { out.origin = location.origin; } catch { /* nothing to say */ }
-  let index = null;
-  try { index = JSON.parse(localStorage.getItem(PROFILES_KEY)); } catch { /* damaged */ }
-  out.indexOk = !!(index && Array.isArray(index.list) && index.list.length);
-  const listed = new Set(out.indexOk ? index.list.map((x) => x.id) : []);
+  const me = acctUserId();
+  const mine = new Set(profileList().map((p) => p.id));
+  const owners = ownersAll();
 
   let keys = [];
   try { for (let i = 0; i < localStorage.length; i++) keys.push(localStorage.key(i)); }
   catch { out.readable = false; return out; }
+
+  /* which account's list names each save, across every account this phone
+     has ever held — a save in somebody's list is theirs even where the
+     owner index has no entry for it */
+  const listedBy = {};
+  for (const key of keys) {
+    if (!key || !key.startsWith(ROSTER_PREFIX)) continue;
+    try {
+      const r = JSON.parse(localStorage.getItem(key));
+      for (const x of (r && r.list) || []) if (x && x.id) listedBy[x.id] = key.slice(ROSTER_PREFIX.length);
+    } catch { /* a damaged list names nothing */ }
+  }
 
   for (const key of keys) {
     let raw = "";
     try { raw = localStorage.getItem(key) || ""; } catch { /* skip */ }
     out.total += key.length + raw.length;
     const isState = key === STORE_KEY || key.startsWith(STATE_PREFIX);
-    if (!isState && key !== PROFILES_KEY) continue;
-    const row = { key, bytes: raw.length, index: key === PROFILES_KEY };
-    if (isState) {
-      row.legacy = key === STORE_KEY;
-      row.id = row.legacy ? null : key.slice(STATE_PREFIX.length);
-      row.active = !row.legacy && row.id === activeProfileId();
-      /* a legacy key is never "listed": it predates the index entirely,
-         which is exactly why it is worth offering back */
-      row.listed = !row.legacy && listed.has(row.id);
+    if (!isState) continue;
+    const row = { key, bytes: raw.length };
+    row.legacy = key === STORE_KEY;
+    row.id = row.legacy ? null : key.slice(STATE_PREFIX.length);
+    row.active = !row.legacy && row.id === activeProfileId();
+    /* in the list you are looking at right now: nothing to recover */
+    row.mine = !row.legacy && mine.has(row.id);
+    row.listedBy = row.legacy ? null : (listedBy[row.id] || null);
+    const o = row.legacy ? null : owners[row.id];
+    const ownerId = (o && o.userId) || row.listedBy || null;
+    row.owner = ownerId ? { userId: ownerId, username: (o && o.userId === ownerId && o.username) || null } : null;
+    /* a name learned for the same account on another save is the same name */
+    if (row.owner && !row.owner.username) {
+      const known = Object.values(owners).find((x) => x && x.userId === ownerId && x.username);
+      if (known) row.owner.username = known.username;
+    }
+    row.foreign = !!(row.owner && row.owner.userId !== me);
+    try {
+      const d = JSON.parse(raw);
+      const st = d && typeof d === "object" && d.state ? d.state : d;
+      if (st && typeof st === "object" && Array.isArray(st.log)) {
+        row.ok = true;
+        row.entries = st.log.length;
+        row.days = new Set(st.log.map((e) => e.date)).size;
+        row.body = (st.body || []).length;
+        row.lifts = (st.library || []).length;
+        row.name = (st.settings && st.settings.name) || "";
+      }
+    } catch { /* row.ok stays falsy: it is there and it will not parse */ }
+    /* the profile's name as the list knew it, when a list still does */
+    if (row.listedBy) {
       try {
-        const d = JSON.parse(raw);
-        const st = d && typeof d === "object" && d.state ? d.state : d;
-        if (st && typeof st === "object" && Array.isArray(st.log)) {
-          row.ok = true;
-          row.entries = st.log.length;
-          row.days = new Set(st.log.map((e) => e.date)).size;
-          row.body = (st.body || []).length;
-          row.lifts = (st.library || []).length;
-          row.name = (st.settings && st.settings.name) || "";
-        }
-      } catch { /* row.ok stays falsy: it is there and it will not parse */ }
+        const r = JSON.parse(localStorage.getItem(rosterKeyFor(row.listedBy)));
+        const hit = ((r && r.list) || []).find((x) => x.id === row.id);
+        if (hit && hit.name) row.profileName = hit.name;
+      } catch { /* no name to show */ }
     }
     out.rows.push(row);
   }
@@ -4636,6 +4822,11 @@ function storageScan() {
   out.rows.sort((a, b) => (b.entries || 0) - (a.entries || 0) || b.bytes - a.bytes);
   return out;
 }
+
+/* Does opening this save need a password first? Only when it belongs to
+   an account other than the one logged in, and only until that account's
+   password has been given on this visit to the screen. */
+const storLocked = (row) => !!(row && row.foreign && !(ui.storUnlocked && ui.storUnlocked.has(row.owner.userId)));
 
 /* ── GETTING ONE SAVE OFF THE PHONE ───────────────────────────────────
    The one thing that still works when the phone has no room left to write,
@@ -4655,7 +4846,7 @@ function storageScan() {
    worth far more on a laptop than they are stranded on a phone. */
 function storageFileFor(key) {
   const row = storageScan().rows.find((r) => r.key === key);
-  if (!row || row.index) return null;
+  if (!row || storLocked(row)) return null;
   /* row.ok as well as row.active: when the active save is the damaged one,
      what is in memory is the blank default and the bytes are the only thing
      worth handing over */
@@ -4680,30 +4871,75 @@ function storageFileFor(key) {
   };
 }
 
-/* Putting an unlisted save back in the index. Additive and nothing else: a
-   legacy key is COPIED to a state key of its own (never moved, so a failure
-   half-way leaves the original exactly where it was), and an orphan is
-   simply named in the index again. Then switchProfile, which parks and
-   flushes whatever is open before it goes anywhere. */
+/* ── PUTTING A SAVE INTO THE ACCOUNT YOU ARE IN ──────────────────────
+   Additive and nothing else, and always into the account logged in right
+   now — whoever it used to belong to, since whoever is recovering it has
+   either proved they hold that account's password or it never had one.
+
+   A save no list names any more is simply put in this account's list. A
+   save still in SOMEBODY ELSE'S list, and the pre-profiles legacy key, are
+   COPIED to a key of their own instead: two lists pointing at one key
+   would be two accounts writing into the same training, and a copy that
+   fails half-way leaves the original exactly where it was.
+
+   Either way what lands is a profile with no link, so the next roster pass
+   puts it into this account as a new profile, on every device. Then
+   switchProfile, which parks and flushes whatever is open. */
 function adoptStorage(key) {
-  const scan = storageScan();
-  const row = scan.rows.find((r) => r.key === key);
-  if (!row || !row.ok) return false;
+  const me = signedInAs();
+  if (!me) return false;
+  const row = storageScan().rows.find((r) => r.key === key);
+  if (!row || !row.ok || row.mine || storLocked(row)) return false;
   let id = row.id;
-  if (row.legacy) {
+  if (row.legacy || row.listedBy) {
     id = uid();
     try {
-      const raw = localStorage.getItem(STORE_KEY);
+      const raw = localStorage.getItem(key);
       localStorage.setItem(stateKeyFor(id), raw);
       if (localStorage.getItem(stateKeyFor(id)) !== raw) throw new Error("copy did not land");
-    } catch (e) { console.error("adopt failed", e); alert(T("profiles.quota")); return false; }
+    } catch (e) { console.error("recover failed", e); alert(T("profiles.quota")); return false; }
   }
-  if (!profiles.list.some((x) => x.id === id)) {
-    profiles.list = [...profiles.list, { id, name: "" }];
-    saveProfiles();
-  }
-  switchProfile(id);
+  /* whatever link this save had was to a profile that has left the account
+     it lived in; it goes up as a new one rather than chasing that */
+  syncForget(id);
+  const name = row.profileName || T("stor.recoveredName");
+  profiles.list = [...profiles.list, { id, name }];
+  saveProfiles();
+  ownerSet(id, me.userId, me.username);
+  syncSet(id, { nameAt: Date.now() });
+  if (profiles.active) switchProfile(id);
+  else landOnFirstProfile();
+  rosterSync({ force: true });
   return true;
+}
+
+/* Open the password prompt for a locked save, remembering what the tap
+   was for so the unlock can carry straight on with it. */
+function storAskPassword(row, then) {
+  if (!row || !row.owner) return;
+  const known = row.owner.username || "";
+  ui.storUnlock = { key: row.key, then, username: known, fixedName: !!known, password: "", busy: false, error: null };
+  render();
+}
+
+/* Recover, after any password has been given. Two different confirms,
+   because they are two different facts: putting back a save that is
+   already yours (or nobody's), and moving training from another account
+   into this one — which is allowed, since whoever is doing it has just
+   proved they hold both, but is never done without saying so. */
+function storRecover(row) {
+  if (!row || !row.ok || row.mine || storLocked(row)) return;
+  const me = signedInAs();
+  if (!me) return;
+  const counts = { days: TN("day", row.days), sets: TN("logEntry", row.entries) };
+  const ok = row.foreign
+    ? confirm(T("stor.confirmOtherAcct", { ...counts,
+        owner: row.owner.username || T("stor.ownerUnknownShort"), me: me.username }))
+    : confirm(T("stor.confirmRecover", counts));
+  if (!ok) return;
+  ui.showStorage = false; ui.showProfile = false; ui.profileDraft = null;
+  /* the unlock is spent by the switch that follows (closeEverything) */
+  if (!adoptStorage(row.key)) render();
 }
 
 /* The screen turning off, the app being swiped away, or the browser
@@ -4731,7 +4967,11 @@ const ui = {
   profilesWin: false,   // the profiles window (which training is on screen)
   profileForm: null,    // {id, name, mode:"add"|"rename"|"copy"} name editor
   liveLoading: false,   // a live profile is being fetched, see the LIVE block
-  accountSheet: null,   // {username, password, free, cloud} sign in / sign up
+  accountSheet: null,   // {} the account sheet: who you are, the account's profiles, log out
+  login: null,          // {username, password, busy, error, confirmCreate} the login screen
+  rosterLoading: false, // first login on this device: the account's list is on its way
+  signingOut: false,    // logging out is sending what has not gone up yet
+  firstProfileName: "", // the name field on the no-profiles screen
   syncSheet: null,      // {localId, grants, code, copied} the share sheet
   joinSheet: null,      // {code, busy, error} redeeming somebody's code
   syncBusy: false,      // a pull or push is in flight
@@ -4799,6 +5039,8 @@ const ui = {
   std: null,            // {slug, sex, bw, bwFrom, mode, lift, liftFromLog, setReps, setWeight}
   stdResult: null,      // the last check, see stdCheck()
   showStorage: false,   // Settings -> Data -> Storage check is open, see renderStorage
+  storUnlock: null,     // {key, then, username, password, busy, error} a save's password prompt
+  storUnlocked: new Set(), // accounts whose password was given on this visit to Storage check
   stdPick: false,       // the standards' own exercise picker is open, or {ex} to link one
   /* one-shot: the next frame scrolls the rank card into view, set by the
      shortcut from an exercise's window, which exists to put somebody in
@@ -5317,6 +5559,11 @@ function render() {
   const prevTab = _lastTab;
   const prevOverlayKeys = _lastOverlayKeys;
 
+  /* No account, or an account with no profile open: there is no training
+     to draw, so there is no app to draw, only the screen that gets you one.
+     See renderGate. */
+  if (!accountOn() || !profiles.active) { renderGate(scrolls); return; }
+
   const { settings, library, log, body, goals } = state;
   const unit = settings.units;
   const badges = computeBadges(log);
@@ -5450,6 +5697,7 @@ function render() {
   if (ui.chartFull) html += renderChartFull();
   if (ui.showProfile) html += renderProfile(ui.profileDraft);
   if (ui.showStorage) html += renderStorage();
+  if (ui.storUnlock) html += renderStorUnlock();
   if (ui.profilesWin) html += renderProfilesWindow();
   if (ui.profileForm) html += renderProfileForm();
   if (ui.accountSheet) html += renderAccountSheet();
@@ -5517,6 +5765,145 @@ function render() {
   paintTimers();   // put the freshly mounted rings/digits at the right position
   startStopwatchEngine();   // …and pick the stopwatch back up if this frame drew one
   persist();       // every frame is a save point, see snapshotDrafts()
+}
+
+/* ────────────────────────── THE GATE ──────────────────────────────── */
+
+/* ── NO ACCOUNT, NO PROFILES ──────────────────────────────────────────
+   Every profile belongs to an account, so a phone nobody is logged in to
+   has no profiles to show and nothing to log into. It gets a login screen,
+   the way nearly every app does, and nothing else: no tabs, no settings,
+   no training from whoever used it last.
+
+   Logged in to an account with no profiles yet — a new account, or one
+   whose last profile was deleted — gets the other half: a field for the
+   first one's name, a way into a profile somebody shared, Storage check,
+   and a way back out. The app proper only draws once there is a profile
+   to draw.
+
+   A separate, small frame rather than a branch through render(), because
+   everything render() does after this point reads `state` as somebody's
+   training, and there is none. */
+function renderGate(scrolls) {
+  let html = `<div class="pb-viewport"><div class="pb-root pb-frame">`;
+  if (!accountOn()) {
+    if (!ui.login) ui.login = freshLogin();
+    html += renderLoginGate();
+  } else {
+    html += renderNoProfiles();
+    if (ui.showStorage) html += renderStorage();
+    if (ui.storUnlock) html += renderStorUnlock();
+    if (ui.joinSheet) html += renderJoinSheet();
+  }
+  html += `</div></div>`;
+  app.innerHTML = html;
+  app.querySelectorAll("[data-scrollkey]").forEach((el) => {
+    if (scrolls[el.dataset.scrollkey] != null) el.scrollTop = scrolls[el.dataset.scrollkey];
+  });
+  if (window.lucide) lucide.createIcons();
+  _lastTab = null;
+  _lastOverlayKeys = new Set([...app.querySelectorAll("[data-overlay]")].map((e) => e.dataset.overlay));
+  const af = app.querySelector("[data-autofocus]");
+  if (af && document.activeElement !== af && !syncTyping()) af.focus();
+}
+
+const freshLogin = () => ({ username: "", password: "", busy: false, error: null, confirmCreate: false });
+const LOGIN_NAME_RE = /^[a-z0-9][a-z0-9._-]{2,23}$/;
+const loginReady = (f) => LOGIN_NAME_RE.test((f.username || "").trim()) && !!(f.password || "") && !f.busy;
+
+/* ── ONE FORM, AND IT ASKS BEFORE IT MAKES AN ACCOUNT ─────────────────
+   Logging in and signing up are the same two fields, and the server
+   already knows which one this is, so there is one button. What it must
+   not do is decide quietly: a typo in an existing username ("testng1")
+   used to become a brand new, empty account on the spot, which looks
+   exactly like every profile having vanished. So a name that does not
+   exist stops and says so, and creating it is its own tap. */
+function renderLoginGate() {
+  const f = ui.login;
+  const ok = loginReady(f);
+  const name = (f.username || "").trim();
+  return `<div class="pb-scroll" data-scrollkey="login" style="flex:1;overflow-y:auto;padding:calc(38px + var(--pb-sat)) 22px calc(30px + var(--pb-sab));display:flex;flex-direction:column">
+    <div style="display:flex;flex-direction:column;align-items:center;text-align:center;margin-bottom:26px">
+      <img src="logoC.png" alt="${T("a11y.logo")}" width="64" height="64" style="width:64px;height:64px;object-fit:contain;border-radius:16px;display:block;margin-bottom:14px">
+      <div class="pb-num" style="font-size:26px;font-weight:700;letter-spacing:.01em">Zenofit</div>
+      <div style="font-size:13.5px;color:var(--muted);margin-top:6px;line-height:1.5">${T("login.subtitle")}</div>
+    </div>
+    ${field(T("acct.username"),
+      `<input class="pb-input" data-bind="loginName" value="${esc(f.username)}" placeholder="${esc(T("acct.usernamePh"))}" autocapitalize="none" autocorrect="off" autocomplete="username" spellcheck="false" maxlength="24" data-autofocus>`)}
+    ${field(T("acct.password"),
+      `<input class="pb-input" type="password" data-bind="loginPass" value="${esc(f.password)}" autocapitalize="none" autocorrect="off" autocomplete="current-password" spellcheck="false">`)}
+    <div id="loginErr" style="font-size:12.5px;color:var(--red);margin:-4px 0 12px;line-height:1.5;display:${f.error ? "block" : "none"}">${f.error ? esc(f.error) : ""}</div>
+    <div id="loginMain" style="display:${f.confirmCreate ? "none" : "block"}">
+      <button id="loginGoBtn" data-action="login-go" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
+        ${icon("log-in", 16)} ${T(f.busy ? "acct.working" : "login.go")}
+      </button>
+    </div>
+    <div id="loginConfirm" class="pb-card2" style="display:${f.confirmCreate ? "block" : "none"};padding:14px">
+      <div style="font-size:13.5px;line-height:1.55;margin-bottom:12px">${T("login.noAccount", { name: `<b>${esc(name)}</b>` })}</div>
+      <button data-action="login-create" ${f.busy ? "disabled" : ""} class="pb-btn pb-gold" style="width:100%;padding:12px 0;font-size:14.5px;opacity:${f.busy ? 0.45 : 1}">
+        ${icon("user-plus", 16)} ${T(f.busy ? "acct.working" : "login.create")}
+      </button>
+      <button data-action="login-cancel" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;font-size:13.5px;margin-top:8px">${T("login.cancel")}</button>
+      <div style="font-size:11.5px;color:var(--faint);margin-top:10px;line-height:1.55">${T("acct.passwordHint")}</div>
+    </div>
+    <div style="font-size:11.5px;color:var(--faint);margin-top:16px;line-height:1.6">${T("login.hint")}</div>
+    <div style="font-size:11.5px;color:var(--faint);margin-top:8px;line-height:1.6">${T("acct.warning")}</div>
+  </div>`;
+}
+
+/* Typing must never reach render(): it rebuilds #app and the caret goes
+   with the input it was in (see the loginName branch of handleBind). The
+   button, the error and the create prompt are patched in place. */
+function updateLoginForm() {
+  const f = ui.login;
+  if (!f) return;
+  const btn = document.getElementById("loginGoBtn");
+  if (btn) { const ok = loginReady(f); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
+  const err = document.getElementById("loginErr");
+  if (err) { err.textContent = f.error || ""; err.style.display = f.error ? "block" : "none"; }
+  const main = document.getElementById("loginMain");
+  const conf = document.getElementById("loginConfirm");
+  if (main) main.style.display = f.confirmCreate ? "none" : "block";
+  if (conf) conf.style.display = f.confirmCreate ? "block" : "none";
+}
+
+function renderNoProfiles() {
+  const me = signedInAs() || {};
+  const loading = ui.rosterLoading;
+  return `<div class="pb-scroll" data-scrollkey="noprofiles" style="flex:1;overflow-y:auto;padding:calc(30px + var(--pb-sat)) 20px calc(30px + var(--pb-sab))">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:22px">
+      <img src="logoC.png" alt="${T("a11y.logo")}" width="40" height="40" style="width:40px;height:40px;object-fit:contain;border-radius:10px;display:block;flex-shrink:0">
+      <div style="flex:1;min-width:0">
+        <div class="pb-label">${T("acct.signedInAs")}</div>
+        <div class="pb-num" style="font-size:18px;font-weight:700;color:var(--gold);word-break:break-all;line-height:1.2">${esc(me.username || "")}</div>
+      </div>
+    </div>
+    ${loading
+      ? `<div class="pb-card" style="padding:22px 16px;text-align:center;margin-bottom:14px">
+          <span class="pb-spin" style="display:inline-flex;color:var(--gold)">${icon("refresh-cw", 22)}</span>
+          <div style="font-size:14px;font-weight:600;margin-top:10px">${T("noprof.loading")}</div>
+        </div>`
+      : `<div class="pb-card" style="padding:16px;margin-bottom:14px">
+          <div style="font-size:16px;font-weight:700;margin-bottom:6px">${T("noprof.title")}</div>
+          <div style="font-size:12.5px;color:var(--muted);line-height:1.55;margin-bottom:14px">${T("noprof.body")}</div>
+          ${field(T("profiles.name"), `<input class="pb-input" data-bind="firstProfileName" value="${esc(ui.firstProfileName || "")}" placeholder="${esc(T("profiles.namePlaceholder"))}">`)}
+          <button data-action="first-profile-create" class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px">
+            ${icon("plus", 16)} ${T("noprof.create")}
+          </button>
+        </div>
+        <button data-action="open-join" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:13.5px;margin-bottom:8px">
+          ${icon("users", 15)} ${T("sync.joinBtn")}
+        </button>
+        <button data-action="open-storage" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:13.5px;margin-bottom:8px;justify-content:flex-start;padding-left:14px;gap:9px">
+          ${icon("database", 15)} ${T("stor.title")}
+          <span style="flex:1"></span>
+          ${icon("chevron-right", 15, 'style="color:var(--faint)"')}
+        </button>`}
+    <div class="pb-hairline" style="margin:16px 0"></div>
+    <button data-action="acct-signout" ${ui.signingOut ? "disabled" : ""} class="pb-btn" style="width:100%;padding:12px 0;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3);opacity:${ui.signingOut ? 0.45 : 1}">
+      ${icon("log-out", 15)} ${T(ui.signingOut ? "acct.signingOut" : "acct.signOut")}
+    </button>
+  </div>`;
 }
 
 /* ───────────────────────────── HOME ───────────────────────────────── */
@@ -9179,24 +9566,25 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
    in the order somebody standing in front of an empty app asks them: what
    address is this, what is actually saved here, and can I get it back.
 
-   Every save is a row that says how much training is in it, and a verdict
-   in plain words rather than a key name: the one you are in, one you are
-   not, one the app has lost track of, one it cannot read. Only the third
-   gets a button, because it is the only one this screen can fix. */
+   Every save is a row that says how much training is in it, whose account
+   it belongs to, and a verdict in plain words rather than a key name: in
+   use, in your profiles, another account's, in no list, damaged. Anything
+   not already in your profiles gets Recover, and anything belonging to
+   another account asks for that account's password first. */
 const storageKB = (n) => (n < 1024 ? "<1" : Math.round(n / 1024)) + " KB";
 
 function renderStorage() {
   const scan = storageScan();
-  const saves = scan.rows.filter((r) => !r.index);
-  const orphans = saves.filter((r) => r.ok && !r.listed && !r.active);
+  const saves = scan.rows;
+  const outside = saves.filter((r) => r.ok && !r.mine);
   const withData = saves.filter((r) => r.ok && r.entries > 0);
 
   /* The headline is the question they came here with, answered before any
      of the detail: is anything of mine in this browser at all? */
-  const verdict = unreadable === activeProfileId() ? { c: "var(--red)", t: T("stor.held") }
+  const verdict = profiles.active && unreadable === profiles.active ? { c: "var(--red)", t: T("stor.held") }
     : !scan.readable ? { c: "var(--red)", t: T("stor.noAccess") }
     : !saves.length ? { c: "var(--red)", t: T("stor.nothing") }
-    : orphans.some((r) => r.entries > 0) ? { c: "var(--gold)", t: T("stor.foundLost") }
+    : outside.some((r) => r.entries > 0) ? { c: "var(--gold)", t: T("stor.foundLost") }
     : withData.length ? { c: "var(--green)", t: T("stor.foundOk") }
     : { c: "var(--muted)", t: T("stor.foundEmpty") };
 
@@ -9207,9 +9595,16 @@ function renderStorage() {
        screen exists to tell the truth about */
     const state = !r.ok ? { c: "var(--red)", t: T("stor.unreadable") }
       : r.active ? { c: "var(--green)", t: T("stor.thisOne") }
-      : !r.listed ? { c: "var(--gold)", t: T("stor.lost") }
-      : { c: "var(--steel)", t: T("stor.otherProfile") };
-    return `<div class="pb-card" style="padding:13px 14px;margin-bottom:8px;border-color:${r.ok && !r.listed && !r.active ? "var(--gold)" : "var(--border)"}">
+      : r.mine ? { c: "var(--steel)", t: T("stor.inYours") }
+      : r.foreign ? { c: "var(--muted)", t: T("stor.otherAcct") }
+      : { c: "var(--gold)", t: T("stor.lost") };
+    const locked = storLocked(r);
+    const who = !r.owner ? T("stor.noOwner")
+      : r.owner.username ? T("stor.owner", { name: esc(r.owner.username) })
+      : T("stor.ownerUnknown");
+    const canRecover = r.ok && !r.mine;
+    const lock = locked ? icon("lock", 13, 'style="flex-shrink:0"') + " " : "";
+    return `<div class="pb-card" style="padding:13px 14px;margin-bottom:8px;border-color:${canRecover && !r.foreign ? "var(--gold)" : "var(--border)"}">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:7px">
         ${chip(state.t, state.c)}
         ${r.legacy ? chip(T("stor.legacy"), "var(--muted)") : ""}
@@ -9218,23 +9613,24 @@ function renderStorage() {
       </div>
       ${r.ok
         ? `<div class="pb-num" style="font-size:20px;font-weight:700;line-height:1.15">${T("stor.counts", { days: TN("day", r.days), sets: TN("logEntry", r.entries) })}</div>
-           <div style="font-size:12px;color:var(--muted);margin-top:3px">${T("stor.counts2", { lifts: TN("exercise", r.lifts), body: TN("checkin", r.body) })}${r.name ? " \u00b7 " + esc(r.name) : ""}</div>`
+           <div style="font-size:12px;color:var(--muted);margin-top:3px">${T("stor.counts2", { lifts: TN("exercise", r.lifts), body: TN("checkin", r.body) })}${!locked && (r.profileName || r.name) ? " · " + esc(r.profileName || r.name) : ""}</div>`
         : `<div style="font-size:13px;color:var(--red);line-height:1.5">${T("stor.unreadableBody")}</div>`}
-      <div style="font-size:10.5px;color:var(--faint);margin-top:8px;word-break:break-all;font-family:ui-monospace,monospace">${esc(r.key)}</div>
-      ${r.ok && !r.listed && !r.active ? `<button data-action="storage-adopt" data-key="${esc(r.key)}" class="pb-btn pb-gold" style="width:100%;padding:12px 0;font-size:14.5px;margin-top:11px">
-        ${icon("life-buoy", 16)} ${T("stor.recover")}
+      <div style="display:flex;align-items:center;gap:6px;font-size:12px;color:${r.foreign ? "var(--steel)" : "var(--faint)"};margin-top:7px">${icon(r.owner ? "user" : "user-x", 13, 'style="flex-shrink:0"')}<span>${who}</span></div>
+      <div style="font-size:10.5px;color:var(--faint);margin-top:6px;word-break:break-all;font-family:ui-monospace,monospace">${esc(r.key)}</div>
+      ${canRecover ? `<button data-action="storage-adopt" data-key="${esc(r.key)}" class="pb-btn pb-gold" style="width:100%;padding:12px 0;font-size:14.5px;margin-top:11px">
+        ${locked ? icon("lock", 16) : icon("life-buoy", 16)} ${T("stor.recover")}
       </button>` : ""}
       ${/* On EVERY save, damaged ones included, and not only the ones Recover
             can help: getting the file off the phone is the move that works
             when the phone is too full for Recover to finish, and it is the
             only move at all on a save nothing can parse. Both read and
             neither writes, which is the whole point. */""}
-      <div style="display:flex;gap:8px;margin-top:${r.ok && !r.listed && !r.active ? 8 : 11}px">
+      <div style="display:flex;gap:8px;margin-top:${canRecover ? 8 : 11}px">
         <button data-action="storage-export" data-key="${esc(r.key)}" class="pb-btn pb-ghost" style="flex:1;padding:11px 0;font-size:13px">
-          ${icon("download", 14)} ${T("profile.export")}
+          ${lock}${icon("download", 14)} ${T("profile.export")}
         </button>
         ${shareFileType() ? `<button data-action="storage-share" data-key="${esc(r.key)}" class="pb-btn pb-ghost" style="flex:1;padding:11px 0;font-size:13px">
-          ${icon("share-2", 14)} ${T("stor.share")}
+          ${lock}${icon("share-2", 14)} ${T("stor.share")}
         </button>` : ""}
       </div>
     </div>`;
@@ -9257,18 +9653,53 @@ function renderStorage() {
             say nothing about the one the training is actually in. */""}
       ${sectionTitle(T("stor.address"))}
       <div class="pb-card" style="padding:13px 14px;margin-bottom:16px">
-        <div style="font-size:13px;word-break:break-all;font-family:ui-monospace,monospace;color:var(--text)">${esc(scan.origin || "\u2014")}</div>
+        <div style="font-size:13px;word-break:break-all;font-family:ui-monospace,monospace;color:var(--text)">${esc(scan.origin || "—")}</div>
         <div style="font-size:11.5px;color:var(--faint);margin-top:7px;line-height:1.5">${T("stor.addressHint")}</div>
       </div>
 
       ${sectionTitle(T("stor.saves"), `<span style="font-size:11px;color:var(--faint)">${T("stor.totalUsed", { size: storageKB(scan.total) })}</span>`)}
       ${saves.length ? rows : `<div class="pb-card" style="padding:22px;text-align:center;color:var(--faint);font-size:13px;line-height:1.6">${T("stor.nothingBody")}</div>`}
-      ${scan.indexOk ? "" : `<div style="font-size:12px;color:var(--gold);line-height:1.55;margin:2px 4px 10px">${T("stor.noIndex")}</div>`}
 
       <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:10px 4px 10px">${T("stor.footer")}</div>
       <div style="height:14px"></div>
     </div>
   `, "storage");
+}
+
+/* The login form's rule, for the same reason: typing patches, never renders. */
+function updateUnlockForm() {
+  const f = ui.storUnlock;
+  if (!f) return;
+  const btn = document.getElementById("unlockGoBtn");
+  if (btn) { const ok = !!(f.username || "").trim() && !!f.password && !f.busy; btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
+  const err = document.getElementById("unlockErr");
+  if (err) { err.textContent = f.error || ""; err.style.display = f.error ? "block" : "none"; }
+}
+
+/* ── THE PASSWORD FOR A SAVE THAT IS NOT YOURS ────────────────────────
+   Asked for when a save belongs to another account. The username is
+   filled in and fixed where this phone knows it, because the question is
+   "are you that account", not "which account are you"; where the phone
+   never learned the name (a save that predates the owner index) it is
+   typed, and the answer is checked against the account id, which is the
+   thing that is actually known. Checked by the server without logging in
+   (POST /v1/auth/verify), so it needs a connection and leaves no token
+   behind. */
+function renderStorUnlock() {
+  const f = ui.storUnlock;
+  const ok = !!(f.username || "").trim() && !!f.password && !f.busy;
+  return sheet(T("stor.unlockTitle"), "storUnlock", `
+    <div style="font-size:12.5px;color:var(--muted);line-height:1.6;margin-bottom:14px">${
+      f.fixedName ? T("stor.unlockBody", { name: `<b>${esc(f.username)}</b>` }) : T("stor.unlockBodyUnknown")}</div>
+    ${f.fixedName ? "" : field(T("acct.username"),
+      `<input class="pb-input" data-bind="unlockName" value="${esc(f.username)}" autocapitalize="none" autocorrect="off" autocomplete="off" spellcheck="false" maxlength="24" data-autofocus>`)}
+    ${field(T("acct.password"),
+      `<input class="pb-input" type="password" data-bind="unlockPass" value="${esc(f.password)}" autocapitalize="none" autocorrect="off" autocomplete="off" spellcheck="false"${f.fixedName ? " data-autofocus" : ""}>`)}
+    <div id="unlockErr" style="font-size:12.5px;color:var(--red);margin:-4px 0 12px;line-height:1.5;display:${f.error ? "block" : "none"}">${f.error ? esc(f.error) : ""}</div>
+    <button id="unlockGoBtn" data-action="stor-unlock-go" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
+      ${icon("lock-open", 16)} ${T(f.busy ? "acct.working" : "stor.unlockGo")}
+    </button>
+  `, 126);
 }
 
 /* exercise picker with quick-add (name + muscle only, like the sheet) */
@@ -10032,11 +10463,6 @@ function bestEverBlock(m, ref, unit) {
     <div class="pb-num" style="font-size:17px;font-weight:700;line-height:1.15;color:${pr ? "var(--gold)" : "var(--muted)"}">${ref.m}<span style="font-size:10px;font-weight:600;color:var(--faint)"> ${esc(metricUnit(k, unit))}</span></div>
     <div style="font-size:10px;line-height:1.35;margin-top:1px;color:${pr ? "var(--gold)" : "var(--faint)"}">${sub}</div>`;
 }
-
-/* Debounce for the is-this-name-free lookup, so a name is not asked about
-   once per keystroke. Module-level like the chart's gesture state: it belongs
-   to a field that is being typed in, not to anything persisted. */
-let acctNameTimer = null;
 
 /* The same debounce for the chat tab's username search, and the same
    reasoning: a prefix search per keystroke is a request per letter. */
@@ -10956,28 +11382,26 @@ function renderProfile(f) {
       ${/* Above the profiles, because the account is what they hang off:
             sign in and the ones you own are waiting on the other side. */
         (() => {
-          const C = window.ZenofitCloud;
-          const who = C && C.account ? C.account() : null;
-          const name = who && who.username;
+          const name = (signedInAs() || {}).username || "";
           return `<button data-action="open-account" class="pb-card" style="width:100%;display:flex;align-items:center;gap:11px;padding:12px 14px;margin-bottom:10px;text-align:left;color:var(--text)">
-            ${icon(name ? "user-check" : "user", 18, `style="color:${name ? "var(--gold)" : "var(--faint)"};flex-shrink:0"`)}
+            ${icon("user-check", 18, 'style="color:var(--gold);flex-shrink:0"')}
             <span style="flex:1;min-width:0">
               <span class="pb-label" style="display:block;margin-bottom:2px">${T("acct.title")}</span>
-              <span style="display:block;font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:${name ? "var(--text)" : "var(--faint)"}">${name ? esc(name) : T("acct.notSignedIn")}</span>
+              <span style="display:block;font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(name)}</span>
             </span>
             ${icon("chevron-right", 15, 'style="color:var(--faint);flex-shrink:0"')}
           </button>`;
         })()}
       ${(() => {
         const list = profileList(), i = list.findIndex((p) => p.id === activeProfileId());
-        const sy = syncState(activeProfileId());
+        const shared = profileShared(activeProfileId());
         return `<button data-action="open-profiles" class="pb-card" style="width:100%;display:flex;align-items:center;gap:11px;padding:12px 14px;margin-bottom:16px;text-align:left;color:var(--text)">
           ${icon("users", 18, 'style="color:var(--gold);flex-shrink:0"')}
           <span style="flex:1;min-width:0">
             <span class="pb-label" style="display:block;margin-bottom:2px">${T("profiles.title")}</span>
             <span style="display:flex;align-items:center;gap:6px;min-width:0">
               <span style="min-width:0;font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(profileLabel(list[i], i))}</span>
-              ${sy.icon ? icon(sy.icon, 13, `style="color:${sy.color};flex-shrink:0" aria-label="${esc(sy.label)}"`) : ""}
+              ${shared ? chip(T("profiles.sharedTag"), "var(--steel)") : ""}
             </span>
           </span>
           <span style="font-size:11.5px;color:var(--faint);flex-shrink:0">${TN("profile", list.length)}</span>
@@ -11100,36 +11524,50 @@ function renderProfilesWindow() {
   const stats = ui.profileStats || {};
   const active = activeProfileId();
 
-  const rows = ui.profileOrder && list.length > 1
-    ? list.map((p, i) => reorderRow("profile", i, list.length,
+  /* ── YOURS, THEN SHARED WITH YOU, AND NOTHING ELSE ─────────────────
+     This is the account's list and only the account's list: every profile
+     in it, none that is not. Each row used to carry a line saying where
+     the profile physically was — on this phone only, backed up, synced but
+     not to this account — which described the machinery rather than the
+     profile, and read as a list of things that had gone wrong. The only
+     fact a row still states is whose training it is, by putting the ones
+     somebody shared with you under their own heading, each naming who. */
+  const row = (p, i, last) => {
+    const on = p.id === active;
+    const st = stats[p.id] || { days: 0, entries: 0 };
+    const shared = profileShared(p.id);
+    return `<div style="display:flex;align-items:center;border-bottom:${last ? "none" : "1px solid var(--border-soft)"};background:${on ? "rgba(233,185,73,.06)" : "transparent"}">
+      <button ${on ? "" : `data-action="profile-switch" data-id="${esc(p.id)}"`} style="flex:1;min-width:0;display:flex;align-items:center;gap:11px;padding:13px 4px 13px 14px;text-align:left;color:var(--text)">
+        <span style="width:9px;height:9px;border-radius:5px;flex-shrink:0;background:${on ? "var(--gold)" : "var(--border)"}"></span>
+        <span style="flex:1;min-width:0">
+          <span style="display:block;min-width:0;font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(profileLabel(p, i))}</span>
+          <span style="display:block;font-size:11.5px;color:var(--faint)">${on ? T("profiles.current") + " · " : ""}${TN("day", st.days)} · ${TN("logEntry", st.entries)}</span>
+          ${shared ? `<span style="display:block;font-size:11px;margin-top:1px;color:var(--steel)">${profileShareLine(p.id)}</span>` : ""}
+        </span>
+      </button>
+      <button data-action="profile-menu" data-id="${esc(p.id)}" title="${T("common.edit")}" style="flex-shrink:0;padding:13px 14px;color:var(--faint);align-self:stretch">${icon("pencil", 16)}</button>
+    </div>`;
+  };
+
+  const withIndex = list.map((p, i) => ({ p, i }));
+  const mine = withIndex.filter((x) => !profileShared(x.p.id));
+  const theirs = withIndex.filter((x) => profileShared(x.p.id));
+  const card = (rows) => `<div class="pb-card" style="overflow:hidden;margin-bottom:12px">${rows.map((x, n) => row(x.p, x.i, n === rows.length - 1)).join("")}</div>`;
+
+  const body = ui.profileOrder && list.length > 1
+    ? `<div class="pb-card" style="overflow:hidden;margin-bottom:12px">${list.map((p, i) => reorderRow("profile", i, list.length,
         esc(profileLabel(p, i)),
-        p.id === active ? T("profiles.current") : "")).join("")
-    : list.map((p, i) => {
-      const on = p.id === active;
-      const st = stats[p.id] || { days: 0, entries: 0 };
-      const sy = syncState(p.id);
-      const own = profileOwnerLine(p.id);
-      return `<div style="display:flex;align-items:center;border-bottom:${i < list.length - 1 ? "1px solid var(--border-soft)" : "none"};background:${on ? "rgba(233,185,73,.06)" : "transparent"}">
-        <button ${on ? "" : `data-action="profile-switch" data-id="${esc(p.id)}"`} style="flex:1;min-width:0;display:flex;align-items:center;gap:11px;padding:13px 4px 13px 14px;text-align:left;color:var(--text)">
-          <span style="width:9px;height:9px;border-radius:5px;flex-shrink:0;background:${on ? "var(--gold)" : "var(--border)"}"></span>
-          <span style="flex:1;min-width:0">
-            <span style="display:flex;align-items:center;gap:6px;min-width:0">
-              <span style="min-width:0;font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(profileLabel(p, i))}</span>
-              ${sy.icon ? icon(sy.icon, 13, `style="color:${sy.color};flex-shrink:0" aria-label="${esc(sy.label)}"`) : ""}
-            </span>
-            <span style="display:block;font-size:11.5px;color:var(--faint)">${on ? T("profiles.current") + " · " : ""}${TN("day", st.days)} · ${TN("logEntry", st.entries)}</span>
-            ${/* A line of its own rather than a fourth clause on the one
-                  above: it is the answer to a different question, and the
-                  row it is answering it for is one somebody did not
-                  recognise. It also absorbs what the sync label used to
-                  say, since "shared by em · read only" states the level
-                  and whose it is in the space the level alone took. */""}
-            <span style="display:block;font-size:11px;margin-top:1px;color:${own.color}">${own.text}</span>
-          </span>
-        </button>
-        <button data-action="profile-menu" data-id="${esc(p.id)}" title="${T("common.edit")}" style="flex-shrink:0;padding:13px 14px;color:var(--faint);align-self:stretch">${icon("pencil", 16)}</button>
-      </div>`;
-    }).join("");
+        [p.id === active ? T("profiles.current") : "", profileShared(p.id) ? T("profiles.sharedTag") : ""].filter(Boolean).join(" · "))).join("")}</div>`
+    : `${sectionTitle(T("profiles.yours"))}
+       ${mine.length ? card(mine) : `<div style="font-size:12.5px;color:var(--faint);line-height:1.55;margin:0 2px 12px">${T("profiles.noneYours")}</div>`}
+       <button data-action="profile-add" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:13.5px;color:var(--gold);border-color:rgba(233,185,73,.4);margin-bottom:18px">
+         ${icon("plus", 15)} ${T("profiles.add")}
+       </button>
+       ${sectionTitle(T("profiles.sharedTitle"))}
+       ${theirs.length ? card(theirs) : `<div style="font-size:12.5px;color:var(--faint);line-height:1.55;margin:0 2px 12px">${T("profiles.noneShared")}</div>`}
+       <button data-action="open-join" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:13.5px">
+         ${icon("users", 15)} ${T("sync.joinBtn")}
+       </button>`;
 
   return fullScreen(88, `
     <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px;border-bottom:1px solid var(--border-soft)">
@@ -11138,23 +11576,8 @@ function renderProfilesWindow() {
       ${orderToggle("profiles-reorder", ui.profileOrder, list.length > 1)}
     </div>
     <div class="pb-scroll" data-scrollkey="profilesWin" style="flex:1;overflow-y:auto;padding:16px 16px calc(40px + var(--pb-sab))">
-      <div class="pb-card" style="overflow:hidden;margin-bottom:12px">${rows}</div>
-      <button data-action="profile-add" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:13.5px;color:var(--gold);border-color:rgba(233,185,73,.4)">
-        ${icon("plus", 15)} ${T("profiles.add")}
-      </button>
-      ${/* Joining is next to adding because it IS adding: what arrives is a
-            new profile of its own, never a merge into one already here. */""}
-      <button data-action="open-join" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;margin-top:8px;font-size:13.5px">
-        ${icon("cloud-download", 15)} ${T("sync.joinBtn")}
-      </button>
-      ${/* Whose list this is, said where the list is. Signed in, it is the
-            account's and the same everywhere; signed out, it is this
-            phone's and the line is simply absent rather than claiming
-            anything. */""}
-      ${accountOn() ? `<div style="display:flex;align-items:center;gap:7px;margin-top:14px;font-size:11.5px;color:var(--steel);line-height:1.4">
-        ${icon("cloud", 13, 'style="flex-shrink:0"')}<span>${T("profiles.account")}</span>
-      </div>` : ""}
-      <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin-top:14px">${T("profiles.hint")}</div>
+      ${body}
+      <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin-top:16px">${T("profiles.hint")}</div>
     </div>
   `, "profilesWin");
 }
@@ -11164,30 +11587,33 @@ function renderProfilesWindow() {
 function renderProfileForm() {
   const f = ui.profileForm;
   const ok = f.mode !== "rename" || !!(f.name || "").trim();
+  const shared = f.mode === "rename" && profileShared(f.id);
   return sheet(T("profiles." + f.mode + "Title"), "profileForm", `
+    ${shared ? `<div style="font-size:12px;color:var(--steel);line-height:1.5;margin:-4px 0 12px">${profileShareLine(f.id)}</div>` : ""}
     ${field(T("profiles.name"), `<input class="pb-input" data-bind="profileName" value="${esc(f.name)}" placeholder="${esc(T("profiles.namePlaceholder"))}" data-autofocus>`,
       T("profiles.nameHint"))}
     <button data-action="profile-form-save" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
       ${icon("check", 16)} ${T(f.mode === "rename" ? "common.saveChanges" : "profiles." + f.mode + "Btn")}
     </button>
     ${f.mode === "rename" ? `<button data-action="open-sync" data-id="${esc(f.id)}" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;margin-top:8px;font-size:13.5px;justify-content:flex-start;padding-left:14px;gap:9px">
-      ${icon(syncLinked(f.id) ? "cloud" : "cloud-off", 15, `style="color:${syncLinked(f.id) ? "var(--gold)" : "var(--faint)"}"`)} ${T("sync.entry")}
+      ${icon("users", 15, 'style="color:var(--gold)"')} ${T("share.entry")}
       <span style="flex:1"></span>
-      <span style="font-size:11.5px;color:var(--faint)">${T(syncLinked(f.id) ? (syncLinked(f.id).level === "read" ? "sync.stateRead" : "sync.stateOn") : "sync.stateOff")}</span>
       ${icon("chevron-right", 15, 'style="color:var(--faint)"')}
     </button>
     <button data-action="profile-duplicate" data-id="${esc(f.id)}" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;margin-top:8px;font-size:13.5px">
       ${icon("copy", 15)} ${T("profiles.copyBtn")}
     </button>
-    ${profileList().length > 1 ? `<button data-action="profile-delete" data-id="${esc(f.id)}" class="pb-btn" style="width:100%;padding:12px 0;margin-top:8px;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">
-      ${icon("trash-2", 15)} ${T("profiles.deleteBtn")}
-    </button>` : `<div style="font-size:11.5px;color:var(--faint);margin-top:10px;line-height:1.5">${T("profiles.lastOne")}</div>`}` : ""}
+    <button data-action="profile-delete" data-id="${esc(f.id)}" class="pb-btn" style="width:100%;padding:12px 0;margin-top:8px;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">
+      ${icon(shared ? "log-out" : "trash-2", 15)} ${T(shared ? "profiles.leaveBtn" : "profiles.deleteBtn")}
+    </button>` : ""}
   `, 118);
 }
 
-/* ── SHARING A PROFILE, AND JOINING ONE ──────────────────────────────
-   Two sheets and one rule: nothing here is on until it is switched on,
-   and the screen says what leaving the phone means before it leaves.
+/* ── SHARING A PROFILE ────────────────────────────────────────────────
+   What used to be "Sharing and sync" is only sharing now. Keeping a
+   profile the same on every device you log in on is not a setting any
+   more; it is what an account does, all the time, for every profile in
+   it, so there is nothing about it to switch or to read about here.
 
    The code itself is the whole handover. It is shown once, large, in a
    font where 0 and O cannot be confused, with a Copy button, because the
@@ -11199,43 +11625,12 @@ function renderSyncSheet() {
   const f = ui.syncSheet;
   const list = profileList();
   const i = list.findIndex((p) => p.id === f.localId);
-  const rec = syncFor(f.localId);
-  const on = !!(rec && rec.remoteId);
-  const mine = !rec || rec.level !== "read";
-  const cloud = window.ZenofitCloud;
+  const rec = syncFor(f.localId) || {};
+  const shared = profileShared(f.localId);
 
-  const when = (t) => (t ? T("sync.lastAt", { when: fmtDate(new Date(t).toISOString().slice(0, 10)) }) : T("sync.never"));
-
-  const status = on
-    ? `<div class="pb-card2" style="padding:12px 14px;margin-bottom:14px">
-        <div style="display:flex;align-items:center;gap:9px">
-          <span style="width:9px;height:9px;border-radius:5px;background:${ui.syncError ? "var(--red)" : "var(--green)"};flex-shrink:0"></span>
-          <span style="flex:1;font-weight:600;font-size:14px">${T(mine ? "sync.onTitle" : "sync.readTitle")}</span>
-          ${ui.syncBusy ? `<span style="font-size:11.5px;color:var(--faint)">${T("sync.working")}</span>` : ""}
-        </div>
-        <div style="font-size:11.5px;color:${ui.syncError ? "var(--red)" : "var(--faint)"};margin-top:5px;line-height:1.5">
-          ${ui.syncError ? T("sync.failed", { why: esc(String(ui.syncError)) }) : when(rec.lastOkAt || rec.lastPulledAt || rec.lastPushedAt)}
-        </div>
-        ${/* ── THE TWO THINGS THAT DO NOT GO UP WHOLE ──────────────────
-              Both named rather than silently dropped, and kept apart
-              because one is a shrug and the other is a job.
-
-              A PHOTO LEFT BEHIND costs nothing but the picture: the lift,
-              its cues, its history and everything else about the profile
-              are up there, and the row on the other phone says a photo
-              exists. Nothing is broken and there is nothing to do.
-
-              A ROW LEFT BEHIND is a row the other phone does not have,
-              which is worth looking at. Since the photos are handled
-              above, what lands here now is rare and genuinely odd. */
-          (rec.heldPhotos || []).length ? `<div style="font-size:11.5px;color:var(--steel);margin-top:6px;line-height:1.5">
-            ${icon("image-off", 12)} ${T("sync.photosHeld", { n: TN("syncPhoto", rec.heldPhotos.length) })} · ${T("sync.photosHeldHint")}
-          </div>` : ""}
-        ${(rec.tooBig || []).length ? `<div style="font-size:11.5px;color:var(--steel);margin-top:6px;line-height:1.5">
-            ${icon("alert-triangle", 12)} ${T("sync.tooBig", { n: TN("syncRow", rec.tooBig.length) })} · ${T("sync.tooBigHint")}
-          </div>` : ""}
-      </div>`
-    : `<div style="font-size:12.5px;color:var(--faint);line-height:1.6;margin-bottom:14px">${T("sync.offBody")}</div>`;
+  const error = ui.syncError
+    ? `<div style="font-size:12.5px;color:var(--red);line-height:1.5;margin-bottom:12px">${esc(String(ui.syncError))}</div>`
+    : "";
 
   /* the code, only ever drawn when there is one to draw: a box that says
      "your code will appear here" is a box that looks broken */
@@ -11273,225 +11668,85 @@ function renderSyncSheet() {
       }).join("")}</div>`
     : `<div style="font-size:11.5px;color:var(--faint);margin-bottom:10px;line-height:1.5">${T("sync.nobody")}</div>`;
 
-  const body = !cloud
-    ? `<div style="font-size:12.5px;color:var(--faint);line-height:1.6">${T("sync.noClient")}</div>`
-    : !on
-    ? `${status}
-       <button data-action="sync-enable" ${ui.syncBusy ? "disabled" : ""} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${ui.syncBusy ? 0.45 : 1}">
-         ${icon("cloud-upload", 16)} ${T("sync.turnOn")}
-       </button>`
-    : `${status}
-       <button data-action="sync-now" ${ui.syncBusy ? "disabled" : ""} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;margin-bottom:16px;opacity:${ui.syncBusy ? 0.45 : 1}">
-         ${icon("refresh-cw", 16)} ${T("sync.syncNow")}
-       </button>
-       ${mine ? `
-         <div class="pb-hairline" style="margin:4px 0 16px"></div>
-         ${sectionTitle(T("sync.shareTitle"))}
-         ${code}
-         <div style="display:flex;gap:8px;margin-bottom:10px">
-           <button data-action="sync-make-code" data-level="read" class="pb-btn pb-ghost" style="flex:1;padding:11px 0;font-size:13px">${icon("eye", 14)} ${T("sync.makeRead")}</button>
-           <button data-action="sync-make-code" data-level="write" class="pb-btn pb-ghost" style="flex:1;padding:11px 0;font-size:13px">${icon("pencil", 14)} ${T("sync.makeWrite")}</button>
-         </div>
-         <div style="font-size:11.5px;color:var(--faint);margin-bottom:16px;line-height:1.55">${T("sync.makeHint")}</div>
-         ${sectionTitle(T("sync.peopleTitle"))}
-         ${grants}
-       ` : `<div style="font-size:12.5px;color:var(--faint);line-height:1.6;margin-bottom:16px">${T("sync.readBody")}</div>`}
-       <div class="pb-hairline" style="margin:16px 0"></div>
-       <button data-action="sync-disable" class="pb-btn" style="width:100%;padding:12px 0;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">
-         ${icon("cloud-off", 15)} ${T(mine ? "sync.turnOff" : "sync.leave")}
-       </button>
-       <div style="font-size:11.5px;color:var(--faint);margin-top:10px;line-height:1.55">${T(mine ? "sync.turnOffHint" : "sync.leaveHint")}</div>`;
+  let body;
+  if (shared) {
+    /* Somebody else's. What there is to say is whose, and what you can do
+       in it; the way out is the same button as on the profile itself. */
+    body = `<div class="pb-card2" style="padding:13px 14px;margin-bottom:14px">
+        <div style="font-weight:600;font-size:14px;margin-bottom:4px">${profileShareLine(f.localId)}</div>
+        <div style="font-size:12px;color:var(--faint);line-height:1.55">${T(rec.level === "read" ? "sync.readBody" : "share.writeBody")}</div>
+      </div>
+      ${error}
+      <button data-action="profile-delete" data-id="${esc(f.localId)}" class="pb-btn" style="width:100%;padding:12px 0;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">
+        ${icon("log-out", 15)} ${T("profiles.leaveBtn")}
+      </button>
+      <div style="font-size:11.5px;color:var(--faint);margin-top:10px;line-height:1.55">${T("share.leaveHint")}</div>`;
+  } else if (!rec.remoteId) {
+    /* Made with no signal, and not in the account yet. It will be the
+       moment there is a connection; sharing needs it to be there first. */
+    body = `<div style="font-size:12.5px;color:var(--faint);line-height:1.6">${T("share.pending")}</div>`;
+  } else {
+    body = `${error}
+      ${code}
+      <div style="display:flex;gap:8px;margin-bottom:10px">
+        <button data-action="sync-make-code" data-level="read" ${ui.syncBusy ? "disabled" : ""} class="pb-btn pb-ghost" style="flex:1;padding:11px 0;font-size:13px">${icon("eye", 14)} ${T("sync.makeRead")}</button>
+        <button data-action="sync-make-code" data-level="write" ${ui.syncBusy ? "disabled" : ""} class="pb-btn pb-ghost" style="flex:1;padding:11px 0;font-size:13px">${icon("pencil", 14)} ${T("sync.makeWrite")}</button>
+      </div>
+      <div style="font-size:11.5px;color:var(--faint);margin-bottom:16px;line-height:1.55">${T("sync.makeHint")}</div>
+      ${sectionTitle(T("sync.peopleTitle"))}
+      ${grants}`;
+  }
 
   return sheet(T("sync.title", { name: esc(profileLabel(list[i], i)) }), "syncSheet", body, 122);
 }
 
-/* ── THE ACCOUNT, AND THE PROFILES UNDER IT ──────────────────────────
-   One sheet doing two jobs, because signing in and signing up are the
-   same two fields and making somebody choose a tab first is a decision
-   about our database, not about them. The button says which it will be,
-   and it says so from what the name currently is: a name nobody has taken
-   offers to make it, a name that exists offers to sign in to it.
+/* ── THE ACCOUNT, AND THE PROFILES IN IT ─────────────────────────────
+   Only ever drawn logged in: logged out, the whole app is the login
+   screen (see renderGate). So this is who you are, the account's
+   profiles, and the way out.
 
-   Signing in does NOT drag anybody's training onto this phone. It tells
-   you what is up there and lets you pick, one profile at a time, because
-   a phone that suddenly holds four people's logs because somebody logged
-   in is a phone nobody asked for. */
-/* The two things under the name field that change while it is being typed
-   in. Both are read by the renderer AND by updateAccountPreview, which is
-   the whole point: one answer, drawn twice, so a keystroke can repaint them
-   without repainting the field the keystroke landed in. */
-const ACCT_NAME_RE = /^[a-z0-9][a-z0-9._-]{2,23}$/;
-
-function acctNameHint(f) {
-  const name = (f.username || "").trim();
-  if (name && !ACCT_NAME_RE.test(name)) return T("acct.nameRules");
-  if (f.free === false) return T("acct.nameTaken");
-  if (f.free === true) return T("acct.nameFree");
-  return T("acct.nameHint");
-}
-
-function acctButtonKey(f) {
-  if (f.busy) return "acct.working";
-  return f.free === true ? "acct.createBtn" : f.free === false ? "acct.signInBtn" : "acct.continueBtn";
-}
-
-/* Typing must never reach render(). It rebuilds #app wholesale, which
-   throws away the input the caret is sitting in: the field came back
-   empty-ish and the cursor jumped to position 0, so "wo" then "rds" typed
-   itself backwards as "rdswo". Same rule as the strength-standards hints,
-   and the same reason. */
-function updateAccountPreview() {
-  const f = ui.accountSheet;
-  if (!f) return;
-  const hint = document.getElementById("acctNameHint");
-  const label = document.getElementById("acctGoLabel");
-  const btn = document.getElementById("acctGoBtn");
-  if (hint) hint.textContent = acctNameHint(f);
-  if (label) label.textContent = T(acctButtonKey(f));
-  if (btn) {
-    const ok = ACCT_NAME_RE.test((f.username || "").trim()) && (f.password || "").length >= 8 && !f.busy;
-    btn.disabled = !ok;
-    btn.style.opacity = ok ? 1 : 0.45;
-  }
-}
-
+   The list is the account's and nothing else, in the same two groups the
+   Profiles screen draws. It used to list every profile on the PHONE, each
+   with a word about where it was — back up, get it, on this phone, synced
+   but not to this account — and a button for whichever of those needed
+   doing. That was a list of the app's bookkeeping. A profile is either in
+   your account, and so in this list on every device you log in on, or it
+   is not in the list. */
 function renderAccountSheet() {
-  const f = ui.accountSheet;
-  const C = window.ZenofitCloud;
-  const acct = C && C.account ? C.account() : null;
-  const me = acct && acct.username;
+  const me = (signedInAs() || {}).username || "";
+  const list = profileList();
+  const active = activeProfileId();
+  const withIndex = list.map((p, i) => ({ p, i }));
+  const mine = withIndex.filter((x) => !profileShared(x.p.id));
+  const theirs = withIndex.filter((x) => profileShared(x.p.id));
 
-  if (!C) {
-    return sheet(T("acct.title"), "accountSheet",
-      `<div style="font-size:12.5px;color:var(--faint);line-height:1.6">${T("sync.noClient")}</div>`, 124);
-  }
-
-  /* ── signed in: who you are, and what is waiting ──
-     ONE LIST, AND IT IS THE SAME LIST THE PROFILES SCREEN SHOWS. This used
-     to draw only what the server handed back, so a profile made on this
-     phone and never synced was simply absent — and since the heading says
-     "Your profiles" and the screen two taps away says four of them, the
-     obvious reading was that the list had failed to refresh. It had not:
-     it was answering a different question, and never said which.
-
-     So every profile on this phone appears, in the order the Profiles
-     screen has them, each one saying where it actually is — in the
-     account, or only here — and a profile that is only here gets the one
-     button that changes that. Below them go the profiles in the account
-     that this phone does NOT hold, which is the other half of what an
-     account is for. Nothing is hidden and nothing has to be guessed at. */
-  if (me) {
-    const cloud = f.cloud || [];
-    const byRemote = new Map(cloud.map((p) => [p.profileId, p]));
-    const locals = profileList();
-    const linked = new Set(locals.map((lp) => (syncFor(lp.id) || {}).remoteId).filter(Boolean));
-    /* A profile this device has promised to remove is not "in the account
-       and missing here" — it is on its way out. Offering Get it for it is
-       how a delete reads as having done nothing. */
-    const cloudOnly = cloud.filter((p) => !linked.has(p.profileId) && !pendingFor(p.profileId));
-    const n = locals.length + cloudOnly.length;
-    let at = 0;
-    const edge = () => (++at < n ? "1px solid var(--border-soft)" : "none");
-
-    const row = (name, sub, subInk, right) =>
-      `<div style="display:flex;align-items:center;gap:10px;padding:11px 12px;border-bottom:${edge()}">
-        <span style="flex:1;min-width:0">
-          <span style="display:block;font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(name)}</span>
-          <span style="display:block;font-size:11px;color:${subInk}">${sub}</span>
-        </span>
-        ${right}
-      </div>`;
-
-    const here = `<span style="flex-shrink:0;font-size:11.5px;color:var(--green);font-weight:600">${T("acct.onThisPhone")}</span>`;
-
-    const localRows = locals.map((lp, i) => {
-      const rec = syncFor(lp.id) || {};
-      const up = rec.remoteId ? byRemote.get(rec.remoteId) : null;
-      /* Not linked at all: it exists on this phone and nowhere else, which
-         is the app's default and not a fault — every profile starts this
-         way and stays that way until somebody says otherwise. */
-      if (!rec.remoteId) {
-        return row(profileLabel(lp, i), T("acct.localOnly"), "var(--faint)",
-          `<button data-action="acct-backup" data-id="${esc(lp.id)}" ${ui.syncBusy ? "disabled" : ""} class="pb-btn pb-ghost" style="flex-shrink:0;padding:7px 12px;font-size:12px;color:var(--gold);border-color:rgba(233,185,73,.4);opacity:${ui.syncBusy ? 0.45 : 1}">${icon("cloud-upload", 13)} ${T("acct.backUp")}</button>`);
-      }
-      /* Linked, and the listing has loaded, and it is not in it: this phone
-         is signed in somewhere else than the account that profile was
-         synced under, or the grant has been taken back. Worth saying, since
-         it is the one case where a profile here is quietly not syncing. */
-      if (!up && f.loaded) {
-        return row(profileLabel(lp, i), T("acct.notInAccount"), "var(--steel)", "");
-      }
-      /* the server's answer where there is one, since a grant can change
-         under this phone; the stored level is only the stand-in until the
-         listing lands */
-      const owned = up ? up.isOwner : rec.level === "owner";
-      const lvl = rec.level === "read" ? "sync.levelRead" : owned ? "acct.owned" : "sync.levelWrite";
-      return row(profileLabel(lp, i), T(lvl), "var(--faint)", here);
-    }).join("");
-
-    /* In the account, not on this phone. The name is the server's here,
-       because there is no local one to prefer. */
-    const cloudRows = cloudOnly.map((p) =>
-      row(p.name || T("sync.joinedName"),
-        T(p.isOwner ? "acct.owned" : p.level === "read" ? "sync.levelRead" : "sync.levelWrite"), "var(--faint)",
-        `<button data-action="acct-pull" data-p="${esc(p.profileId)}" data-n="${esc(p.name || "")}" data-lv="${esc(p.level || "write")}" data-own="${p.isOwner ? "1" : "0"}" data-owner="${esc(p.ownerName || "")}" class="pb-btn pb-ghost" style="flex-shrink:0;padding:7px 12px;font-size:12px;color:var(--gold);border-color:rgba(233,185,73,.4)">${icon("cloud-download", 13)} ${T("acct.getIt")}</button>`)
-    ).join("");
-
-    return sheet(T("acct.title"), "accountSheet", `
-      <div class="pb-card2" style="padding:12px 14px;margin-bottom:16px">
-        <div class="pb-label">${T("acct.signedInAs")}</div>
-        <div class="pb-num" style="font-size:19px;font-weight:700;color:var(--gold);line-height:1.2;word-break:break-all">${esc(me)}</div>
-      </div>
-      ${sectionTitle(T("acct.yourProfiles"), f.loading ? `<span style="font-size:11px;color:var(--faint)">${T("sync.working")}</span>` : "")}
-      <div class="pb-card" style="overflow:hidden;margin-bottom:10px">${localRows}${cloudRows}</div>
-      ${f.error ? `<div style="font-size:12.5px;color:var(--red);margin-bottom:10px;line-height:1.5">${esc(f.error)}</div>` : ""}
-      ${/* The roster keeps this list in step by itself, so the ordinary
-            case has nothing to explain except what that means. The other
-            two lines are for the two states it cannot reach on its own: a
-            profile somebody has to fetch by hand, and one whose sync was
-            deliberately turned off. */""}
-      <div style="font-size:11.5px;color:var(--faint);margin-bottom:16px;line-height:1.55">${
-        cloudOnly.length ? T("acct.pullHint")
-        : locals.some((lp) => !(syncFor(lp.id) || {}).remoteId) ? T("acct.backUpHint")
-        : T("acct.rosterHint")}</div>
-      <div class="pb-hairline" style="margin:16px 0"></div>
-      <button data-action="acct-signout" class="pb-btn" style="width:100%;padding:12px 0;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">
-        ${icon("log-out", 15)} ${T("acct.signOut")}
-      </button>
-      <div style="font-size:11.5px;color:var(--faint);margin-top:10px;line-height:1.55">${T("acct.signOutHint")}</div>
-    `, 124);
-  }
-
-  /* ── signed out: name, password, one button ── */
-  const name = (f.username || "").trim();
-  const pw = f.password || "";
-  const nameOk = /^[a-zA-Z0-9][a-zA-Z0-9._-]{2,23}$/.test(name);
-  const ok = nameOk && pw.length >= 8 && !f.busy;
-  /* `free` is null until the server has answered, so the button does not
-     flicker between "sign in" and "create" while somebody is still typing */
-  const free = f.free;
-  const label = acctButtonKey(f);
+  const rows = (items) => `<div class="pb-card" style="overflow:hidden;margin-bottom:14px">${items.map((x, n) => {
+    const on = x.p.id === active;
+    const shared = profileShared(x.p.id);
+    return `<button ${on ? "" : `data-action="profile-switch" data-id="${esc(x.p.id)}"`} style="width:100%;display:flex;align-items:center;gap:10px;padding:11px 12px;text-align:left;color:var(--text);border-bottom:${n < items.length - 1 ? "1px solid var(--border-soft)" : "none"};background:${on ? "rgba(233,185,73,.06)" : "transparent"}">
+      <span style="width:8px;height:8px;border-radius:4px;flex-shrink:0;background:${on ? "var(--gold)" : "var(--border)"}"></span>
+      <span style="flex:1;min-width:0">
+        <span style="display:block;font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(profileLabel(x.p, x.i))}</span>
+        ${shared ? `<span style="display:block;font-size:11px;color:var(--steel)">${profileShareLine(x.p.id)}</span>`
+          : on ? `<span style="display:block;font-size:11px;color:var(--faint)">${T("profiles.current")}</span>` : ""}
+      </span>
+    </button>`;
+  }).join("")}</div>`;
 
   return sheet(T("acct.title"), "accountSheet", `
-    <div style="font-size:12.5px;color:var(--faint);line-height:1.6;margin-bottom:10px">${T("acct.intro")}</div>
-    ${/* Said before the password field, not after the fact: signing in is
-          what puts this phone's profiles into the account. */""}
-    <div style="font-size:12.5px;color:var(--steel);line-height:1.6;margin-bottom:16px">${T("acct.signInAdds")}</div>
-    ${/* the hint carries an id because it is rewritten WHILE you type, in
-          place, the way the strength-standards hints are: a render here
-          rebuilds the input and the caret goes back to the start, which is
-          exactly the bug this field shipped with. */
-      field(T("acct.username"),
-      `<input class="pb-input" data-bind="acctName" value="${esc(f.username)}" placeholder="${esc(T("acct.usernamePh"))}" autocapitalize="none" autocorrect="off" autocomplete="username" spellcheck="false" maxlength="24" data-autofocus>`,
-      `<span id="acctNameHint">${acctNameHint(f)}</span>`)}
-    ${field(T("acct.password"),
-      `<input class="pb-input" type="password" data-bind="acctPass" value="${esc(pw)}" autocapitalize="none" autocorrect="off" autocomplete="current-password" spellcheck="false">`,
-      T("acct.passwordHint"))}
-    ${f.error ? `<div style="font-size:12.5px;color:var(--red);margin:-4px 0 12px;line-height:1.5">${esc(f.error)}</div>` : ""}
-    <button id="acctGoBtn" data-action="acct-go" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
-      ${icon("log-in", 16)} <span id="acctGoLabel">${T(label)}</span>
+    <div class="pb-card2" style="padding:12px 14px;margin-bottom:16px">
+      <div class="pb-label">${T("acct.signedInAs")}</div>
+      <div class="pb-num" style="font-size:19px;font-weight:700;color:var(--gold);line-height:1.2;word-break:break-all">${esc(me)}</div>
+    </div>
+    ${sectionTitle(T("acct.yourProfiles"))}
+    ${mine.length ? rows(mine) : `<div style="font-size:12.5px;color:var(--faint);margin:0 2px 14px">${T("profiles.noneYours")}</div>`}
+    ${theirs.length ? sectionTitle(T("profiles.sharedTitle")) + rows(theirs) : ""}
+    <div style="font-size:11.5px;color:var(--faint);margin-bottom:16px;line-height:1.55">${T("acct.listHint")}</div>
+    <div class="pb-hairline" style="margin:16px 0"></div>
+    <button data-action="acct-signout" ${ui.signingOut ? "disabled" : ""} class="pb-btn" style="width:100%;padding:12px 0;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3);opacity:${ui.signingOut ? 0.45 : 1}">
+      ${icon("log-out", 15)} ${T(ui.signingOut ? "acct.signingOut" : "acct.signOut")}
     </button>
-    <div style="font-size:11.5px;color:var(--faint);margin-top:12px;line-height:1.55">${T("acct.warning")}</div>
+    <div style="font-size:11.5px;color:var(--faint);margin-top:10px;line-height:1.55">${T("acct.signOutHint")}</div>
   `, 124);
 }
 
@@ -12651,11 +12906,17 @@ const actions = {
   "profile-delete": (el) => {
     const list = profileList();
     const i = list.findIndex((p) => p.id === el.dataset.id);
-    if (i < 0 || list.length < 2) return;
-    const st = (ui.profileStats || {})[list[i].id] || { days: 0, entries: 0 };
-    if (!confirm(T("profiles.confirmDelete", {
-      name: profileLabel(list[i], i), days: TN("day", st.days), sets: TN("logEntry", st.entries),
-    }))) return;
+    if (i < 0) return;
+    const st = (ui.profileStats || profileStats())[list[i].id] || { days: 0, entries: 0 };
+    /* Somebody else's profile is not yours to delete, and saying "delete"
+       over it would be a lie in both directions: their training is not
+       touched, and yours never had it. It leaves your account instead. */
+    const shared = profileShared(list[i].id);
+    if (!confirm(shared
+      ? T("profiles.confirmLeave", { name: profileLabel(list[i], i) })
+      : T("profiles.confirmDelete", {
+        name: profileLabel(list[i], i), days: TN("day", st.days), sets: TN("logEntry", st.entries),
+      }))) return;
     /* ── DELETING TAKES IT OUT OF THE ACCOUNT, ON EVERY DEVICE ─────
        Read the link BEFORE the local delete, which drops it.
 
@@ -12672,9 +12933,9 @@ const actions = {
        guess from the level string, because that is the one field that
        actually decides which of the two is true. */
     const link = syncLinked(list[i].id);
-    if (link && link.remoteId) queueRemoval(link.remoteId, link.owned ? "delete" : "leave");
+    if (link && link.remoteId) queueRemoval(link.remoteId, shared ? "leave" : "delete");
     deleteProfile(list[i].id);
-    ui.profileForm = null;
+    ui.profileForm = null; ui.syncSheet = null;
     ui.profileStats = profileStats();
     render();
     /* Out of the account NOW rather than at the next poll. Somebody who
@@ -12717,146 +12978,93 @@ const actions = {
 
   "open-account": () => {
     ui.profileForm = null;
-    ui.accountSheet = { username: "", password: "", free: null, busy: false, error: null, cloud: [], loading: false, loaded: false };
+    ui.accountSheet = {};
     render();
-    rosterSync().then(() => refreshCloudProfiles());
+    rosterSync();
   },
 
-  /* One button, because "sign in" and "sign up" are the same two fields and
-     the server already knows which this is. A name nobody has taken is a
-     registration; anything else is a login, and a login that is wrong says
-     so rather than quietly creating a second account beside the first. */
-  "acct-go": async () => {
-    const f = ui.accountSheet;
+  /* ── LOGGING IN, AND ASKING BEFORE AN ACCOUNT IS MADE ───────────────
+     Log in first, always. Only a login the server refuses leads anywhere
+     near creating an account, and even then only when the name is really
+     free — a name that exists and a wrong password is just a wrong
+     password. A free name does NOT become an account on the spot: the
+     screen asks, because a typo in your own username is the likeliest way
+     to reach this branch and an empty new account is the worst answer to
+     it. */
+  "login-go": async () => {
+    const f = ui.login;
     const C = window.ZenofitCloud;
-    if (!f || f.busy || !C) return;
-    const username = (f.username || "").trim();
-    const password = f.password || "";
-    ui.accountSheet = { ...f, busy: true, error: null }; render();
+    if (!f || !C || !loginReady(f)) return;
+    const username = f.username.trim();
+    ui.login = { ...f, busy: true, error: null, confirmCreate: false }; render();
     try {
-      /* asked fresh rather than trusting what the field last saw: somebody
-         else may have taken the name in the seconds since */
-      let free = f.free;
-      try { free = (await C.nameAvailable(username)).available; } catch { /* decide from the attempt instead */ }
-      if (free) await C.register(username, password);
-      else await C.signIn(username, password);
-      /* Whoever this browser was a moment ago, it is somebody else now.
-         A chat cache is per ACCOUNT (see chatRead), and a friend signing
-         in on a borrowed phone must not be handed the last person's
-         conversations while the first poll is still in flight. */
-      chatForget();
-      ui.chatThread = null; ui.chatMenu = null; ui.chatFind = ""; ui.chatResults = null;
-      /* …and the profiles, for the same reason one level up: the sync
-         records on this device were made under whoever was signed in
-         before. Done HERE rather than left to the roster pass below so
-         nothing in between — an autosave, a poll — can act on a link
-         belonging to the previous account. */
-      reconcileAccount();
-      ui.accountSheet = { ...ui.accountSheet, busy: false, password: "", free: null, error: null };
+      await C.signIn(username, f.password);
+    } catch (e) {
+      if (e && e.code === "bad_login") {
+        let free = false;
+        try { free = !!(await C.nameAvailable(username)).available; } catch { /* say wrong password */ }
+        ui.login = { ...ui.login, busy: false, confirmCreate: free, error: free ? null : T("acct.errWrong") };
+      } else {
+        ui.login = { ...ui.login, busy: false, error: T("login.offline") };
+      }
       render();
-      chatLastPoll = 0;
-      chatPoll();
-      /* the whole point of signing in: this device's list becomes the
-         account's list, and whatever was only here goes up to join it */
-      await rosterSync({ force: true });
-      refreshCloudProfiles();
+      return;
+    }
+    await enterAccount();
+  },
+  "login-create": async () => {
+    const f = ui.login;
+    const C = window.ZenofitCloud;
+    if (!f || !C || f.busy) return;
+    if ((f.password || "").length < 8) {
+      ui.login = { ...f, error: T("login.pwShort") }; updateLoginForm(); return;
+    }
+    ui.login = { ...f, busy: true, error: null }; render();
+    try {
+      await C.register(f.username.trim(), f.password);
     } catch (e) {
       const code = e && e.code;
-      ui.accountSheet = { ...ui.accountSheet, busy: false, error: T(
-        code === "bad_login" ? "acct.errWrong"
-        : code === "name_taken" ? "acct.errTaken"
+      ui.login = { ...ui.login, busy: false, confirmCreate: code !== "name_taken" && code !== "bad_username", error: T(
+        code === "name_taken" ? "acct.errTaken"
         : code === "bad_username" ? "acct.nameRules"
-        : code === "already_claimed" ? "acct.errClaimed"
-        : "acct.errFailed") };
+        : "login.offline") };
       render();
+      return;
     }
+    await enterAccount();
   },
-
-  /* Signing out forgets the credential and nothing else. Every profile on
-     this phone stays exactly where it is, including synced ones — they
-     simply stop syncing until somebody signs in again. Deleting training
-     because a session ended is not a thing this app will ever do. */
-  "acct-signout": () => {
-    const C = window.ZenofitCloud;
-    if (!C || !confirm(T("acct.confirmSignOut"))) return;
-    C.signOut();
-    /* The messages are the one thing signing out DOES clear off the
-       phone, and the sentence above is why that is consistent rather than
-       an exception: they are not this device's training, they are the
-       account's conversations, and the server still has every one of them
-       for whenever somebody signs back in. */
-    chatForget();
-    ui.chatThread = null; ui.chatMenu = null; ui.chatFind = ""; ui.chatResults = null;
-    ui.accountSheet = { username: "", password: "", free: null, busy: false, error: null, cloud: [], loading: false, loaded: false };
+  "login-cancel": () => {
+    ui.login = { ...ui.login, confirmCreate: false, error: null };
     render();
   },
 
-  /* ── THE OTHER DIRECTION, FROM THE LIST THAT SHOWS WHAT IS MISSING ──
-     Turning sync on has always lived behind Profiles → the pencil → Sync,
-     which is the right home for it and the wrong place to NOTICE it: the
-     account sheet is where you see, in one list, that two of your four
-     profiles are only on this phone. So the same move is offered there, on
-     the row that says so, behind the same confirm — this is still the
-     moment a training log starts leaving the device.
-
-     It does not require the profile to be the one on screen, which Sync →
-     Turn on does: that restriction is there because syncNow PULLS, and a
-     pull writes into `state`, which is whichever profile is open. A first
-     push has nothing to pull — the cloud profile was minted empty one line
-     above — so it pushes from the profile's own saved state and stops. */
-  "acct-backup": async (el) => {
-    const localId = el.dataset.id;
-    const list = profileList();
-    const i = list.findIndex((p) => p.id === localId);
-    if (i < 0 || ui.syncBusy || syncLinked(localId)) return;
-    if (!confirm(T("sync.confirmOn"))) return;
-    const C = window.ZenofitCloud;
-    if (!C) return;
-    ui.syncBusy = true;
-    ui.accountSheet = { ...ui.accountSheet, error: null };
-    render();
-    try {
-      await C.ensureDevice();
-      /* Minted exactly as the roster mints one (rosterSync step 4), name
-         stamp and position included. Sending neither left the server to
-         stamp the name with ITS clock while the record here carried this
-         phone's, and the two are routinely seconds apart — so the very
-         next roster pass read the server's as the later one and handed
-         the phone back a name it had just sent up. */
-      const at = Date.now();
-      const made = await C.createProfile(profileLabel(list[i], i), { position: i, nameUpdatedAt: at });
-      /* linked BEFORE the push, so one that dies half way leaves a profile
-         that knows where it lives rather than an orphan on the server */
-      syncSet(localId, { remoteId: made.profileId || made.id, level: "write", owned: true, marks: {}, cursor: null,
-        noSync: false, nameAt: at, srvName: made.name, srvNameAt: at, pos: i, seen: true,
-        acct: acctUserId(), ownerName: ((window.ZenofitCloud.account() || {}).username || null) });
-      await syncPush(localId);
-      syncSet(localId, { lastOkAt: Date.now() });
-    } catch (e) {
-      ui.accountSheet = { ...ui.accountSheet, error: syncErrText(e) };
-    }
-    ui.syncBusy = false;
-    render();
-    refreshCloudProfiles();
+  /* ── LOGGING OUT SENDS FIRST, THEN SAYS WHAT IT COULD NOT ───────────
+     Everything this account did on this device is sent before anything
+     else happens, all of it rather than only the profile on screen. If
+     some of it could not go — no signal, usually — the confirm says how
+     much and where it will be: still on this phone, reachable from Storage
+     check with this account's password, and on its way up the moment this
+     account logs in here again. Nothing is deleted either way. */
+  "acct-signout": async () => {
+    if (ui.signingOut) return;
+    ui.signingOut = true; render();
+    try { await flushAccount(); } catch { /* counted below */ }
+    const n = accountUnsynced();
+    ui.signingOut = false;
+    if (!confirm(n ? T("acct.confirmSignOutUnsynced", { n }) : T("acct.confirmSignOut"))) { render(); return; }
+    leaveAccount();
   },
 
-  /* Bring one down as a NEW local profile, the same rule joining follows:
-     never merged into one that already holds somebody's training. */
-  "acct-pull": async (el) => {
-    const f = ui.accountSheet;
-    if (!f || f.busy) return;
-    const remoteId = el.dataset.p;
-    /* the level the listing reported, not an assumption: one of these can
-       be somebody else's profile shared with the account for reading */
-    const level = el.dataset.lv === "read" ? "read" : "write";
-    const localId = addProfile(el.dataset.n || T("sync.joinedName"), { forRemote: true });
-    if (!localId) { ui.accountSheet = { ...f, error: T("profiles.quota") }; render(); return; }
-    syncSet(localId, { remoteId, level, owned: el.dataset.own === "1", marks: {}, cursor: null, live: level === "read",
-      acct: acctUserId(), ownerName: el.dataset.own === "1" ? ((window.ZenofitCloud.account() || {}).username || null) : (el.dataset.owner || null) });
-    ui.accountSheet = null;
-    if (level === "read") { try { localStorage.removeItem(stateKeyFor(localId)); } catch { /* none yet */ } }
-    switchProfile(localId);
-    if (level !== "read") await syncNow(localId);
+  /* The no-profiles screen's one field. Made, opened, and sent up to the
+     account straight away, like a profile made from the Profiles screen. */
+  "first-profile-create": () => {
+    const id = addProfile((ui.firstProfileName || "").trim());
+    if (!id) { render(); return; }
+    ui.firstProfileName = "";
+    syncSet(id, { nameAt: Date.now() });
+    landOnFirstProfile();
+    render();
+    rosterSync({ force: true });
   },
   /* ── sharing a profile ───────────────────────────────────────────────
      Every one of these talks to a network, so every one of them can fail
@@ -12868,73 +13076,6 @@ const actions = {
     ui.syncError = null;
     render();
     refreshGrants();
-  },
-
-  /* Turning it on is the moment the training starts leaving the phone, so
-     it asks, in as many words, once. */
-  "sync-enable": async () => {
-    const f = ui.syncSheet;
-    if (!f || ui.syncBusy) return;
-    if (f.localId !== activeProfileId()) { alert(T("sync.switchFirst")); return; }
-    if (!confirm(T("sync.confirmOn"))) return;
-    const C = window.ZenofitCloud;
-    if (!C) return;
-    ui.syncBusy = true; ui.syncError = null; render();
-    try {
-      await C.ensureDevice();
-      const list = profileList();
-      const i = list.findIndex((p) => p.id === f.localId);
-      /* same mint as acct-backup and as the roster's own: see there */
-      const at = Date.now();
-      const made = await C.createProfile(profileLabel(list[i], i), { position: i, nameUpdatedAt: at });
-      /* linked BEFORE the first push, so a push that dies half way leaves a
-         profile that knows where it lives and can simply be synced again,
-         rather than an orphan on the server nothing points at */
-      syncSet(f.localId, { remoteId: made.profileId || made.id, level: "write", owned: true, marks: {}, cursor: null,
-        noSync: false, nameAt: at, srvName: made.name, srvNameAt: at, pos: i, seen: true,
-        acct: acctUserId(), ownerName: ((window.ZenofitCloud.account() || {}).username || null) });
-      ui.syncBusy = false;
-      await syncNow(f.localId);
-    } catch (e) {
-      ui.syncBusy = false;
-      ui.syncError = syncErrText(e);
-      render();
-    }
-  },
-
-  "sync-now": async () => {
-    const f = ui.syncSheet;
-    if (!f || ui.syncBusy) return;
-    if (f.localId !== activeProfileId()) { alert(T("sync.switchFirst")); return; }
-    await syncNow(f.localId);
-    refreshGrants();
-  },
-
-  /* Off, never out: the local profile keeps every set it has. What goes is
-     the link and the marks, so turning it back on is a fresh full push
-     rather than a diff against a server this device has stopped following. */
-  "sync-disable": () => {
-    const f = ui.syncSheet;
-    if (!f) return;
-    const rec = syncFor(f.localId);
-    const mine = !rec || rec.level !== "read";
-    if (!confirm(T(mine ? "sync.confirmOff" : "sync.confirmLeave"))) return;
-    /* A record with no link, saying so. syncForget alone would leave the
-       roster free to adopt the same profile back on its very next pass,
-       which is a Turn-off button that does not turn anything off. */
-    const link = syncLinked(f.localId);
-    syncForget(f.localId);
-    syncSet(f.localId, { noSync: true });
-    if (link) dropRemote(link.remoteId, true);
-    /* Somebody else's profile: LEAVING it is a fact about the account, not
-       about this phone, so it is queued like a delete and reaches every
-       device you are signed in on. Your own profile keeps its cloud copy —
-       turning sync off here is this device stepping back, not a decision
-       about the other ones. */
-    if (link && !link.owned) queueRemoval(link.remoteId, "leave");
-    ui.syncSheet = { ...f, grants: [], code: null };
-    ui.syncError = null;
-    render();
   },
 
   /* ── ONE LIVE CODE AT A TIME, WHICH IS WHAT THE SHEET ALREADY SAID ──
@@ -13083,28 +13224,63 @@ const actions = {
     location.href = "push-test.html";
   },
   /* Read-only, both of them, so they still work on a device too full to
-     save anything. Nothing is awaited before the share, see shareFile. */
+     save anything. Nothing is awaited before the share, see shareFile —
+     except where the save is another account's, which asks for that
+     account's password first and then carries on by itself. */
   "storage-export": (el) => {
+    const row = storageScan().rows.find((r) => r.key === el.dataset.key);
+    if (storLocked(row)) { storAskPassword(row, "export"); return; }
     const f = storageFileFor(el.dataset.key);
     if (f) downloadText(f.name, f.text);
   },
   "storage-share": (el) => {
+    const row = storageScan().rows.find((r) => r.key === el.dataset.key);
+    if (storLocked(row)) { storAskPassword(row, "share"); return; }
     const f = storageFileFor(el.dataset.key);
     if (f) shareFile(f.name, f.text);
   },
-  "close-storage": () => { ui.showStorage = false; render(); },
+  "close-storage": () => { ui.showStorage = false; ui.storUnlock = null; ui.storUnlocked = new Set(); render(); },
   /* The only write on that screen, and it only ever ADDS: it asks first,
      names what it found so the answer is about a real number of sessions
-     rather than a key, and hands off to switchProfile, which parks and
-     flushes whatever is open before it moves. */
+     rather than a key, and hands off to adoptStorage. A save belonging to
+     another account asks for that account's password before anything
+     else, and then says in as many words that it is about to land in the
+     account you are logged in to, which is not the one it came from. */
   "storage-adopt": (el) => {
     const row = storageScan().rows.find((r) => r.key === el.dataset.key);
-    if (!row || !row.ok) return;
-    if (!confirm(T("stor.confirmRecover", {
-      days: TN("day", row.days), sets: TN("logEntry", row.entries),
-    }))) return;
-    ui.showStorage = false; ui.showProfile = false; ui.profileDraft = null;
-    if (!adoptStorage(el.dataset.key)) render();
+    if (!row || !row.ok || row.mine) return;
+    if (storLocked(row)) { storAskPassword(row, "recover"); return; }
+    storRecover(row);
+  },
+  "stor-unlock-go": async () => {
+    const f = ui.storUnlock;
+    const C = window.ZenofitCloud;
+    if (!f || f.busy || !C || !C.verifyPassword) return;
+    const row = storageScan().rows.find((r) => r.key === f.key);
+    if (!row || !row.owner) { ui.storUnlock = null; render(); return; }
+    ui.storUnlock = { ...f, busy: true, error: null }; render();
+    let who;
+    try {
+      who = await C.verifyPassword(f.username.trim(), f.password);
+    } catch (e) {
+      ui.storUnlock = { ...ui.storUnlock, busy: false, password: "",
+        error: T(e && e.code === "bad_login" ? "stor.unlockWrong" : "stor.unlockOffline") };
+      render();
+      return;
+    }
+    /* the right password for the wrong account opens nothing */
+    if (!who || who.userId !== row.owner.userId) {
+      ui.storUnlock = { ...ui.storUnlock, busy: false, password: "", error: T("stor.unlockWrongAcct") };
+      render();
+      return;
+    }
+    ownerNameLearn(who.userId, who.username);
+    ui.storUnlocked = new Set([...(ui.storUnlocked || []), who.userId]);
+    ui.storUnlock = null;
+    render();
+    if (f.then === "recover") storRecover(storageScan().rows.find((r) => r.key === f.key));
+    else if (f.then === "export") { const file = storageFileFor(f.key); if (file) downloadText(file.name, file.text); }
+    else if (f.then === "share") { const file = storageFileFor(f.key); if (file) shareFile(file.name, file.text); }
   },
   "reset-all": () => {
     if (confirm(T("profile.confirmReset"))) {
@@ -14574,8 +14750,9 @@ const READ_OK = new Set([
   "open-profile", "close-profile", "open-profiles", "close-profiles", "profile-switch",
   "profile-menu", "profile-add", "profile-duplicate", "profile-delete", "profile-form-save",
   "profiles-reorder",
-  "open-sync", "sync-now", "sync-disable", "sync-copy-code",
-  "open-account", "acct-go", "acct-signout", "acct-pull", "acct-backup",
+  "open-sync", "sync-copy-code",
+  "open-account", "acct-signout", "login-go", "login-create", "login-cancel", "first-profile-create",
+  "stor-unlock-go",
   "live-retry", "refresh-now",
   "open-join", "join-go", "open-push-test",
   "chart-zoom-in", "chart-zoom-out", "chart-reset", "chart-full", "chart-exit-full", "chart-pick",
@@ -14768,7 +14945,7 @@ function handleBind(el) {
     }
     const btn = document.getElementById("stdCheckBtn");
     if (btn) { const ok = stdReady(f); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
-  } else if (bind === "acctName") {
+  } else if (bind === "loginName" || bind === "unlockName") {
     /* Lower-cased as it is typed, because that is what it will be compared
        as anyway (username_lc), and a name that reads back differently from
        what you signed up with is a name you will mistrust.
@@ -14777,7 +14954,7 @@ function handleBind(el) {
        the name too short to check, and render() rebuilds #app: the input
        the caret was sitting in was thrown away and replaced, so the cursor
        went to position 0 and "wo" followed by "rds" came out "rdswo". The
-       hint and the button are patched in place instead. */
+       button and the messages under it are patched in place instead. */
     const clean = v.toLowerCase().replace(/[^a-z0-9._-]/g, "").slice(0, 24);
     if (el.value !== clean) {
       /* only ever rewritten when the cleaning actually removed something,
@@ -14786,29 +14963,23 @@ function handleBind(el) {
       el.value = clean;
       try { el.setSelectionRange(cut, cut); } catch { /* not a text field */ }
     }
-    ui.accountSheet = { ...ui.accountSheet, username: clean, free: null, error: null };
-    updateAccountPreview();
-    /* Asked while typing, and only once it could possibly be valid. The
-       answer decides whether the button offers to sign in or to create, so
-       it has to arrive before the button is pressed, not after. */
-    clearTimeout(acctNameTimer);
-    if (ACCT_NAME_RE.test(clean)) {
-      const asked = clean;
-      acctNameTimer = setTimeout(() => {
-        const C = window.ZenofitCloud;
-        if (!C || !C.nameAvailable) return;
-        C.nameAvailable(asked).then((r) => {
-          /* the field has moved on: this answer is about a name nobody is
-             looking at any more */
-          if (!ui.accountSheet || ui.accountSheet.username !== asked) return;
-          ui.accountSheet = { ...ui.accountSheet, free: !!r.available };
-          updateAccountPreview();
-        }).catch(() => { /* the attempt itself will say */ });
-      }, 450);
+    if (bind === "loginName") {
+      /* a different name is a different question: "create it?" was about
+         the one that was there a keystroke ago */
+      ui.login = { ...ui.login, username: clean, error: null, confirmCreate: false };
+      updateLoginForm();
+    } else {
+      ui.storUnlock = { ...ui.storUnlock, username: clean, error: null };
+      updateUnlockForm();
     }
-  } else if (bind === "acctPass") {
-    ui.accountSheet = { ...ui.accountSheet, password: v, error: null };
-    updateAccountPreview();
+  } else if (bind === "loginPass") {
+    ui.login = { ...ui.login, password: v, error: null };
+    updateLoginForm();
+  } else if (bind === "unlockPass") {
+    ui.storUnlock = { ...ui.storUnlock, password: v, error: null };
+    updateUnlockForm();
+  } else if (bind === "firstProfileName") {
+    ui.firstProfileName = v;
   } else if (bind === "joinCode") {
     /* ── TYPING A CODE SOMEBODY READ OUT TO YOU ────────────────────────
        The seed is printed XXXX-XXXX-XX and it is usually being copied off
@@ -15014,7 +15185,8 @@ window.addEventListener("click", function once() {
 
 /* Put back whatever was half-finished when the app last went away: the open
    workout, the exercise you were mid-way through, even the set editor. */
-(function restoreDrafts() {
+function restoreDrafts() {
+  if (!profiles.active) return;
   const d = state.drafts || {};
   if (d.workout) ui.workoutSheet = d.workout;
   if (d.entry) ui.entryForm = d.entry;
@@ -15022,7 +15194,8 @@ window.addEventListener("click", function once() {
   if (d.body) { ui.bodyForm = d.body; ui.bodyFormWasNew = !!d.bodyWasNew; }
   if (ui.workoutSheet || ui.entryForm) ui.tab = "log";
   else if (ui.bodyForm) ui.showBody = true;   // the form lives inside that window
-})();
+}
+restoreDrafts();
 
 applyTheme(state.settings.theme);
 applyViewport();        // size the frame to this device before it is first drawn
@@ -15044,10 +15217,6 @@ startTimerEngine();
     const rec = syncFor(p.id);
     if (rec && rec.level === "read" && !rec.live) liveAdopt(p.id);
   }
-  /* First, because everything below reads the sync records and they may
-     have been written under a different account than the one this device
-     is signed in as now. */
-  reconcileAccount();
   if (syncLive(activeProfileId())) liveEnter(activeProfileId());
   else syncQuiet();          // catch up on whatever the other phone did while this one was shut
   /* and the list itself, which is what makes a device that has just been

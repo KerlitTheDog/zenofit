@@ -107,6 +107,19 @@ check("unknown user is the SAME 401", s == 401 and b.get("error") == "bad_login"
 s, b = call("POST", "/v1/auth/login", body={"username": NAME, "key": PW})
 check("a raw password never signs in", s == 401, (s, b))
 
+print("\n== checking a password without signing in (Storage check) ==")
+s, b = call("POST", "/v1/auth/verify", body={"username": NAME, "key": derive(NAME, PW)})
+check("right password is recognised", s == 200 and b.get("userId") == NEW_USER and b.get("username") == NAME, (s, b))
+check("and no token comes back", "token" not in b, b)
+s, b = call("POST", "/v1/auth/verify", body={"username": NAME.upper(), "key": derive(NAME.upper(), PW)})
+check("the name's case does not matter", s == 200 and b.get("userId") == NEW_USER, (s, b))
+s, b = call("POST", "/v1/auth/verify", body={"username": NAME, "key": derive(NAME, "wrong password")})
+check("wrong password is 401", s == 401 and b.get("error") == "bad_login", (s, b))
+s, b = call("POST", "/v1/auth/verify", body={"username": "zt_nobody_" + tag, "key": derive("zt_nobody_" + tag, PW)})
+check("unknown user is the SAME 401", s == 401 and b.get("error") == "bad_login", (s, b))
+s, b = call("POST", "/v1/auth/verify", body={"username": NAME, "key": PW})
+check("a raw password is never accepted", s == 401, (s, b))
+
 print("\n== the salt is the username, so the key is portable ==")
 check("same name and password derive the same key", derive(NAME, PW) == derive(NAME.upper(), PW),
       "case of the username must not change the key")

@@ -157,6 +157,16 @@
     try { localStorage.removeItem(DEVICE_KEY); } catch { /* already gone */ }
   }
 
+  /* Does this password open this account? Answered without signing in:
+     nothing is stored here and the server issues no token. Storage check
+     asks it before handing out training that belongs to an account this
+     phone is not signed in to. Resolves {userId, username}; a wrong pair
+     throws 401 bad_login like signIn does. */
+  async function verifyPassword(username, password) {
+    const key = await deriveKey(username, password);
+    return call("POST", "/v1/auth/verify", { username, key }, { noAuth: true });
+  }
+
   const nameAvailable = (username) =>
     call("GET", "/v1/auth/available?username=" + encodeURIComponent(username), undefined, { noAuth: true });
 
@@ -471,7 +481,7 @@
   window.ZenofitCloud = {
     API,
     ensureDevice, hasDevice,
-    deriveKey, register, signIn, signOut, account, signedIn, nameAvailable,
+    deriveKey, register, signIn, signOut, account, signedIn, nameAvailable, verifyPassword,
     isStandalone, isIOS, pushBlockedReason,
     enablePush, disablePush, pushEnabled, testPush,
     scheduleTimer, cancelTimer, clockDrift,

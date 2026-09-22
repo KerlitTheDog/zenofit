@@ -1,12 +1,14 @@
 /* Zenofit service worker.
    Two jobs:
    1. Cache the app shell so it opens instantly and works offline.
-   2. Receive web pushes so a timer can fire while the app is closed.
+   2. Receive web pushes, so a timer can fire and a message can arrive while
+      the app is closed. Those two want opposite things from a notification
+      and the push handler below says which is which.
 
    Scope note: this file must stay in the repo root. A service worker can only
    control pages at or below its own URL, and the app lives at /zenofit/.       */
 
-const VERSION = "zenofit-v23";
+const VERSION = "zenofit-v24";
 const SHELL = [
   "./",
   "./index.html",
@@ -64,23 +66,59 @@ self.addEventListener("fetch", (e) => {
 
 /* ---- Web push -------------------------------------------------------------
    The page is frozen or gone by the time this runs. A visible notification is
-   mandatory: skip it and Chrome eventually revokes push permission.           */
+   mandatory: skip it and Chrome eventually revokes push permission.
+
+   ONE EXCEPTION, AND IT IS THE ONE THE SPEC ALLOWS: a window that is on
+   screen RIGHT NOW. A notification for a message you are watching arrive is
+   noise, and the permission budget is spent on pushes that show nothing,
+   which is not what this does — it hands the push to the page instead, and
+   the page is what the user sees. Only a FOCUSED client counts. "A tab
+   exists" is not the same claim: an installed app sitting behind the lock
+   screen still has its window, and that is exactly when a message has to
+   ring.
+
+   A timer is deliberately not treated this way. It already rings locally
+   when the page is alive (fireTimer cancels the server's copy on the way
+   past) so a timer push arriving at all means the page did NOT get there,
+   and it must be shown whatever any window claims.                         */
 self.addEventListener("push", (e) => {
   let d = {};
   try { d = e.data ? e.data.json() : {}; } catch { d = { title: "Zenofit" }; }
 
-  const title = d.title || "Zenofit";
-  const opts = {
-    body: d.body || "",
-    icon: "./icon-192.png",
-    badge: "./icon-192.png",
-    tag: d.tag || "zenofit",
-    renotify: true,
-    requireInteraction: d.requireInteraction !== false,   // timers should wait to be seen
-    vibrate: [250, 120, 250, 120, 400],
-    data: { url: d.url || "./", kind: d.kind || "generic", id: d.id || null },
-  };
-  e.waitUntil(self.registration.showNotification(title, opts));
+  e.waitUntil((async () => {
+    const kind = d.kind || "generic";
+
+    if (kind === "chat") {
+      const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+      const live = clients.filter((c) => c.url.startsWith(self.registration.scope));
+      const watching = live.some((c) => c.focused && c.visibilityState === "visible");
+
+      /* Tell every window either way, focused or not: the one behind the
+         lock screen wants the message waiting for it when it comes back,
+         and it costs nothing to say so now. */
+      for (const c of live) {
+        c.postMessage({ type: "chat-push", data: { threadId: d.id || null, from: d.title || null, at: Date.now() } });
+      }
+      if (watching) return;
+    }
+
+    return self.registration.showNotification(d.title || "Zenofit", {
+      body: d.body || "",
+      icon: "./icon-192.png",
+      badge: "./icon-192.png",
+      /* One notification per conversation rather than one per message, so a
+         burst of five replies is one line in the shade and not five. */
+      tag: d.tag || "zenofit",
+      renotify: true,
+      /* A timer waits to be acknowledged because missing it ends the set.
+         A message does not: it is still there when you pick the phone up,
+         and a notification that refuses to go away is a notification
+         people turn off. The server says which this is. */
+      requireInteraction: d.requireInteraction !== false,
+      vibrate: kind === "chat" ? [120, 80, 120] : [250, 120, 250, 120, 400],
+      data: { url: d.url || "./", kind, id: d.id || null },
+    });
+  })());
 });
 
 self.addEventListener("notificationclick", (e) => {

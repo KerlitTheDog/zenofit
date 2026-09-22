@@ -109,6 +109,21 @@ body { background: var(--outer); }
   --pb-fab-b:calc(var(--pb-nav-h) + 25px);
   --pb-toast-b:calc(var(--pb-nav-h) + 19px);
 
+  /* How much of the frame the on-screen keyboard is covering, in the
+     frame's own units, written by applyViewport() and zero the rest of
+     the time. index.html explains why the keyboard is left to OVERLAY
+     the app rather than resize it, and names the price: a bar parked at
+     the bottom of the frame ends up underneath it.
+
+     EXACTLY ONE THING SPENDS THIS, deliberately: the chat composer,
+     which is the only control in the app the keyboard can bury (every
+     other bottom sheet scrolls). It is spent as padding on the whole
+     conversation layer, so the message list shrinks by the same amount
+     instead of the composer being lifted on top of the newest message.
+     Anything else reaching for it should first ask whether it really
+     cannot scroll. */
+  --pb-kb:0px;
+
   --pb-vh:100vh;
 }
 /* dvh tracks the mobile browser chrome opening and closing; the 100vh above

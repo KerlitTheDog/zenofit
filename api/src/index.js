@@ -13,12 +13,16 @@
  *
  * Phase 2 and 3: identity, profiles, seeds, grants.
  * Phase 4 adds /v1/profiles/:id/changes, Phase 5 adds push and timers.
+ * Phase 6 adds chat, which lives in chat.js and touches none of the above:
+ * a message belongs to an ACCOUNT and travels to another person, where
+ * everything else here belongs to a profile and travels between devices.
  */
 
 import { cleanUsername, cleanKey, newSalt, hashKey, sameHash } from "./auth.js";
 import { newSeed, normalizeSeed } from "./seeds.js";
 import { accessFor, canRead, canWrite, canAdmin } from "./access.js";
 import { sendToUser } from "./push.js";
+import { chatRoute } from "./chat.js";
 import {
   validateItem, encodeCursor, decodeCursor,
   MAX_ITEMS_PER_PUSH, MAX_PUSH_BODY_BYTES,
@@ -150,7 +154,7 @@ function safeParse(text) {
 
 /* ---- routes --------------------------------------------------------------- */
 
-async function route(request, env, url) {
+async function route(request, env, url, ctx) {
   const method = request.method;
   const p = url.pathname.replace(/\/+$/, "") || "/";
   const seg = p.split("/").filter(Boolean);          // ['v1','profiles','<id>','seeds']
@@ -288,6 +292,24 @@ async function route(request, env, url) {
 
   if (p === "/v1/me" && method === "GET") {
     return json({ userId: user.id, displayName: user.display_name, createdAt: user.created_at });
+  }
+
+  /* ---- chat --------------------------------------------------------------
+   * Its own file, and one line here, because chat shares nothing with the
+   * rest of this router but the token it was let in on: no profile, no
+   * grant, no item. See the top of chat.js for why it is not sync.
+   *
+   * It is handed this file's reply helpers rather than growing its own, and
+   * `waitUntil` so a message can be stored and answered without waiting on
+   * a push service. Returns null when the path is not one of its own, and
+   * the list below carries on.                                            */
+  if (seg[0] === "v1" && (seg[1] === "chats" || (seg[1] === "users" && seg[2] === "search"))) {
+    const res = await chatRoute({
+      request, env, url, method, seg, user,
+      json, fail, readJson, newId, sendToUser,
+      waitUntil: ctx && ctx.waitUntil ? (p2) => ctx.waitUntil(p2) : null,
+    });
+    if (res) return res;
   }
 
   if (p === "/v1/me" && method === "PUT") {
@@ -956,13 +978,13 @@ async function route(request, env, url) {
 }
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const cors = corsHeaders(request, env);
 
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
 
     try {
-      const res = await route(request, env, new URL(request.url));
+      const res = await route(request, env, new URL(request.url), ctx);
       const headers = new Headers(res.headers);
       for (const [k, v] of Object.entries(cors)) headers.set(k, v);
       return new Response(res.body, { status: res.status, headers });

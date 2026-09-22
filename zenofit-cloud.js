@@ -401,6 +401,73 @@
   const setGrantLevel  = (id, userId, level) =>
     call("PUT", "/v1/profiles/" + id + "/grants/" + userId, { level: level === "write" ? "write" : "read" });
 
+  /* ---- chat ----------------------------------------------------------------
+   *
+   * Transport only, like pullChanges/pushChanges above, and for the same
+   * reason: what a thread looks like on screen, which messages are cached and
+   * how a failed send is retried are app.js's business.
+   *
+   * These DO throw, because the caller has to tell the failures apart. The
+   * error carries .status and .code:
+   *   401 unauthorized  not signed in, or the token is gone
+   *   403 blocked       they are not accepting messages from you
+   *   409 you_blocked   you blocked them
+   *   404 not_found     no such chat, or you are not in it
+   *   429 too_fast      too many messages in a minute
+   *
+   * A CHAT NEEDS AN ACCOUNT, not just a device. A device token is enough to
+   * search (so the screen works while somebody is still deciding to sign up)
+   * but a person who has never registered has no username, so there is no
+   * name for anybody to find them under and nothing to address a message to.
+   * `signedIn()` above is the check the UI makes before offering any of this.
+   */
+
+  const searchUsers = (q) =>
+    call("GET", "/v1/users/search?q=" + encodeURIComponent(q || ""));
+
+  /* The whole list, with the last message and an unread count per thread.
+     Small enough to be the poll: one request answers "is there anything
+     new anywhere", which is what the badge on the nav is asking. */
+  const listChats = () => call("GET", "/v1/chats");
+
+  /* Find-or-create. Tapping a name means "take me to the conversation with
+     this person", which is the same request whether or not it exists yet, so
+     there is deliberately no separate create call to get wrong. */
+  const openChat = (userId) => call("POST", "/v1/chats", { userId });
+
+  /* opts: {since} for what is new, {before} to page back into history,
+     {limit} for how much. Bare, it returns the tail of the thread. */
+  function fetchMessages(threadId, opts) {
+    const o = opts || {};
+    const q = new URLSearchParams();
+    if (Number.isFinite(o.since) && o.since > 0) q.set("since", String(o.since));
+    else if (Number.isFinite(o.before) && o.before > 0) q.set("before", String(o.before));
+    if (Number.isFinite(o.limit)) q.set("limit", String(o.limit));
+    const qs = q.toString();
+    return call("GET", "/v1/chats/" + threadId + "/messages" + (qs ? "?" + qs : ""));
+  }
+
+  /* `clientId` is the app's own id for a message it has ALREADY drawn on
+     screen, and passing it is what makes a retry safe: the server lands the
+     second attempt on the same row instead of sending twice. A send without
+     one is a send that can duplicate itself on a flaky connection. */
+  const sendMessage = (threadId, body, clientId) =>
+    call("POST", "/v1/chats/" + threadId + "/messages", { body, clientId });
+
+  const markChatRead = (threadId, at) =>
+    call("POST", "/v1/chats/" + threadId + "/read", Number.isFinite(at) ? { at } : {});
+
+  const muteChat = (threadId, on) =>
+    call(on === false ? "DELETE" : "POST", "/v1/chats/" + threadId + "/mute", {});
+
+  /* Yours only: the other person keeps their copy, and writing to them again
+     puts the same thread back rather than starting a second one. */
+  const leaveChat = (threadId) => call("DELETE", "/v1/chats/" + threadId);
+
+  const listBlocks   = () => call("GET", "/v1/chats/blocks");
+  const blockUser    = (userId) => call("POST", "/v1/chats/blocks", { userId });
+  const unblockUser  = (userId) => call("DELETE", "/v1/chats/blocks/" + userId);
+
   window.ZenofitCloud = {
     API,
     ensureDevice, hasDevice,
@@ -412,6 +479,8 @@
     listProfiles, createProfile, renameProfile, deleteProfile, setProfileOrder,
     listSeeds, createSeed, rotateSeeds, revokeSeed, joinWithSeed,
     listGrants, revokeGrant, setGrantLevel, leaveProfile,
+    searchUsers, listChats, openChat, fetchMessages, sendMessage,
+    markChatRead, muteChat, leaveChat, listBlocks, blockUser, unblockUser,
     _call: call,
   };
 })();

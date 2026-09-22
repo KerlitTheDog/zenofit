@@ -3623,6 +3623,540 @@ async function rosterSync(opts) {
   }
 }
 
+/* ══ CHAT: MESSAGES, AND WHY THEY ARE NOT IN `state` ══════════════════
+   Everything above this line belongs to a PROFILE. A set, a goal, a
+   check-in, the roster those profiles sit in: all of it is training, all
+   of it filed under a profile, all of it in `state` and therefore in the
+   backup file and in `SYNC_COLLECTIONS`.
+
+   A MESSAGE IS NONE OF THAT. It belongs to the ACCOUNT — to the person —
+   and it reaches somebody else. Putting it in `state` would have filed a
+   conversation under whichever profile happened to be open, shared it with
+   whoever holds that profile's code, sent it up as an `item`, and carried
+   it away inside an exported backup that people hand to each other.
+   Restoring last month's backup would have restored last month's
+   conversation. So chat has its own store, outside `state`, beside the
+   device token and for the same reason (see the top of zenofit-cloud.js).
+
+   WHAT IS IN HERE IS A CACHE, NOT A RECORD. The server holds the
+   messages; this is what the tab paints from before the network answers
+   and what it still has when there is no network at all. Losing it loses
+   nothing, which is why it can be capped, pruned and thrown away whole
+   the moment it belongs to somebody else (see chatRead: the cache carries
+   the account it was built for, and signing in as a different person
+   drops it rather than showing one person's messages to another).
+
+   IT NEEDS AN ACCOUNT, not just a device. A device token is enough to
+   search — so the screen works while somebody is still deciding to sign
+   up — but a person who never registered has no username, so there is
+   nothing for anybody to find them under.                              */
+
+const CHAT_KEY = "zenofit:chat";
+/* Per thread, in the cache. A conversation people actually have runs to
+   thousands of messages and localStorage is a few megabytes with exercise
+   photos already in it; the rest is one request away up the thread. */
+const CHAT_KEEP = 200;
+/* How often the app asks. There is no socket and no push for "the list
+   changed" — a message gets a real web push, which is what wakes a closed
+   phone, and these are for the app already on screen. Three paces,
+   because the answer is wanted at three different speeds: while you are
+   IN a conversation, while you are looking at the list, and while you are
+   somewhere else entirely and all that is at stake is the dot on the nav. */
+const CHAT_POLL_OPEN = 6000;
+const CHAT_POLL_TAB = 20000;
+const CHAT_POLL_IDLE = 90000;
+const CHAT_TICK = 3000;          // the gate, not the pace
+
+let chatCache = null;            // read lazily, see chatRead
+let chatPollTimer = null;
+let chatLastPoll = 0;
+let chatBusy = false;
+
+const chatMe = () => {
+  const C = window.ZenofitCloud;
+  const a = C && C.account ? C.account() : null;
+  return a && a.username ? a : null;
+};
+const chatSignedIn = () => !!chatMe();
+
+/* The cache, and the one rule about whose it is. A cache stamped with a
+   different account is not stale, it is somebody else's: two people
+   sharing a phone, or one person signing out and a friend signing in. */
+function chatRead() {
+  if (chatCache) return chatCache;
+  let c = null;
+  try { c = JSON.parse(localStorage.getItem(CHAT_KEY) || "null"); } catch { c = null; }
+  const me = chatMe();
+  if (!c || typeof c !== "object" || !me || c.userId !== me.userId) {
+    c = { userId: me ? me.userId : null, threads: [], msgs: {} };
+  }
+  if (!Array.isArray(c.threads)) c.threads = [];
+  if (!c.msgs || typeof c.msgs !== "object") c.msgs = {};
+  if (!c.drafts || typeof c.drafts !== "object") c.drafts = {};
+  chatCache = c;
+  return c;
+}
+
+/* ── A HALF-TYPED MESSAGE IS NOT THROWN AWAY ──────────────────────────
+   `state.drafts` exists because a killed tab must not cost somebody the
+   set they were mid-way through typing, and a message is the same promise
+   about a different field. It cannot live in `state` for the reason the
+   whole block above gives — it would sync, and it would ride inside an
+   exported backup — so it lives in the chat cache, which is per account
+   and goes when the account does.
+
+   Keyed by thread, because backing out of one conversation to check
+   another and coming back to an empty composer is the complaint this
+   answers. Written on a debounce rather than per keystroke: the live
+   value is on `ui.chatThread` and this is only the checkpoint. */
+let chatDraftTimer = null;
+const chatDraftOf = (threadId) => (chatRead().drafts || {})[threadId] || "";
+
+function chatDraftSet(threadId, text) {
+  const c = chatRead();
+  if (text) c.drafts[threadId] = String(text).slice(0, 2000);
+  else delete c.drafts[threadId];
+  clearTimeout(chatDraftTimer);
+  chatDraftTimer = setTimeout(chatWrite, 400);
+}
+
+/* Guarded like every other write in here: private mode, a full quota and
+   blocked site data all throw, and none of them is worth breaking a
+   screen over — the cache is a convenience and the server has the
+   messages. */
+function chatWrite() {
+  const c = chatRead();
+  const me = chatMe();
+  c.userId = me ? me.userId : null;
+  /* nothing is kept for a thread that is no longer in the list, or a
+     conversation left months ago would sit in storage for ever */
+  const live = new Set(c.threads.map((t) => t.threadId));
+  for (const id of Object.keys(c.msgs)) {
+    if (!live.has(id)) delete c.msgs[id];
+    else if (c.msgs[id].length > CHAT_KEEP) c.msgs[id] = c.msgs[id].slice(-CHAT_KEEP);
+  }
+  for (const id of Object.keys(c.drafts)) if (!live.has(id)) delete c.drafts[id];
+  try { localStorage.setItem(CHAT_KEY, JSON.stringify(c)); return true; }
+  catch { return false; }
+}
+
+/* Signing out, or signing in as somebody else. Called from the account
+   actions, because the cache cannot notice on its own and the next read
+   after a switch must not paint the last person's conversations. */
+function chatForget() {
+  /* the debounced draft write first: a timer armed a keystroke ago would
+     otherwise fire after this and put a half-typed message back on disk */
+  clearTimeout(chatDraftTimer);
+  chatCache = null;
+  try { localStorage.removeItem(CHAT_KEY); } catch { /* already gone */ }
+}
+
+const chatThreads = () => chatRead().threads;
+const chatThreadOf = (id) => chatThreads().find((t) => t.threadId === id) || null;
+const chatMsgs = (id) => chatRead().msgs[id] || [];
+
+/* A DM is named by who is in it. `members` is everybody but me, so for
+   the only kind that exists today it is one person. */
+function chatName(t) {
+  if (!t) return "";
+  if (t.title) return t.title;
+  const who = (t.members || []).map((m) => m.username || m.displayName).filter(Boolean);
+  return who.length ? who.join(", ") : T("chat.unknown");
+}
+
+const chatUnread = () => chatThreads().reduce((n, t) => n + (t.unread || 0), 0);
+
+/* Newest last, and by the SERVER's stamp, which is the whole reason it is
+   the server's: two phones seconds apart must not be able to sort a reply
+   above the message it answers. A message still in flight has no stamp of
+   its own yet and carries the moment it was typed, which is right where
+   it belongs — at the end, under everything already acknowledged. */
+const chatSortMsgs = (list) => list.slice().sort((a, b) => (a.at - b.at) || String(a.messageId).localeCompare(String(b.messageId)));
+
+/* Upsert by id, and by clientId as well, because that is what turns the
+   message this phone drew the instant it was typed into the one the server
+   stored rather than leaving two of it on screen. */
+function chatMerge(threadId, incoming) {
+  const c = chatRead();
+  const have = c.msgs[threadId] || [];
+  const byId = new Map(have.map((m) => [m.messageId, m]));
+  const byClient = new Map(have.filter((m) => m.clientId).map((m) => [m.clientId, m]));
+  let changed = false;
+
+  for (const m of incoming) {
+    if (!m || !m.messageId) continue;
+    const mine = byId.get(m.messageId) || (m.clientId && byClient.get(m.clientId)) || null;
+    if (mine) {
+      /* the acknowledged copy replaces the optimistic one wholesale: same
+         message, and the stamp and id it now has are the server's */
+      if (mine.messageId !== m.messageId || mine.at !== m.at || mine.pending || mine.failed) changed = true;
+      byId.delete(mine.messageId);
+      Object.keys(mine).forEach((k) => delete mine[k]);
+      Object.assign(mine, m);
+      byId.set(m.messageId, mine);
+      if (m.clientId) byClient.set(m.clientId, mine);
+    } else {
+      const row = { ...m };
+      have.push(row);
+      byId.set(row.messageId, row);
+      if (row.clientId) byClient.set(row.clientId, row);
+      changed = true;
+    }
+  }
+
+  c.msgs[threadId] = chatSortMsgs(have);
+  return changed;
+}
+
+/* ── the poll ──────────────────────────────────────────────────────────
+   One request answers the question the nav is asking ("is there anything
+   new anywhere"), and a second answers the one an open thread is asking
+   ("what came in since the last message I have"). Nothing here throws at
+   the UI and nothing here renders unless something landed — and not even
+   then while a field has the caret in it, the same rule syncQuiet lives
+   under: render() rebuilds `#app`, and a repaint mid-word from a timer
+   nobody can see would throw away what somebody was typing.            */
+async function chatPoll(opts) {
+  const C = window.ZenofitCloud;
+  if (!C || !chatSignedIn() || chatBusy) return { ok: false };
+  chatBusy = true;
+  chatLastPoll = Date.now();
+  let changed = false;
+
+  try {
+    const res = await C.listChats();
+    const c = chatRead();
+    const before = JSON.stringify(c.threads.map((t) => [t.threadId, t.unread, t.lastMessageAt, t.muted]));
+    c.threads = (res.chats || []).map((t) => ({
+      threadId: t.threadId, kind: t.kind, title: t.title || null,
+      members: t.members || [], unread: t.unread || 0, muted: !!t.muted,
+      lastMessage: t.lastMessage || null, lastMessageAt: t.lastMessageAt || t.createdAt || 0,
+      lastReadAt: t.lastReadAt || 0,
+    }));
+    if (JSON.stringify(c.threads.map((t) => [t.threadId, t.unread, t.lastMessageAt, t.muted])) !== before) changed = true;
+
+    /* The open conversation, if there is one. Asked for by the stamp of
+       the newest message already held: the boundary millisecond comes
+       back with it and is deduped on id, because a repeat is harmless
+       and a gap is not — the same lean the change feed takes. */
+    const open = ui.chatThread && ui.chatThread.threadId;
+    if (open && chatThreadOf(open)) {
+      const held = chatMsgs(open).filter((m) => !m.pending && !m.failed);
+      const since = held.length ? held[held.length - 1].at : 0;
+      const page = await C.fetchMessages(open, since ? { since } : { limit: 60 });
+      if (chatMerge(open, page.messages || [])) changed = true;
+      if (!since && page.hasMore) ui.chatThread.hasMore = true;
+      /* Looking at it IS reading it, so the badge clears without anybody
+         being asked to dismiss anything. Only while the app is actually
+         on screen: a thread left open behind a lock screen has not been
+         read by anybody. */
+      if (!document.hidden) await chatMarkRead(open);
+    }
+
+    /* A poll that WORKED retires whatever the last one put on screen. Without
+       this the offline banner outlives the outage: the messages come back on
+       the next pass (that is a `changed` render) and the red line saying
+       there is no connection stays above them, which is the app arguing with
+       itself about something the user can see for themselves. */
+    const stale = ui.chatThread && ui.chatThread.error;
+    if (stale) ui.chatThread.error = null;
+
+    if (changed) chatWrite();
+    if ((changed || stale) && !syncTyping()) render();
+    return { ok: true, changed };
+  } catch (e) {
+    /* Silent by design, exactly as syncQuiet is: an unattended poll that
+       raises an alert is a phone interrupting a set to say the wifi is
+       bad. A thread that is OPEN says so on its own screen instead. */
+    if (e && e.status === 401) chatForget();
+    if (ui.chatThread) { ui.chatThread.error = chatErrText(e); if (!syncTyping()) render(); }
+    return { ok: false, error: e };
+  } finally {
+    chatBusy = false;
+  }
+}
+
+/* The server keeps this only moving forwards, so a late call from a screen
+   that has since scrolled cannot bring the badge back. Fire and forget:
+   a failed mark costs one poll's worth of a stale count, not data. */
+async function chatMarkRead(threadId) {
+  const C = window.ZenofitCloud;
+  const t = chatThreadOf(threadId);
+  if (!C || !t) return;
+  const msgs = chatMsgs(threadId).filter((m) => !m.pending && !m.failed);
+  const at = msgs.length ? msgs[msgs.length - 1].at : Date.now();
+  if (!t.unread && t.lastReadAt >= at) return;
+  t.unread = 0; t.lastReadAt = Math.max(t.lastReadAt || 0, at);
+  chatWrite();
+  try { await C.markChatRead(threadId, at); } catch { /* the next poll will */ }
+}
+
+/* The server's own sentence wherever it has one, since it is the useful
+   half — "this person is not accepting messages from you" says what to do
+   and `blocked` does not. Same reasoning as syncErrText. */
+function chatErrText(e) {
+  if (!e) return T("chat.errGeneric");
+  if (e.status === 401) return T("chat.errSignedOut");
+  if (!e.status) return T("chat.errOffline");   // never reached the server
+  return e.message || T("chat.errGeneric");
+}
+
+/* Three paces, one timer. The gate compares against the pace the app is
+   currently entitled to rather than running three intervals, so there is
+   nothing to start and stop as somebody moves around the app, and a
+   background tab does nothing at all. */
+function chatWantedGap() {
+  if (ui.chatThread) return CHAT_POLL_OPEN;
+  if (ui.tab === "chat") return CHAT_POLL_TAB;
+  return CHAT_POLL_IDLE;
+}
+
+function chatPollStart() {
+  clearInterval(chatPollTimer);
+  chatPollTimer = setInterval(() => {
+    if (document.hidden || !chatSignedIn()) return;
+    if (Date.now() - chatLastPoll < chatWantedGap()) return;
+    chatPoll();
+  }, CHAT_TICK);
+}
+
+/* Coming back to the app is the moment somebody wants to see what came in
+   while it was away, and the push that woke them said only that something
+   did. Throttled, because visibilitychange fires more than once for one
+   glance on some platforms. */
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden || !chatSignedIn()) return;
+  if (Date.now() - chatLastPoll > 4000) chatPoll();
+});
+
+/* ── WHAT THE SERVICE WORKER HANDS OVER ───────────────────────────────
+   sw.js does not show a notification for a message when a window of this
+   app is focused (see the push handler there for why that is the one case
+   the spec allows): it posts the push to the page instead, and the page
+   is what the user is already looking at. So this is the other half of
+   that decision — without it, a message arriving while the app is open
+   would wait for the next poll and nothing would have rung at all.
+
+   It carries no message body, deliberately. A push is a nudge, not a
+   transport: the thread is fetched from the server like everything else,
+   so there is exactly one road a message travels and no second copy to
+   disagree with it.                                                    */
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.addEventListener("message", (e) => {
+    if (!e.data || e.data.type !== "chat-push") return;
+    chatLastPoll = 0;               // whatever the pace was, this beats it
+    chatPoll();
+  });
+}
+
+/* A notification tapped while the app was closed or in the background.
+   `__zenofitSW` in index.html has been queueing these since Phase 5 with
+   nothing claiming them; this is the claim. A chat notification names its
+   thread, so the tap lands IN the conversation rather than on the tab
+   above it, which is the whole promise of tapping it. */
+function chatSWClick(data) {
+  if (!data) return;
+  if (data.kind === "chat" && data.id) {
+    openChatThread(data.id);
+    return;
+  }
+  /* A timer notification: the toast and the Timer tab already say what
+     happened, so this only has to put somebody in front of them. */
+  if (data.kind === "timer" || data.kind === "test") { ui.tab = "timer"; render(); }
+}
+(function claimSWClicks() {
+  const hub = window.__zenofitSW;
+  if (!hub) return;
+  hub.onClick = chatSWClick;
+  const queued = hub.pendingClicks || [];
+  hub.pendingClicks = [];
+  /* after the first paint, never before it: these arrive during load and
+     openChatThread renders */
+  if (queued.length) setTimeout(() => chatSWClick(queued[queued.length - 1]), 0);
+})();
+
+/* ── opening a conversation ───────────────────────────────────────────
+   Paints from the cache first and then fetches, so tapping a name is
+   instant on a phone that already has the thread and honest on one that
+   does not. `stick` is the scroll rule: a conversation opens at the
+   bottom, where the newest message is, and stays there until somebody
+   scrolls up to read history.                                          */
+function openChatThread(threadId, opts) {
+  if (!threadId) return;
+  ui.tab = "chat";
+  ui.chatFind = "";
+  ui.chatResults = null;
+  ui.chatThread = {
+    threadId,
+    draft: (opts && opts.draft) || chatDraftOf(threadId),
+    hasMore: chatMsgs(threadId).length >= 20,
+    loading: !chatMsgs(threadId).length,
+    error: null,
+  };
+  ui.chatStick = true;
+  render();
+  chatOpenFetch(threadId);
+}
+
+/* The tail of the thread, on the way in. Deliberately the tail and not
+   "everything since the last one I have": a thread whose cache was pruned
+   or has never been fetched needs the recent history, and one that is up
+   to date pays for a single page nobody notices. */
+async function chatOpenFetch(threadId) {
+  const C = window.ZenofitCloud;
+  if (!C || !chatSignedIn()) return;
+  try {
+    const page = await C.fetchMessages(threadId, { limit: 60 });
+    chatMerge(threadId, page.messages || []);
+    if (ui.chatThread && ui.chatThread.threadId === threadId) {
+      ui.chatThread.loading = false;
+      ui.chatThread.hasMore = !!page.hasMore;
+      ui.chatThread.error = null;
+    }
+    chatWrite();
+    await chatMarkRead(threadId);
+    if (!syncTyping()) render();
+  } catch (e) {
+    if (e && e.status === 401) chatForget();
+    if (ui.chatThread && ui.chatThread.threadId === threadId) {
+      ui.chatThread.loading = false;
+      ui.chatThread.error = chatErrText(e);
+      render();
+    }
+  }
+}
+
+/* Paging backwards. `stick` goes off first: somebody reading history has
+   not asked to be sent back to the bottom of it. */
+async function chatLoadEarlier(threadId) {
+  const C = window.ZenofitCloud;
+  const f = ui.chatThread;
+  if (!C || !f || f.threadId !== threadId || f.paging) return;
+  const held = chatMsgs(threadId).filter((m) => !m.pending);
+  if (!held.length) return;
+  f.paging = true; ui.chatStick = false; render();
+  try {
+    const page = await C.fetchMessages(threadId, { before: held[0].at, limit: 60 });
+    chatMerge(threadId, page.messages || []);
+    chatWrite();
+    if (ui.chatThread === f) { f.hasMore = !!page.hasMore; f.error = null; }
+  } catch (e) {
+    if (ui.chatThread === f) f.error = chatErrText(e);
+  } finally {
+    if (ui.chatThread === f) f.paging = false;
+    render();
+  }
+}
+
+/* ── sending ──────────────────────────────────────────────────────────
+   THE MESSAGE IS ON SCREEN BEFORE THE REQUEST LEAVES. Anything else
+   means a gym with one bar of signal shows you an empty composer and no
+   message for two seconds, which reads as having lost what you typed.
+
+   `clientId` is what makes that safe. The optimistic copy carries it, the
+   send carries it, and the server refuses to store a second message under
+   the same one — so a retry after a dropped reply lands on the row that
+   already exists instead of sending twice, and chatMerge replaces the
+   local copy with the stored one by that same id.
+
+   A failure is kept, not discarded: the message stays where it is, marked,
+   with one tap to send it again. Throwing away what somebody typed
+   because a request failed is the one outcome that is never acceptable. */
+async function chatSend(threadId, text) {
+  const C = window.ZenofitCloud;
+  const body = String(text || "").trim();
+  if (!C || !body || !chatSignedIn()) return;
+  const me = chatMe();
+  const clientId = "c" + uid();
+
+  chatMerge(threadId, [{
+    messageId: "local:" + clientId,
+    from: me.userId, body, at: Date.now(), clientId, pending: true,
+  }]);
+  const t = chatThreadOf(threadId);
+  if (t) { t.lastMessage = { body, from: me.userId, at: Date.now() }; t.lastMessageAt = Date.now(); }
+  chatWrite();
+  ui.chatStick = true;
+  render();
+
+  await chatDeliver(threadId, clientId);
+}
+
+/* ── WHERE A CONVERSATION IS SCROLLED TO ──────────────────────────────
+   A conversation opens on its newest message and stays there, which is
+   the one place a chat is ever useful and the only spot the composer
+   makes sense under. `render()` restores the scrollTop of anything
+   carrying a `data-scrollkey`, which is right for reading history and
+   wrong the moment a message arrives, so this overrides it — but only
+   while `ui.chatStick` is on.
+
+   Scrolling up turns it off, because somebody reading last week's
+   messages has not asked to be thrown back to the bottom by a reply
+   landing, and coming back within a thumb's width of the end turns it on
+   again, which is the gesture people already use to mean "I'm done
+   reading back".                                                      */
+const CHAT_STICK_SLOP = 60;
+
+function chatStickBottom() {
+  const el = app.querySelector("[data-chatscroll]");
+  if (!el || !ui.chatStick) return;
+  el.scrollTop = el.scrollHeight;
+}
+
+/* The composer grows with what is in it, up to four lines. handleBind does
+   this on every keystroke; this is the same sizing applied to a draft that
+   was already there when the frame was drawn — backing out of a
+   conversation and coming back to a three-line message showed one line of
+   it with the rest scrolled out of sight. */
+function chatFitComposer() {
+  const el = app.querySelector('[data-bind="chatDraft"]');
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = Math.min(104, el.scrollHeight) + "px";
+}
+
+/* Scroll does not bubble, but it DOES reach a capturing listener on the
+   document, which is how one listener serves a node render() throws away
+   and rebuilds on every keystroke. */
+document.addEventListener("scroll", (e) => {
+  const el = e.target;
+  if (!el || !el.dataset || el.dataset.chatscroll == null) return;
+  ui.chatStick = el.scrollHeight - el.scrollTop - el.clientHeight < CHAT_STICK_SLOP;
+}, { capture: true, passive: true });
+
+/* The keyboard opening shortens the list by exactly the height of the
+   keyboard (see `--pb-kb` in applyViewport), and the newest message has
+   to still be the one on screen afterwards. Pure CSS moves the composer;
+   this is the scroll that has to follow it. */
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", () => { if (ui.chatThread) chatStickBottom(); });
+}
+
+/* The wire half, shared by the first attempt and by Retry, so the two
+   cannot drift apart. */
+async function chatDeliver(threadId, clientId) {
+  const C = window.ZenofitCloud;
+  const row = chatMsgs(threadId).find((m) => m.clientId === clientId);
+  if (!C || !row) return;
+  row.pending = true; delete row.failed; delete row.error;
+
+  try {
+    const res = await C.sendMessage(threadId, row.body, clientId);
+    chatMerge(threadId, [res.message]);
+    chatWrite();
+    if (!syncTyping()) render();
+    /* the list's own ordering and the other side's unread count are the
+       server's to report, and this is the moment they changed */
+    chatLastPoll = 0;
+  } catch (e) {
+    if (e && e.status === 401) chatForget();
+    const still = chatMsgs(threadId).find((m) => m.clientId === clientId);
+    if (still) { delete still.pending; still.failed = true; still.error = chatErrText(e); }
+    chatWrite();
+    render();
+  }
+}
+
 /* ── ONE CONTROL THAT MEANS "SHOW ME WHAT IS ACTUALLY THERE NOW" ──────
    Two different things go stale in here, and until this button both were
    fixed the same way: close the app, open it again, and if that did not
@@ -4111,7 +4645,7 @@ const ui = {
   setOrder: null,
   libOrder: false,      // …the exercise library is, inside each of its groups
   variationOrder: false, // …the open exercise's family of variations is
-  progSeg: "progress",  // progress | standards, Progress sub-tab
+  progSeg: "progress",  // calc | progress | standards, Progress sub-tab
   progressSelected: null,
   progressQ: "",        // …and the search box over that list of lifts
   /* the strength standards lookup (Progress → Standards). Like the 1RM
@@ -4144,6 +4678,21 @@ const ui = {
   libraryQ: "",
   libraryFilter: "All",
   librarySeg: "exercises", // exercises | presets, Library sub-tab
+  /* ── chat ─────────────────────────────────────────────────────────
+     The messages themselves are NOT in here and not in `state` either:
+     they are a cache outside both, see the CHAT block. These are the
+     screen's own transient bits, and they behave like the rest of `ui`. */
+  chatFind: "",         // the username search box at the top of the tab
+  chatResults: null,    // {q, users, error} the last answer to it
+  chatStarting: false,  // a "start a chat with this person" round trip
+  chatThread: null,     // {threadId, draft, hasMore, loading, paging, error}
+  chatMenu: null,       // threadId whose mute/block/leave sheet is open
+  /* Whether the open conversation is pinned to its newest message. True
+     until somebody scrolls up to read history, which is the one time a
+     new message must NOT yank the screen back down. */
+  chatStick: true,
+  chatPushOn: false,    // notifications were granted in this session
+  chatPushBusy: false,
 };
 
 function resetTransient() {
@@ -4171,6 +4720,13 @@ function resetTransient() {
   ui.variationOrder = false;
   ui.volumeWeek = weekOf(todayStr(), state.settings.startDate);
   ui.volAnchor = todayStr();
+  /* The search box and its answer, not the conversation: leaving a tab
+     mid-search should clear the search, and an open thread is a layer
+     over the whole app that closes by its own Back button. A half-typed
+     message is deliberately kept with it. */
+  ui.chatFind = "";
+  ui.chatResults = null;
+  ui.chatStarting = false;
 }
 
 /* ─────────────────────────── HTML HELPERS ──────────────────────────── */
@@ -4435,6 +4991,8 @@ const dvhSupported = !!(window.CSS && CSS.supports && CSS.supports("height", "10
    while a field has focus the last keyboard-free height stands. Width is
    never affected by a keyboard, so it needs no such care. */
 let vpBaseH = 0;
+/* the keyboard inset last written, so a no-op update stays a no-op */
+let vpKb = 0;
 const vpTyping = () => {
   const el = document.activeElement;
   return !!el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable);
@@ -4451,6 +5009,41 @@ function applyViewport() {
   const scale = Math.min(VP_SCALE_MAX, Math.max(1, Math.min(availW / frameW, vpBaseH / VP_REF_H)));
 
   const next = Math.round(scale * 1e4) / 1e4;
+
+  /* ── WHAT THE ON-SCREEN KEYBOARD IS COVERING ──────────────────────
+     index.html says why the keyboard is left to OVERLAY the app rather
+     than resize it (`interactive-widget=resizes-content` teleports the
+     field you just tapped 455px up the screen and Chrome gives up on the
+     IME) and names the price: a bar parked at the bottom of the frame
+     ends up underneath it. The rule stated there is to lift that ONE bar
+     by measuring visualViewport, and this is the measurement — written
+     here because this is the only code that reads the device, and handed
+     to the layout as `--pb-kb` like every other `--pb-*` token.
+
+     `innerHeight - (height + offsetTop)` is what the keyboard has taken
+     off the bottom, and it is divided by the scale because both sides of
+     that subtraction are screen pixels while the frame is laid out in its
+     own — the same correction the drag handlers make. On a phone it
+     divides by 1; on a tablet it is the difference between a composer
+     that clears the keyboard and one that clears twice too much.
+
+     ONLY THE CHAT COMPOSER SPENDS IT, and it spends it as padding on the
+     whole layer so the message list shrinks with it. Nothing else in the
+     app has a control the keyboard can bury: every other bottom sheet
+     scrolls, and `fitScrollFooters` is about content rather than chrome.
+
+     It is written ABOVE the early return below, on purpose. That return
+     fires precisely when neither the scale nor the width has changed,
+     which is exactly what a keyboard opening looks like from here. */
+  const vv = window.visualViewport;
+  const covered = vv ? Math.max(0, (window.innerHeight || availH) - (vv.height + vv.offsetTop)) : 0;
+  /* a handful of pixels is a rounding artefact or a pinch, not a keyboard */
+  const kb = covered > 40 ? Math.round(covered / (next || 1)) : 0;
+  if (kb !== vpKb) {
+    vpKb = kb;
+    root.style.setProperty("--pb-kb", kb + "px");
+  }
+
   /* nothing changed is the common case (a scroll that moved the browser
      toolbar, a keyboard opening) and writing the same values back would
      invalidate style for no reason, and risk a ResizeObserver loop. Only a
@@ -4477,7 +5070,13 @@ function applyViewport() {
 window.addEventListener("resize", applyViewport);
 window.addEventListener("orientationchange", applyViewport);
 window.addEventListener("pageshow", applyViewport);
-if (window.visualViewport) window.visualViewport.addEventListener("resize", applyViewport);
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", applyViewport);
+  /* …and scroll, because a keyboard on some Android builds moves the
+     visual viewport (offsetTop) without resizing it, and that is half of
+     what --pb-kb is measured from */
+  window.visualViewport.addEventListener("scroll", applyViewport);
+}
 /* the braces to that belt: a ResizeObserver on the document element is told
    the layout viewport changed by the layout engine itself, so it catches the
    cases a resize event is known to miss or fire late for: an Android soft
@@ -4582,7 +5181,7 @@ function render() {
   chartState = { line: null, exLine: null, bar: null };
 
   const tab = ui.tab;
-  const titles = { log: T("title.log"), progress: T("title.progress"), library: T("title.library"), timer: T("title.timers"), calc: T("title.calc") };
+  const titles = { log: T("title.log"), progress: T("title.progress"), library: T("title.library"), timer: T("title.timers"), chat: T("title.chat") };
 
   /* the frame is exactly one viewport tall so the content area scrolls
      internally and the bottom nav is always visible without scrolling the
@@ -4631,7 +5230,7 @@ function render() {
   if (tab === "progress") html += renderProgress(log, library, goals, badges, settings, unit);
   if (tab === "library") html += renderLibrary(library);
   if (tab === "timer") html += renderTimers();
-  if (tab === "calc") html += renderCalc();
+  if (tab === "chat") html += renderChat();
   html += `</div>`;
 
   /* "time's up" banner, floating above the nav on whatever tab you're on, so a
@@ -4656,18 +5255,32 @@ function render() {
   }
 
   /* bottom nav */
+  /* The 1RM calculator used to be a tab of its own here. It is a question
+     you ask ABOUT your numbers, which is what the Progress tab is for, so
+     it is that tab's first segment now (see renderProgress) and the slot
+     it left is chat's. Nothing about the calculator changed: `ui.calc` and
+     `ui.calcResult` still survive a tab change, exactly as the standards
+     form does, for the same reason. */
   const NAV = [
     ["home", "home", T("nav.home")], ["log", "clipboard-list", T("nav.log")], ["timer", "timer", T("nav.timer")],
-    ["progress", "trending-up", T("nav.progress")], ["calc", "calculator", T("nav.calc")],
+    ["progress", "trending-up", T("nav.progress")], ["chat", "message-circle", T("nav.chat")],
     ["library", "book-open", T("nav.library")],
   ];
-  /* a running timer puts a live dot on its nav icon from anywhere in the app */
+  /* a running timer puts a live dot on its nav icon from anywhere in the
+     app, and so does an unread message: both are things that happened
+     somewhere else in the app while you were looking at this screen */
   const timersRunning = (state.timers || []).some((t) => t.endsAt || t.doneAt) || swRunning();
+  const unread = chatSignedIn() ? chatUnread() : 0;
   html += `<div style="position:absolute;bottom:0;left:0;right:0;background:var(--nav-bg);backdrop-filter:blur(10px);border-top:1px solid var(--border-soft);display:flex;padding:8px 2px calc(14px + var(--pb-sab));z-index:25">`;
   for (const [id, ic, label] of NAV) {
     const active = tab === id;
+    /* A count, not a dot, where there is a number worth knowing: "three
+       waiting" is a different decision from "one". */
     const dot = id === "timer" && timersRunning
-      ? `<span style="position:absolute;top:1px;right:50%;margin-right:-14px;width:7px;height:7px;border-radius:4px;background:var(--gold)"></span>` : "";
+      ? `<span style="position:absolute;top:1px;right:50%;margin-right:-14px;width:7px;height:7px;border-radius:4px;background:var(--gold)"></span>`
+      : id === "chat" && unread
+        ? `<span style="position:absolute;top:-1px;right:50%;margin-right:-22px;min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--gold);color:var(--gold-ink);font-size:9.5px;font-weight:700;display:flex;align-items:center;justify-content:center">${unread > 9 ? "9+" : unread}</span>`
+        : "";
     html += `<button data-action="nav" data-id="${id}" style="position:relative;flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;gap:3px;color:${active ? "var(--gold)" : "var(--faint)"};padding:4px 0">
       ${dot}${icon(ic, 21, `stroke-width="${active ? 2.4 : 2}"`)}
       <span style="font-size:9.5px;font-weight:700;letter-spacing:.02em">${label}</span>
@@ -4704,6 +5317,9 @@ function render() {
   if (ui.groupForm) html += renderGroupForm();
   if (ui.deloadForm) html += renderDeloadForm();
   if (ui.planResult) html += renderPlanResult();
+  /* the thread first, then its own menu on top of it */
+  if (ui.chatThread) html += renderChatThread();
+  if (ui.chatMenu) html += renderChatMenu();
 
   html += `</div></div>`;
   app.innerHTML = html;
@@ -4721,6 +5337,10 @@ function render() {
   fitScrollFooters();
   if (ui.logJump) flashLogDay();
   if (ui.stdJump) flashStdResult();
+  /* after the icons too: the send button and the bubbles own glyphs are
+     part of what the scroll height is measured from, and the composer has
+     to settle to its final height before the list is scrolled against it */
+  if (ui.chatThread) { chatFitComposer(); chatStickBottom(); }
 
   /* ── play transitions between the old frame and this one ───────────── */
   const root = app.querySelector(".pb-root");
@@ -5016,6 +5636,14 @@ function renderHome(settings, currentWeek, unit) {
       ${accordion("presets", T("acc.presets.title"), icon("layers", 16, 'style="color:var(--gold)"'), T("acc.presets.body"))}
       ${accordion("library", T("acc.library.title"), icon("book-open", 16, 'style="color:#a07ec2"'), T("acc.library.body"))}
       ${accordion("timers", T("acc.timers.title"), icon("bell-ring", 16, 'style="color:var(--blue)"'), T("acc.timers.body"))}
+      ${/* Chat earns a place here by the same test as everything else on
+            this list: where a message physically lives, that it is NOT in
+            a backup, that signing out takes it off the phone and who is
+            able to find you are none of them answerable by tapping the
+            screen. What the buttons do is, so none of that is in the
+            copy. It sits directly above "where your data lives", which is
+            the entry it qualifies. */""}
+      ${accordion("chat", T("acc.chat.title"), icon("message-circle", 16, 'style="color:var(--gold)"'), T("acc.chat.body"))}
       ${accordion("cardio", T("acc.cardio.title"), icon("timer", 16, 'style="color:#a07ec2"'), T("acc.cardio.body"))}
       ${accordion("units", T("acc.units.title"), icon("ruler", 16, 'style="color:var(--steel)"'), T("acc.units.body"))}
       ${accordion("data", T("acc.data.title"), icon("settings", 16, 'style="color:var(--muted)"'), T("acc.data.body"))}
@@ -5667,9 +6295,30 @@ function renderVolume(log, library, settings, currentWeek) {
 
 /* ─────────────────────────── PROGRESS ─────────────────────────────── */
 
+/* ── THREE QUESTIONS ABOUT YOUR NUMBERS, BEHIND ONE TAB ───────────────
+   1RM, Progress and Standards are the same shape of thing: none of them
+   writes to the log, all three read it, and each answers a question about
+   what your numbers are worth. The calculator had a tab of its own in the
+   bottom nav and did not earn one — it is a form you fill in twice a month
+   — while sitting one row away from the two screens it belongs beside.
+
+   It is FIRST because it is the one that needs no history: somebody who
+   opened the app today can use it, where Progress and Standards both want
+   a log behind them. `resetTransient` still lands the tab on Progress,
+   which is the tab's own name and what the nav icon promises.
+
+   The calculator's state is untouched by the move (`ui.calc` /
+   `ui.calcResult`, deliberately not cleared by `resetTransient`, for the
+   same reason the standards form is not: it is a question you asked, and
+   the answer should still be there when you come back).               */
 function renderProgress(log, library, goals, badges, settings, unit) {
   const segs = segControl("prog-seg", ui.progSeg,
-    [["progress", T("prog.segProgress")], ["standards", T("prog.segStandards")]]);
+    [["calc", T("prog.segCalc")], ["progress", T("prog.segProgress")], ["standards", T("prog.segStandards")]]);
+
+  /* the segment control is handed INTO the calculator rather than stacked
+     above it, so there is one padded container and not two arguing about
+     the gap under the pills */
+  if (ui.progSeg === "calc") return renderCalc(segs);
 
   if (ui.progSeg === "standards")
     return `<div class="" style="padding:12px 16px 0">${segs}${renderProgStandards(log, library, unit)}</div>`;
@@ -6439,7 +7088,10 @@ const calcRow = (cells, last, highlight) => `<div style="display:flex;gap:8px;al
   <div class="pb-num" style="flex:1;min-width:0;text-align:right;font-size:14px;font-weight:600;color:var(--muted)">${cells[2]}</div>
 </div>`;
 
-function renderCalc() {
+/* `head` is the Progress tab's segment control, handed in so the pills and
+   the calculator share one padded container. It renders nothing when the
+   calculator is drawn from anywhere else. */
+function renderCalc(head = "") {
   const f = ui.calc;
   const unit = f.unit || state.settings.units;
   const res = ui.calcResult;
@@ -6457,6 +7109,7 @@ function renderCalc() {
 
   if (!res)
     return `<div class="" style="padding:14px 16px 0">
+      ${head}
       <div style="font-size:13px;color:var(--muted);line-height:1.55;margin:0 2px 14px">${T("calc.intro")}</div>
       ${form}
       <div class="pb-card" style="padding:24px;text-align:center;color:var(--faint);font-size:13px;line-height:1.6">
@@ -6490,6 +7143,7 @@ function renderCalc() {
   }).join("");
 
   return `<div class="" style="padding:14px 16px 0">
+    ${head}
     <div style="font-size:13px;color:var(--muted);line-height:1.55;margin:0 2px 14px">${T("calc.intro")}</div>
     ${form}
 
@@ -6512,6 +7166,351 @@ function renderCalc() {
     <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 4px 10px">${T("calc.footer")}</div>
     <div style="height:14px"></div>
   </div>`;
+}
+
+/* ──────────────────────────── CHAT ─────────────────────────────────
+   The store, the poll and the send are in the CHAT block above the
+   viewport engine, with the reasoning for why none of it is in `state`.
+   This is the screen.
+
+   Two surfaces and no routing, like everything else here: the tab is the
+   list of conversations with a name search above it, and a conversation
+   is a full-screen layer over the top of it (`ui.chatThread`).         */
+
+/* A message stamp, at the resolution somebody actually wants it: the time
+   for today, the weekday inside the last week, the date beyond that.
+   "14:32" on a message from March is a stamp that tells you nothing. */
+function chatWhen(at) {
+  if (!at) return "";
+  const d = new Date(at);
+  const now = new Date();
+  const time = d.toLocaleTimeString(localeTag(), { hour: "2-digit", minute: "2-digit" });
+  const sameDay = d.toDateString() === now.toDateString();
+  if (sameDay) return time;
+  const days = Math.round((now.setHours(0, 0, 0, 0) - new Date(at).setHours(0, 0, 0, 0)) / 86400000);
+  if (days === 1) return T("chat.yesterday");
+  if (days > 1 && days < 7) return d.toLocaleDateString(localeTag(), { weekday: "short" });
+  return d.toLocaleDateString(localeTag(), { day: "numeric", month: "short" });
+}
+
+/* The same stamp with the time on it, for a message bubble, where the
+   question is always "when exactly". */
+const chatStamp = (at) => (at
+  ? new Date(at).toLocaleTimeString(localeTag(), { hour: "2-digit", minute: "2-digit" })
+  : "");
+
+/* A name, drawn as a circle. There are no avatars and there is no plan for
+   any: a photo is somebody else's data on your phone, and an initial is
+   enough to tell three conversations apart. The colour is derived from the
+   name so it is stable without being stored anywhere. */
+function chatAvatar(name, size = 42) {
+  const s = String(name || "?");
+  const ch = (s.trim()[0] || "?").toUpperCase();
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360;
+  return `<span style="flex-shrink:0;width:${size}px;height:${size}px;border-radius:${Math.round(size / 2.6)}px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:${Math.round(size / 2.4)}px;background:hsl(${h} 42% 30%);color:hsl(${h} 70% 88%)">${esc(ch)}</span>`;
+}
+
+/* ── notifications, asked for where the answer matters ────────────────
+   Push has until now only ever been turned on from the diagnostics page,
+   which is a page nobody visits. A rest timer survives that because it
+   also rings locally; a message cannot, since the whole point of one is
+   reaching a phone that is in a pocket with the app shut.
+
+   So the chat tab asks, once, in a strip it stops drawing the moment the
+   answer is yes. It must be a real tap (iOS refuses a permission prompt
+   that was not, and Chrome penalises a site that asks on load), which is
+   exactly what this is. Every reason it cannot be offered is said in
+   words somebody can act on rather than the strip silently not appearing:
+   on iOS the app has to be installed to the home screen first, and a
+   permission already refused can only be undone in the browser's own
+   settings.                                                            */
+function chatPushStrip() {
+  const C = window.ZenofitCloud;
+  if (!C || !chatSignedIn()) return "";
+  if (ui.chatPushOn) return "";          // asked and granted, this session
+  const why = C.pushBlockedReason();
+  if (why === "unsupported") return "";  // nothing to offer and nothing to say
+
+  const tint = why ? "rgba(93,138,168,.12)" : "rgba(233,185,73,.08)";
+  const ink = why ? "var(--steel)" : "var(--gold)";
+  const line = why === "ios-needs-install" ? T("chat.pushIos")
+    : why === "denied" ? T("chat.pushDenied")
+    : T("chat.pushOffer");
+
+  return `<div class="pb-card" style="display:flex;align-items:center;gap:10px;padding:11px 12px;margin-bottom:12px;background:${tint};border-color:${ink}33">
+    ${icon(why ? "bell-off" : "bell", 16, `style="color:${ink};flex-shrink:0"`)}
+    <span style="flex:1;min-width:0;font-size:11.5px;line-height:1.45;color:var(--muted)">${line}</span>
+    ${why ? "" : `<button data-action="chat-push-on" ${ui.chatPushBusy ? "disabled" : ""} class="pb-btn pb-ghost" style="flex-shrink:0;padding:7px 12px;font-size:12px;color:var(--gold);border-color:rgba(233,185,73,.4)">${ui.chatPushBusy ? T("sync.working") : T("chat.pushOn")}</button>`}
+  </div>`;
+}
+
+function renderChat() {
+  const C = window.ZenofitCloud;
+
+  if (!C) {
+    return `<div style="padding:14px 16px 0">
+      <div class="pb-card" style="padding:24px;text-align:center;color:var(--muted);font-size:13px;line-height:1.6">
+        ${icon("message-circle-off", 26, 'style="margin:0 auto 10px;display:block;color:var(--faint)"')}
+        ${T("sync.noClient")}
+      </div>
+    </div>`;
+  }
+
+  /* ── NOT SIGNED IN ───────────────────────────────────────────────
+     A message goes to a PERSON, and a person is an account. A device
+     that never registered has no username, so there is nothing for
+     anybody to search for and nothing to address. This says that and
+     offers the one thing that fixes it, rather than an empty list. */
+  if (!chatSignedIn()) {
+    return `<div style="padding:14px 16px 0">
+      <div class="pb-card" style="padding:22px 18px;text-align:center">
+        ${icon("message-circle", 28, 'style="margin:0 auto 12px;display:block;color:var(--gold)"')}
+        <div style="font-weight:700;font-size:15px;margin-bottom:8px">${T("chat.needAccount")}</div>
+        <div style="font-size:12.5px;color:var(--muted);line-height:1.6;margin-bottom:16px">${T("chat.needAccountWhy")}</div>
+        <button data-action="open-account" class="pb-btn pb-gold" style="width:100%;padding:12px 0;font-size:14.5px">
+          ${icon("log-in", 15)} ${T("chat.signIn")}
+        </button>
+      </div>
+      <div style="height:14px"></div>
+    </div>`;
+  }
+
+  const q = (ui.chatFind || "").trim();
+  const searching = q.length > 0;
+
+  /* ── FINDING SOMEBODY ────────────────────────────────────────────
+     One field, at the top of the tab, because "add somebody" is the
+     only way a conversation ever starts and burying it behind a sheet
+     would make the empty state a dead end. It is a PREFIX search on
+     the username (see chat.js: a substring search over every account
+     is a directory), so the hint says username rather than "name".
+     Typing filters what is on screen and nothing else: the thread list
+     comes back the moment the field is cleared.                     */
+  const finder = `<div style="position:relative;margin-bottom:12px">
+    <input class="pb-input" data-bind="chatFind" value="${esc(ui.chatFind || "")}"
+      placeholder="${esc(T("chat.findPh"))}" autocapitalize="none" autocorrect="off"
+      spellcheck="false" maxlength="24" style="padding-left:36px;padding-right:${searching ? 36 : 12}px">
+    <span style="position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--faint);pointer-events:none;display:flex">${icon("search", 15)}</span>
+    ${searching ? `<button data-action="chat-find-clear" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);color:var(--muted);padding:4px;display:flex">${icon("x", 15)}</button>` : ""}
+  </div>`;
+
+  if (searching) {
+    return `<div style="padding:14px 16px 0">
+      ${finder}
+      <div id="chatFindList">${chatResultsHTML()}</div>
+      <div style="height:14px"></div>
+    </div>`;
+  }
+
+  const threads = chatThreads();
+
+  const rows = threads.map((t) => {
+    const name = chatName(t);
+    const last = t.lastMessage;
+    const me = chatMe();
+    const mine = last && me && last.from === me.userId;
+    /* A pending or failed message of my own is newer than anything the
+       server has said, and the row has to say so or the list contradicts
+       the conversation one tap inside it. */
+    const local = chatMsgs(t.threadId).filter((m) => m.pending || m.failed).pop();
+    const failed = local && local.failed;
+    const preview = local ? local.body : last ? last.body : "";
+    const unread = t.unread || 0;
+
+    return `<button data-action="chat-open" data-id="${esc(t.threadId)}" class="pb-card" style="width:100%;display:flex;align-items:center;gap:11px;padding:11px 12px;margin-bottom:8px;text-align:left">
+      ${chatAvatar(name)}
+      <span style="flex:1;min-width:0">
+        <span style="display:flex;align-items:baseline;gap:8px">
+          <span style="flex:1;min-width:0;font-weight:${unread ? 700 : 600};font-size:14px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(name)}</span>
+          <span style="flex-shrink:0;font-size:10.5px;color:var(--faint)">${chatWhen(local ? local.at : t.lastMessageAt)}</span>
+        </span>
+        <span style="display:flex;align-items:center;gap:6px;margin-top:3px">
+          ${failed ? icon("alert-circle", 12, 'style="color:var(--red);flex-shrink:0"')
+            : local ? icon("clock", 12, 'style="color:var(--faint);flex-shrink:0"')
+            : mine ? icon("corner-up-right", 12, 'style="color:var(--faint);flex-shrink:0"') : ""}
+          <span style="flex:1;min-width:0;font-size:12px;color:${unread ? "var(--muted)" : "var(--faint)"};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${preview ? esc(preview.replace(/\n+/g, " ")) : `<i>${T("chat.noMessages")}</i>`}</span>
+          ${t.muted ? icon("bell-off", 12, 'style="color:var(--faint);flex-shrink:0"') : ""}
+          ${unread ? `<span style="flex-shrink:0;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--gold);color:var(--gold-ink);font-size:10.5px;font-weight:700;display:flex;align-items:center;justify-content:center">${unread > 99 ? "99+" : unread}</span>` : ""}
+        </span>
+      </span>
+    </button>`;
+  }).join("");
+
+  return `<div style="padding:14px 16px 0">
+    ${finder}
+    ${chatPushStrip()}
+    ${threads.length ? rows : `<div class="pb-card" style="padding:26px 20px;text-align:center;color:var(--muted);font-size:13px;line-height:1.6">
+      ${icon("message-circle", 26, 'style="margin:0 auto 10px;display:block;color:var(--faint)"')}
+      ${T("chat.empty")}
+    </div>`}
+    <div style="height:14px"></div>
+  </div>`;
+}
+
+/* The search results, patched in place rather than re-rendered, the same
+   way the library and picker searches are: render() rebuilds `#app` and
+   the caret would go back to the start of the field on every keystroke. */
+function chatResultsHTML() {
+  const res = ui.chatResults;
+  const q = (ui.chatFind || "").trim();
+
+  if (q.length < 2) {
+    return `<div style="padding:18px 6px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T("chat.findMore")}</div>`;
+  }
+  if (!res || res.q !== q) {
+    return `<div style="padding:18px 6px;text-align:center;font-size:12.5px;color:var(--faint)">${T("sync.working")}</div>`;
+  }
+  if (res.error) {
+    return `<div style="padding:18px 6px;text-align:center;font-size:12.5px;color:var(--red);line-height:1.6">${esc(res.error)}</div>`;
+  }
+  if (!res.users.length) {
+    return `<div class="pb-card" style="padding:22px 18px;text-align:center;color:var(--muted);font-size:12.5px;line-height:1.6">
+      ${icon("user-x", 22, 'style="margin:0 auto 9px;display:block;color:var(--faint)"')}
+      ${T("chat.noneFound", { name: esc(q) })}
+    </div>`;
+  }
+
+  /* A name already in the list says so, and opens the conversation you
+     have rather than pretending to start a new one — which is what the
+     server does anyway (find-or-create), so this only makes the button
+     honest about it. */
+  const known = new Map();
+  for (const t of chatThreads()) for (const m of t.members || []) known.set(m.userId, t.threadId);
+
+  return res.users.map((u) => {
+    const have = known.get(u.userId);
+    return `<button data-action="chat-start" data-id="${esc(u.userId)}" data-n="${esc(u.username || "")}" ${ui.chatStarting ? "disabled" : ""} class="pb-card" style="width:100%;display:flex;align-items:center;gap:11px;padding:11px 12px;margin-bottom:8px;text-align:left;opacity:${ui.chatStarting ? 0.5 : 1}">
+      ${chatAvatar(u.username)}
+      <span style="flex:1;min-width:0">
+        <span style="display:block;font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(u.username)}</span>
+        <span style="display:block;font-size:11.5px;color:var(--faint);margin-top:2px">${have ? T("chat.alreadyHave") : T("chat.tapToStart")}</span>
+      </span>
+      ${icon(have ? "message-circle" : "message-circle-plus", 18, 'style="color:var(--gold);flex-shrink:0"')}
+    </button>`;
+  }).join("");
+}
+
+/* ── the conversation ─────────────────────────────────────────────────
+   A full-screen layer, and the one screen in the app with a bar parked
+   over the on-screen keyboard. index.html explains why the keyboard is
+   left to OVERLAY the app rather than resize it, and names the price: a
+   bottom bar ends up underneath it. The fix stated there is to lift that
+   one bar off a visualViewport measurement, and `--pb-kb` (written in
+   applyViewport, the only code that reads the device) is that number.
+
+   It is spent as PADDING on the layer rather than as a transform on the
+   composer, so the message list shrinks by the same amount: lifting the
+   composer alone would park it on top of the newest message, which is
+   the one you are replying to.                                        */
+function renderChatThread() {
+  const f = ui.chatThread;
+  const t = chatThreadOf(f.threadId);
+  const me = chatMe();
+  const name = chatName(t);
+  const msgs = chatMsgs(f.threadId);
+  const ready = (f.draft || "").trim().length > 0;
+
+  /* A date line between days, because "14:32" with nothing above it is a
+     time on no particular day. */
+  let lastDay = "";
+  const bubbles = msgs.map((m) => {
+    const mine = me && m.from === me.userId;
+    const day = new Date(m.at).toDateString();
+    let sep = "";
+    if (day !== lastDay) {
+      lastDay = day;
+      sep = `<div style="text-align:center;margin:12px 0 10px"><span style="font-size:10.5px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);background:var(--surface2);border-radius:999px;padding:4px 10px">${esc(chatWhen(m.at) === chatStamp(m.at) ? T("chat.today") : chatWhen(m.at))}</span></div>`;
+    }
+
+    const tail = m.failed
+      ? `<button data-action="chat-retry" data-id="${esc(f.threadId)}" data-c="${esc(m.clientId || "")}" style="display:inline-flex;align-items:center;gap:4px;color:var(--red);font-size:10.5px;font-weight:600;padding:2px 0">${icon("rotate-ccw", 11)} ${T("chat.retry")}</button>`
+      : m.pending
+        ? `<span style="font-size:10px;color:var(--faint)">${T("chat.sending")}</span>`
+        : `<span style="font-size:10px;color:${mine ? "rgba(26,21,7,.55)" : "var(--faint)"}">${chatStamp(m.at)}</span>`;
+
+    /* Deleted server-side: the row stays and says so, because a message
+       vanishing out of the middle of a conversation is worse than one
+       that admits it went. */
+    const body = m.body == null
+      ? `<i style="opacity:.7">${T("chat.deleted")}</i>`
+      : esc(m.body).replace(/\n/g, "<br>");
+
+    return `${sep}<div style="display:flex;justify-content:${mine ? "flex-end" : "flex-start"};margin-bottom:7px">
+      <div style="max-width:78%;padding:8px 11px 6px;border-radius:${mine ? "13px 13px 4px 13px" : "13px 13px 13px 4px"};background:${mine ? "var(--gold)" : "var(--surface)"};border:1px solid ${mine ? "var(--gold)" : "var(--border-soft)"};${m.failed ? "border-color:var(--red);" : ""}${m.pending ? "opacity:.72;" : ""}">
+        <div style="font-size:13.5px;line-height:1.45;color:${mine ? "var(--gold-ink)" : "var(--text)"};word-break:break-word;white-space:pre-wrap">${body}</div>
+        <div style="display:flex;justify-content:flex-end;margin-top:2px">${tail}</div>
+      </div>
+    </div>`;
+  }).join("");
+
+  const body = f.loading && !msgs.length
+    ? `<div style="padding:40px 0;text-align:center;font-size:12.5px;color:var(--faint)">${T("sync.working")}</div>`
+    : !msgs.length
+      ? `<div style="padding:40px 20px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T("chat.sayHi", { name: esc(name) })}</div>`
+      : `${f.hasMore ? `<div style="text-align:center;margin:4px 0 12px"><button data-action="chat-earlier" data-id="${esc(f.threadId)}" ${f.paging ? "disabled" : ""} class="pb-btn pb-ghost" style="padding:7px 14px;font-size:12px">${f.paging ? T("sync.working") : T("chat.earlier")}</button></div>` : ""}${bubbles}`;
+
+  return `<div data-overlay="chatThread" data-layer="fs" class="${_lastOverlayKeys.has("chatThread") ? "" : "pb-sheet"}"
+    style="position:absolute;inset:0;z-index:70;background:var(--bg);display:flex;flex-direction:column;padding-bottom:var(--pb-kb, 0px)">
+
+    <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 12px 10px;border-bottom:1px solid var(--border-soft);background:var(--bg);flex-shrink:0">
+      <button data-action="chat-close" style="color:var(--muted);padding:4px;flex-shrink:0">${icon("chevron-left", 24)}</button>
+      ${chatAvatar(name, 34)}
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:700;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(name)}</div>
+        ${t && t.muted ? `<div style="font-size:10.5px;color:var(--faint);display:flex;align-items:center;gap:4px">${icon("bell-off", 10)} ${T("chat.muted")}</div>` : ""}
+      </div>
+      <button data-action="chat-menu" data-id="${esc(f.threadId)}" style="color:var(--muted);padding:6px;flex-shrink:0">${icon("more-vertical", 20)}</button>
+    </div>
+
+    ${f.error ? `<div style="padding:8px 16px;background:rgba(208,90,80,.12);border-bottom:1px solid var(--border-soft);font-size:11.5px;color:var(--red);line-height:1.4">${esc(f.error)}</div>` : ""}
+
+    <div class="pb-scroll" data-scrollkey="chat-${esc(f.threadId)}" data-chatscroll
+      style="flex:1;min-height:0;overflow-y:auto;padding:10px 14px 12px">${body}</div>
+
+    ${/* The composer. A textarea rather than an input, because people
+          write more than one line and enter has to be able to mean a new
+          line — sending is the button, always, which is also what stops
+          a stray keyboard return posting half a sentence. It grows to
+          four lines and then scrolls. */""}
+    <div style="flex-shrink:0;display:flex;align-items:flex-end;gap:8px;padding:9px 12px calc(9px + var(--pb-sab));border-top:1px solid var(--border-soft);background:var(--surface)">
+      <textarea class="pb-input" data-bind="chatDraft" rows="1" enterkeyhint="enter"
+        placeholder="${esc(T("chat.composePh"))}" maxlength="2000"
+        style="flex:1;min-width:0;resize:none;max-height:104px;line-height:1.4;padding-top:9px;padding-bottom:9px">${esc(f.draft || "")}</textarea>
+      <button id="chatSendBtn" data-action="chat-send" data-id="${esc(f.threadId)}" ${ready ? "" : "disabled"}
+        class="pb-btn pb-gold" style="flex-shrink:0;width:42px;height:42px;border-radius:14px;opacity:${ready ? 1 : 0.4}">
+        ${icon("send", 18)}
+      </button>
+    </div>
+  </div>`;
+}
+
+/* Mute, block, leave. A sheet rather than three icons in the header: they
+   are rare, two of them are about a person rather than a thread, and the
+   one that is destructive should not sit a thumb's width from Back. */
+function renderChatMenu() {
+  const id = ui.chatMenu;
+  const t = chatThreadOf(id);
+  if (!t) return "";
+  const name = chatName(t);
+  const other = (t.members || [])[0];
+
+  const row = (action, ic, label, hint, ink = "var(--text)") =>
+    `<button data-action="${action}" data-id="${esc(id)}" ${other ? `data-u="${esc(other.userId)}" data-n="${esc(other.username || "")}"` : ""}
+      class="pb-btn pb-ghost" style="width:100%;padding:12px 14px;margin-bottom:8px;justify-content:flex-start;gap:10px;text-align:left;color:${ink}">
+      ${icon(ic, 16)}
+      <span style="flex:1;min-width:0">
+        <span style="display:block;font-size:13.5px;font-weight:600">${label}</span>
+        <span style="display:block;font-size:11px;color:var(--faint);font-weight:400;margin-top:2px;white-space:normal;line-height:1.4">${hint}</span>
+      </span>
+    </button>`;
+
+  return sheet(esc(name), "chatMenu", `
+    ${row("chat-mute", t.muted ? "bell" : "bell-off",
+      T(t.muted ? "chat.unmute" : "chat.mute"), T(t.muted ? "chat.unmuteHint" : "chat.muteHint"))}
+    ${other ? row("chat-block", "user-x", T("chat.block", { name: esc(other.username || name) }), T("chat.blockHint"), "var(--red)") : ""}
+    ${row("chat-leave", "trash-2", T("chat.leave"), T("chat.leaveHint"), "var(--red)")}
+  `, 130);
 }
 
 /* ─────────────────────────── LIBRARY ──────────────────────────────── */
@@ -8872,6 +9871,10 @@ function bestEverBlock(m, ref, unit) {
    to a field that is being typed in, not to anything persisted. */
 let acctNameTimer = null;
 
+/* The same debounce for the chat tab's username search, and the same
+   reasoning: a prefix search per keystroke is a request per letter. */
+let chatFindTimer = null;
+
 /* What the open set editor is being measured against, worked out by
    renderSetForm and read back by updateSetPreview. Module-level and
    transient, like the chart's in-flight gesture state, rather than a field
@@ -9837,6 +10840,27 @@ function renderProfile(f) {
 
       <div class="pb-hairline" style="margin:18px 0"></div>
       ${sectionTitle(T("push.section"))}
+      ${/* ── TURNING THEM ON, WHERE SOMEBODY WOULD LOOK ──────────────
+            Until chat existed, the only way to grant push permission was
+            the diagnostics page below, which is a page nobody visits. A
+            rest timer survived that because it also rings locally; a
+            message cannot, since the whole point of one is reaching a
+            phone in a pocket with the app shut. So the grant is offered
+            here as well as in the chat tab — same action, same reasons
+            printed when the platform will not allow it, and the button
+            is drawn only while there is something to grant. */
+        (() => {
+          const C = window.ZenofitCloud;
+          if (!C) return "";
+          const why = C.pushBlockedReason();
+          if (why === "unsupported") return "";
+          if (why) return `<div style="font-size:11.5px;color:var(--steel);margin-bottom:12px;line-height:1.5">${T(why === "ios-needs-install" ? "chat.pushIos" : "chat.pushDenied")}</div>`;
+          if (ui.chatPushOn) return `<div style="display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--green);margin-bottom:12px">${icon("check", 14)} ${T("push.on")}</div>`;
+          return `<button data-action="chat-push-on" ${ui.chatPushBusy ? "disabled" : ""} class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:13.5px;margin-bottom:9px;justify-content:flex-start;padding-left:14px;gap:9px">
+            ${icon("bell-ring", 15)} ${ui.chatPushBusy ? T("sync.working") : T("push.enable")}
+          </button>
+          <div style="font-size:11.5px;color:var(--faint);margin-bottom:12px;line-height:1.5">${T("push.enableHint")}</div>`;
+        })()}
       ${/* The diagnostic page is a separate document, so this is a link in
             button's clothing rather than another ui flag: see open-push-test
             for why it is a real navigation and not a new tab. */""}
@@ -11541,8 +12565,16 @@ const actions = {
       try { free = (await C.nameAvailable(username)).available; } catch { /* decide from the attempt instead */ }
       if (free) await C.register(username, password);
       else await C.signIn(username, password);
+      /* Whoever this browser was a moment ago, it is somebody else now.
+         A chat cache is per ACCOUNT (see chatRead), and a friend signing
+         in on a borrowed phone must not be handed the last person's
+         conversations while the first poll is still in flight. */
+      chatForget();
+      ui.chatThread = null; ui.chatMenu = null; ui.chatFind = ""; ui.chatResults = null;
       ui.accountSheet = { ...ui.accountSheet, busy: false, password: "", free: null, error: null };
       render();
+      chatLastPoll = 0;
+      chatPoll();
       /* the whole point of signing in: this device's list becomes the
          account's list, and whatever was only here goes up to join it */
       await rosterSync({ force: true });
@@ -11567,6 +12599,13 @@ const actions = {
     const C = window.ZenofitCloud;
     if (!C || !confirm(T("acct.confirmSignOut"))) return;
     C.signOut();
+    /* The messages are the one thing signing out DOES clear off the
+       phone, and the sentence above is why that is consistent rather than
+       an exception: they are not this device's training, they are the
+       account's conversations, and the server still has every one of them
+       for whenever somebody signs back in. */
+    chatForget();
+    ui.chatThread = null; ui.chatMenu = null; ui.chatFind = ""; ui.chatResults = null;
     ui.accountSheet = { username: "", password: "", free: null, busy: false, error: null, cloud: [], loading: false, loaded: false };
     render();
   },
@@ -12720,6 +13759,139 @@ const actions = {
   },
 
   /* ── presets ──────────────────────────────────────────────────────── */
+  /* ── chat ─────────────────────────────────────────────────────────
+     Every one of these is on READ_OK: a chat belongs to the ACCOUNT, and
+     a profile somebody shared with you read-only has nothing to do with
+     whether you can answer your girlfriend. Nothing here writes `state`. */
+
+  "chat-find-clear": () => { ui.chatFind = ""; ui.chatResults = null; render(); },
+
+  /* Find-or-create on the server, so tapping a name you already have a
+     conversation with takes you to it rather than making a second one.
+     The list is re-polled after, because a brand new thread is not in it
+     yet and the tab behind this layer would show nothing. */
+  "chat-start": async (el) => {
+    const C = window.ZenofitCloud;
+    if (!C || ui.chatStarting) return;
+    ui.chatStarting = true;
+    const list = document.getElementById("chatFindList");
+    if (list) { list.innerHTML = chatResultsHTML(); if (window.lucide) lucide.createIcons(); }
+    try {
+      const res = await C.openChat(el.dataset.id);
+      ui.chatStarting = false;
+      /* into the cache now rather than at the next poll, or the thread
+         the app is about to open is not in the list it reads from */
+      const c = chatRead();
+      if (!c.threads.some((t) => t.threadId === res.threadId)) {
+        c.threads.unshift({
+          threadId: res.threadId, kind: res.kind || "dm", title: null,
+          members: res.members || [{ userId: el.dataset.id, username: el.dataset.n }],
+          unread: 0, muted: false, lastMessage: null, lastMessageAt: Date.now(), lastReadAt: 0,
+        });
+        chatWrite();
+      }
+      openChatThread(res.threadId);
+      chatLastPoll = 0;
+      chatPoll();
+    } catch (e) {
+      ui.chatStarting = false;
+      ui.chatResults = { q: (ui.chatFind || "").trim(), users: [], error: chatErrText(e) };
+      render();
+    }
+  },
+
+  "chat-open": (el) => openChatThread(el.dataset.id),
+  /* The draft is deliberately kept: backing out of a conversation to look
+     something up and coming back to a cleared composer is the same
+     complaint the day-draft store exists to answer. */
+  "chat-close": () => { ui.chatThread = null; ui.chatMenu = null; render(); },
+
+  "chat-earlier": (el) => chatLoadEarlier(el.dataset.id),
+  "chat-retry": (el) => chatDeliver(el.dataset.id, el.dataset.c),
+
+  "chat-send": (el) => {
+    const f = ui.chatThread;
+    if (!f) return;
+    const text = (f.draft || "").trim();
+    if (!text) return;
+    /* cleared BEFORE the send, because chatSend draws the message on
+       screen straight away and a composer still holding it reads as
+       having failed to send */
+    f.draft = "";
+    chatDraftSet(el.dataset.id, "");
+    chatSend(el.dataset.id, text);
+  },
+
+  "chat-menu": (el) => { ui.chatMenu = el.dataset.id; render(); },
+
+  "chat-mute": async (el) => {
+    const C = window.ZenofitCloud;
+    const t = chatThreadOf(el.dataset.id);
+    if (!C || !t) return;
+    const on = !t.muted;
+    t.muted = on; chatWrite();
+    ui.chatMenu = null; render();
+    try { await C.muteChat(el.dataset.id, on); }
+    catch { t.muted = !on; chatWrite(); render(); }
+  },
+
+  /* Asked about first, and said in full: a block is two-directional (see
+     chat.js) and the person on the other end is not told, which is worth
+     knowing before choosing it rather than after. */
+  "chat-block": async (el) => {
+    const C = window.ZenofitCloud;
+    if (!C || !el.dataset.u) return;
+    if (!confirm(T("chat.blockConfirm", { name: el.dataset.n || T("chat.unknown") }))) return;
+    try {
+      await C.blockUser(el.dataset.u);
+      ui.chatMenu = null; ui.chatThread = null;
+      chatLastPoll = 0;
+      await chatPoll();
+      render();
+    } catch (e) { alert(chatErrText(e)); }
+  },
+
+  /* Leaves MY copy. The other person keeps theirs and writing to them
+     again puts the same thread back, which is what the confirm says, or
+     "delete" would promise something this cannot do. */
+  "chat-leave": async (el) => {
+    const C = window.ZenofitCloud;
+    const id = el.dataset.id;
+    if (!C || !id) return;
+    if (!confirm(T("chat.leaveConfirm"))) return;
+    try {
+      await C.leaveChat(id);
+      const c = chatRead();
+      c.threads = c.threads.filter((t) => t.threadId !== id);
+      delete c.msgs[id];
+      delete c.drafts[id];
+      chatWrite();
+      ui.chatMenu = null; ui.chatThread = null;
+      render();
+      chatLastPoll = 0; chatPoll();
+    } catch (e) { alert(chatErrText(e)); }
+  },
+
+  /* The permission prompt, from the tap that has to trigger it: iOS
+     refuses one that was not, and Chrome penalises a site that asks on
+     load. `enablePush` never throws, so every outcome is a reason. */
+  "chat-push-on": async () => {
+    const C = window.ZenofitCloud;
+    if (!C || ui.chatPushBusy) return;
+    ui.chatPushBusy = true; render();
+    const res = await C.enablePush();
+    ui.chatPushBusy = false;
+    if (res && res.ok) ui.chatPushOn = true;
+    render();
+    if (!res || !res.ok) {
+      const why = res && res.reason;
+      alert(T(why === "denied" ? "chat.pushDenied"
+        : why === "ios-needs-install" ? "chat.pushIos"
+        : why === "server-not-configured" ? "chat.pushNoServer"
+        : "chat.pushFailed"));
+    }
+  },
+
   "library-seg": (el) => { ui.librarySeg = el.dataset.id; ui.presetOrder = false; render(); },
   "preset-reorder": () => { ui.presetOrder = !ui.presetOrder; render(); },
   "pinned-reorder": () => { ui.pinnedOrder = !ui.pinnedOrder; render(); },
@@ -13193,8 +14365,15 @@ const actions = {
    `settings` (units, week mode, start date, and Save), because those ARE
    synced and a local change to one would be quietly reverted by the next
    pull — the one outcome this whole list exists to prevent.           */
+/* CHAT is on this list in full, and deliberately. A read grant is about
+   somebody else's TRAINING being on your phone; a conversation is not
+   training and is not theirs. Looking at a friend's log must not stop you
+   answering your girlfriend, and nothing in the chat actions writes
+   `state`, which is the test everything else on this list has to pass. */
 const READ_OK = new Set([
   "nav", "fab", "log-seg", "timer-seg", "library-seg", "prog-seg", "picker-seg", "lib-filter",
+  "chat-open", "chat-close", "chat-send", "chat-start", "chat-find-clear", "chat-earlier",
+  "chat-retry", "chat-menu", "chat-mute", "chat-block", "chat-leave", "chat-push-on",
   "cal-day", "cal-next", "cal-prev", "vol-next", "vol-prev", "toggle-accordion",
   "open-exercise-window", "exwin-close", "exwin-cancel", "open-log-day", "log-day",
   "open-picker", "close-picker", "overlay-close", "close-worksheet", "close-entry",
@@ -13290,6 +14469,76 @@ function handleBind(el) {
       const btn = document.getElementById("attachSaveBtn");
       if (btn) { const ok = !!v.trim(); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
     }
+  } else if (bind === "chatFind") {
+    /* Lower-cased as it is typed, for the reason `acctName` gives: it is
+       compared as `username_lc` anyway, and a name that reads back
+       differently from what you typed is a name you will mistrust. Same
+       rule about the caret, too — NOTHING here calls render(), because
+       render() rebuilds `#app` and would throw away the field the caret
+       is sitting in on every keystroke. */
+    const clean = v.toLowerCase().replace(/[^a-z0-9._-]/g, "").slice(0, 24);
+    if (el.value !== clean) {
+      const cut = el.value.slice(0, el.selectionStart || 0).replace(/[^a-z0-9._-]/gi, "").length;
+      el.value = clean;
+      try { el.setSelectionRange(cut, cut); } catch { /* not a text field */ }
+    }
+    const first = !ui.chatFind;
+    ui.chatFind = clean;
+    /* The tab swaps between the thread list and the results on whether
+       this box has anything in it, and that IS a different screen, so the
+       first character and the last one deleted each earn a render. In
+       between, only the list is patched. */
+    if (first !== !clean) { ui.chatResults = null; render(); }
+    else {
+      const list = document.getElementById("chatFindList");
+      if (list) { list.innerHTML = chatResultsHTML(); if (window.lucide) lucide.createIcons(); }
+    }
+    /* Asked while typing and only once it could return anything (the
+       server refuses a single character outright), debounced so holding
+       a key down is not a request per letter. */
+    clearTimeout(chatFindTimer);
+    /* nothing typed here is state, so this branch does NOT fall through to
+       the persist() at the bottom: it would write the whole profile and arm
+       a sync push for a search box. */
+    if (clean.length >= 2) {
+      const asked = clean;
+      chatFindTimer = setTimeout(async () => {
+        const C = window.ZenofitCloud;
+        if (!C) return;
+        try {
+          const res = await C.searchUsers(asked);
+          if ((ui.chatFind || "") !== asked) return;    // the field has moved on
+          ui.chatResults = { q: asked, users: res.users || [], error: null };
+        } catch (e) {
+          if ((ui.chatFind || "") !== asked) return;
+          ui.chatResults = { q: asked, users: [], error: chatErrText(e) };
+        }
+        const list = document.getElementById("chatFindList");
+        if (list) { list.innerHTML = chatResultsHTML(); if (window.lucide) lucide.createIcons(); }
+      }, 350);
+    }
+    return;
+  } else if (bind === "chatDraft") {
+    /* No render, for the reason above, and it matters more here than
+       anywhere: this field is being typed into continuously. The composer
+       grows with the text and the send button turns on, both patched in
+       place. The draft itself lives on `ui.chatThread` and survives
+       backing out of the conversation and coming back. */
+    if (ui.chatThread) {
+      ui.chatThread.draft = v;
+      chatDraftSet(ui.chatThread.threadId, v);
+    }
+    el.style.height = "auto";
+    el.style.height = Math.min(104, el.scrollHeight) + "px";
+    const btn = document.getElementById("chatSendBtn");
+    if (btn) { const ok = !!v.trim(); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.4; }
+    /* the list shortens as the composer grows, so the newest message has
+       to be chased back down */
+    chatStickBottom();
+    /* and the same rule as the search box: the checkpoint for a message is
+       chatDraftSet above, not the profile write at the bottom of this
+       function */
+    return;
   } else if (bind === "stdq") {
     ui.stdQ = v;
     const list = document.getElementById("stdPickList");
@@ -13608,4 +14857,25 @@ startTimerEngine();
      signed in to come up holding the account's profiles rather than its own */
   rosterSync({ force: true });
   syncPollStart();
+  /* …and the chat poll, which is a different engine on a different clock
+     (see chatWantedGap) because it is answering a different question: not
+     "what did my other phone do" but "has anybody written to me". It does
+     nothing at all until somebody is signed in. */
+  chatPollStart();
+  if (chatSignedIn()) chatPoll();
+
+  /* Is push already on? Only the browser knows, and only asynchronously
+     (it is a question for the service worker's PushManager), so the first
+     frame is drawn assuming not and corrected once the answer lands. That
+     order is deliberate: a launch must not wait on it, and the cost of
+     getting it wrong for one frame is a strip that offers something
+     already granted for a fraction of a second. */
+  const C = window.ZenofitCloud;
+  if (C && C.pushEnabled) {
+    C.pushEnabled().then((on) => {
+      if (!on || ui.chatPushOn) return;
+      ui.chatPushOn = true;
+      if (!syncTyping()) render();
+    }).catch(() => { /* unsupported, or blocked: the strip says which */ });
+  }
 })();

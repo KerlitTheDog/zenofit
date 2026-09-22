@@ -334,15 +334,27 @@ async function route(request, env, url, ctx) {
       "ORDER BY CASE WHEN position IS NULL THEN 1 ELSE 0 END, position, created_at"
     ).bind(user.id).all();
 
+    /* WHO OWNS IT, BY NAME. The roster has always carried `isOwner`, which
+       answers "is this mine" and nothing else: every profile somebody
+       shared with you read as simply not-yours, with no way on the client
+       to say whose it actually is. That is fine until a phone has been
+       signed in to more than one account, at which point "not yours" is
+       the one thing a list of profiles must not be vague about. LEFT JOIN
+       because an owner who never claimed their device has no username, and
+       a missing name is not a reason to drop the row. */
     const joined = await env.DB.prepare(
-      "SELECT p.id, p.name, p.owner_id, p.created_at, p.updated_at, p.position, p.name_updated_at, g.level " +
+      "SELECT p.id, p.name, p.owner_id, p.created_at, p.updated_at, p.position, p.name_updated_at, " +
+      "       g.level, u.username AS owner_name " +
       "FROM grants g JOIN profiles p ON p.id = g.profile_id " +
+      "LEFT JOIN users u ON u.id = p.owner_id " +
       "WHERE g.user_id = ? AND g.revoked_at IS NULL AND p.deleted_at IS NULL ORDER BY g.joined_at"
     ).bind(user.id).all();
 
     const shape = (r, level) => ({
       profileId: r.id, name: r.name, level,
       isOwner: r.owner_id === user.id,
+      /* yours is owned by whoever is asking, so there is nothing to look up */
+      ownerName: r.owner_id === user.id ? user.username : (r.owner_name || null),
       position: r.position, nameUpdatedAt: r.name_updated_at,
       createdAt: r.created_at, updatedAt: r.updated_at,
     });
@@ -522,8 +534,9 @@ async function route(request, env, url, ctx) {
     if (!seed) return fail(400, "bad_code", "That code is not the right shape.");
 
     const row = await env.DB.prepare(
-      "SELECT s.seed, s.level, s.profile_id, p.name, p.owner_id, p.deleted_at " +
+      "SELECT s.seed, s.level, s.profile_id, p.name, p.owner_id, p.deleted_at, u.username AS owner_name " +
       "FROM seeds s JOIN profiles p ON p.id = s.profile_id " +
+      "LEFT JOIN users u ON u.id = p.owner_id " +
       "WHERE s.seed = ? AND s.revoked_at IS NULL"
     ).bind(seed).first();
 
@@ -559,7 +572,8 @@ async function route(request, env, url, ctx) {
       "SELECT level FROM grants WHERE profile_id = ? AND user_id = ?"
     ).bind(row.profile_id, user.id).first();
 
-    return json({ profileId: row.profile_id, name: row.name, level: after.level, isOwner: false }, 201);
+    return json({ profileId: row.profile_id, name: row.name, level: after.level, isOwner: false,
+      ownerName: row.owner_name || null }, 201);
   }
 
   /* ---- who has access ---------------------------------------------------- */

@@ -3254,6 +3254,134 @@ window.addEventListener("pagehide", () => { clearTimeout(syncPushTimer); syncQui
 /* Remote ids this device was told to stop following (Sync → Turn off), so
    the next roster pass does not helpfully adopt them straight back. Kept
    outside `state` with the other sync bookkeeping, for the same reason. */
+/* ══ WHOSE PROFILES THESE ARE ═════════════════════════════════════════
+   A sync record lives on the DEVICE (`zenofit:profiles`) and describes a
+   relationship with an ACCOUNT. Nothing used to write down which account,
+   and signing out does not clear the records — it only forgets the
+   credential, deliberately, because signing out must never delete
+   training. So a phone that had been signed in as one person and was then
+   signed in as another carried a list of profiles still wearing the first
+   account's `remoteId`, `level` and `owned`, and every part of the roster
+   read them as if they belonged to whoever was signed in NOW.
+
+   What that looked like, and it is exactly what was reported: a profile
+   belonging to the first account sitting in the second account's list
+   wearing a gold cloud icon, claiming to sync. Underneath, worse and
+   quieter: step 3 of the roster removes any profile the account's listing
+   does not mention, so the SECOND account's listing was being used to
+   decide that the FIRST account's profiles had been deleted — and step 4
+   uploads anything not yet in the account, so a profile that was merely
+   local on a shared phone went up into whichever account signed in next.
+   None of those are sync working badly; they are three readings of a
+   question nobody had written down.
+
+   So the device records which account its sync records belong to, and a
+   change of account is a real event with a defined outcome:
+
+     · a profile held LIVE is dropped, because it has nothing on this
+       phone — it is a copy of somebody else's log fetched with a token
+       this device no longer has, and removing it loses nothing;
+     · every other profile is SEVERED and kept: the link, the level, the
+       cursor and the change marks go, the training stays exactly where it
+       is, and it is marked `noSync` so the roster does not helpfully
+       enrol somebody else's training into the account that just arrived.
+
+   Nothing is deleted and nothing is uploaded. The profiles are still
+   there, still openable, still exportable; they are simply no longer
+   claimed by an account that never had them. Turning sync back on for one
+   is the same two taps it always was, and now it is a decision somebody
+   made rather than one the app made for them.
+
+   THE FIRST STAMP IS NOT A CHANGE. A device that predates this field has
+   records made under whoever is signed in right now, so the first pass
+   adopts the current account rather than severing everything. */
+const ACCT_KEY = "zenofit:acct";
+const acctUserId = () => {
+  const C = window.ZenofitCloud;
+  const a = C && C.account ? C.account() : null;
+  return a && a.username ? a.userId : null;    // an unclaimed device is nobody
+};
+const syncAcctOf = () => { try { return (JSON.parse(localStorage.getItem(ACCT_KEY)) || {}).userId || null; } catch { return null; } };
+const syncAcctSet = (userId) => { try { localStorage.setItem(ACCT_KEY, JSON.stringify({ userId })); } catch { /* private mode */ } };
+
+/* Everything a record says about a relationship with an account, cleared
+   in one place so a new field cannot be left behind pointing at the wrong
+   one. `undefined` rather than null where the roster tests for absence:
+   JSON.stringify drops those keys entirely. */
+const SEVERED = {
+  remoteId: null, level: null, owned: false, live: false,
+  cursor: null, marks: {}, seen: false,
+  pos: undefined, nameAt: undefined, srvName: undefined, srvNameAt: undefined,
+  ownerName: null,
+};
+
+/* ── WHOSE PROFILE IS THIS, SAID ON THE ROW ───────────────────────────
+   The list used to answer "is this syncing" and never "to whose account",
+   which is one question while a phone has only ever known one account and
+   two the moment it has known more. It is also the question somebody asks
+   when a profile they do not recognise appears: is this mine, is it one
+   somebody shared with me, or is it just sitting on this phone.
+
+   Four answers, and each of them is a fact rather than a state:
+
+     · on this phone only  — no link, nothing leaves the device
+     · your account · <you>  — yours, in the account you are signed in as
+     · shared by <them>      — somebody else's, with the level you have
+     · not signed in         — linked, but nobody is signed in to check it
+                               against, so it claims nothing
+
+   `ownerName` comes from the server (GET /v1/profiles) rather than being
+   inferred, because "not mine" is all `isOwner` can say and a name is what
+   the question was about.                                              */
+function profileOwnerLine(localId) {
+  const rec = syncFor(localId) || {};
+  const me = acctUserId();
+
+  if (!rec.remoteId) return { text: T("profiles.ownLocal"), color: "var(--faint)" };
+  if (!me) return { text: T("profiles.ownSignedOut"), color: "var(--faint)" };
+
+  if (rec.owned) {
+    const C = window.ZenofitCloud;
+    const who = (C && C.account && (C.account() || {}).username) || rec.ownerName;
+    return { text: T("profiles.ownMine", { name: esc(who || "") }), color: "var(--gold)" };
+  }
+
+  const who = rec.ownerName ? esc(rec.ownerName) : T("profiles.ownUnknown");
+  const how = T(rec.level === "read" ? "profiles.ownRead" : "profiles.ownWrite");
+  return { text: T("profiles.ownTheirs", { name: who, how }), color: "var(--steel)" };
+}
+
+function reconcileAccount() {
+  const uid = acctUserId();
+  if (!uid) return false;                 // signed out: decided when somebody signs in
+  const was = syncAcctOf();
+  if (was === uid) return false;
+
+  syncAcctSet(uid);
+
+  /* First time this device has ever written the field. Whoever is signed
+     in now is who these records were made under, so they are stamped
+     rather than severed — anything else would cut every existing install
+     loose on the first launch after this shipped. */
+  if (!was) {
+    for (const p of profileList()) if (syncFor(p.id)) syncSet(p.id, { acct: uid });
+    return false;
+  }
+
+  let changed = false;
+  for (const p of profileList().slice()) {
+    const rec = syncFor(p.id);
+    if (rec && rec.acct === uid) continue;          // already this account's
+    /* A live profile holds nothing here. Dropping it is the honest move,
+       and dropLocalProfile refuses to empty the list, so a phone holding
+       only that one keeps it and it is severed below instead. */
+    if (rec && rec.live && dropLocalProfile(p.id)) { changed = true; continue; }
+    syncSet(p.id, { ...SEVERED, acct: uid, noSync: true });
+    changed = true;
+  }
+  return changed;
+}
+
 const DROP_KEY = "zenofit:dropped";
 const droppedRemotes = () => { try { return JSON.parse(localStorage.getItem(DROP_KEY)) || []; } catch { return []; } };
 function dropRemote(remoteId, on) {
@@ -3414,6 +3542,12 @@ async function rosterSync(opts) {
        so a delete made with no signal finally lands the moment there is
        one, on whichever device happens to be open. */
     await runPendingRemovals();
+    /* Before a single line of the listing is believed: has this device
+       changed hands? Everything below reads a local record as if it
+       described a relationship with the account that is signed in now,
+       and that is only true once this has said so. */
+    if (reconcileAccount()) changed = true;
+    const myId = acctUserId();
     const res = await C.listProfiles();
     const cloud = (res && res.profiles) || [];
     rosterAt = Date.now();
@@ -3438,6 +3572,9 @@ async function rosterSync(opts) {
         live: level === "read",
         nameAt: cp.nameUpdatedAt || 0, srvName: cp.name || "", srvNameAt: cp.nameUpdatedAt || 0,
         pos: cp.position, seen: true,
+        /* which account this link belongs to, and whose profile it is by
+           NAME rather than merely "not yours" -- see profileOwnerLine */
+        acct: myId, ownerName: cp.ownerName || null,
       });
       /* a read grant is held live, exactly as joining one is */
       if (level === "read") { try { localStorage.removeItem(stateKeyFor(localId)); } catch { /* none yet */ } }
@@ -3457,7 +3594,7 @@ async function rosterSync(opts) {
 
       /* Whose it is, straight from the server, every pass. Delete-vs-leave
          turns on this one field and a stale answer sends the wrong verb. */
-      syncSet(id, { owned: !!cp.isOwner });
+      syncSet(id, { owned: !!cp.isOwner, acct: myId, ownerName: cp.ownerName || null });
 
       /* ── A PROFILE YOU ONLY READ WEARS ITS OWNER'S NAME ─────────────
          Renaming one locally was allowed, and the nickname went nowhere:
@@ -3548,6 +3685,12 @@ async function rosterSync(opts) {
     for (const id of profileList().map((p) => p.id)) {
       const rec = syncFor(id);
       if (!rec || !rec.remoteId || !rec.seen) continue;
+      /* A record belonging to another account is not evidence of anything
+         this listing says. reconcileAccount has already severed those, so
+         this is the belt to that braces -- and getting it wrong means
+         deleting a profile from the list because somebody ELSE'S account
+         has never heard of it. */
+      if (rec.acct && rec.acct !== myId) continue;
       if (byRemote.has(rec.remoteId)) continue;
       if (dropLocalProfile(id)) changed = true;
     }
@@ -3569,7 +3712,8 @@ async function rosterSync(opts) {
         /* linked BEFORE the push, so one that dies half way leaves a
            profile that knows where it lives rather than an orphan */
         syncSet(id, { remoteId, level: "owner", owned: true, marks: {}, cursor: null,
-          nameAt: at, srvName: made.name, srvNameAt: at, pos: i, seen: true });
+          nameAt: at, srvName: made.name, srvNameAt: at, pos: i, seen: true,
+          acct: myId, ownerName: (window.ZenofitCloud.account() || {}).username || null });
         await syncPush(id);
         changed = true;
       } catch { /* next pass */ }
@@ -7276,32 +7420,50 @@ function renderChat() {
     </div>`;
   }
 
-  const q = (ui.chatFind || "").trim();
-  const searching = q.length > 0;
-
-  /* ── FINDING SOMEBODY ────────────────────────────────────────────
+  /* ── FINDING SOMEBODY ───────────────────────────────
      One field, at the top of the tab, because "add somebody" is the
      only way a conversation ever starts and burying it behind a sheet
      would make the empty state a dead end. It is a PREFIX search on
      the username (see chat.js: a substring search over every account
      is a directory), so the hint says username rather than "name".
-     Typing filters what is on screen and nothing else: the thread list
-     comes back the moment the field is cleared.                     */
+
+     ── THE WHOLE TAB BELOW THE FIELD IS ONE PATCHABLE BOX ────────
+     and that is not a tidiness choice, it is the fix for a real bug.
+     Typing used to swap the tab between the thread list and the
+     results, and that swap was done with render() — which rebuilds
+     `#app`, throws away the input the caret is sitting in, and drops
+     focus. So the FIRST letter typed and the LAST one deleted each
+     kicked you out of the field: you typed one character, the keyboard
+     shut, and you had to tap back in to type the second. Every other
+     search in this app (`libq`, `pickq`, `stdq`) patches a container
+     and never renders, and this one now does the same. The two states
+     are one `chatBodyHTML()` and the field itself never moves.
+
+     The clear button is ALWAYS in the DOM for the same reason — drawing
+     it only while there is something to clear would change the field's
+     own markup on the first keystroke, which is the very thing that
+     cost the focus — so it is shown and hidden in place, and the
+     padding that makes room for it is constant.                     */
   const finder = `<div style="position:relative;margin-bottom:12px">
     <input class="pb-input" data-bind="chatFind" value="${esc(ui.chatFind || "")}"
       placeholder="${esc(T("chat.findPh"))}" autocapitalize="none" autocorrect="off"
-      spellcheck="false" maxlength="24" style="padding-left:36px;padding-right:${searching ? 36 : 12}px">
+      spellcheck="false" maxlength="24" style="padding-left:36px;padding-right:36px">
     <span style="position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--faint);pointer-events:none;display:flex">${icon("search", 15)}</span>
-    ${searching ? `<button data-action="chat-find-clear" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);color:var(--muted);padding:4px;display:flex">${icon("x", 15)}</button>` : ""}
+    <button id="chatFindClear" data-action="chat-find-clear" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);color:var(--muted);padding:4px;display:${(ui.chatFind || "") ? "flex" : "none"}">${icon("x", 15)}</button>
   </div>`;
 
-  if (searching) {
-    return `<div style="padding:14px 16px 0">
-      ${finder}
-      <div id="chatFindList">${chatResultsHTML()}</div>
-      <div style="height:14px"></div>
-    </div>`;
-  }
+  return `<div style="padding:14px 16px 0">
+    ${finder}
+    <div id="chatBody">${chatBodyHTML()}</div>
+    <div style="height:14px"></div>
+  </div>`;
+}
+
+/* Everything under the search field: the results while something is typed
+   in it, the conversations otherwise. One function because it is one box on
+   screen, and `handleBind` swaps its contents without a render. */
+function chatBodyHTML() {
+  if ((ui.chatFind || "").trim()) return chatResultsHTML();
 
   const threads = chatThreads();
 
@@ -7337,15 +7499,20 @@ function renderChat() {
     </button>`;
   }).join("");
 
-  return `<div style="padding:14px 16px 0">
-    ${finder}
-    ${chatPushStrip()}
-    ${threads.length ? rows : `<div class="pb-card" style="padding:26px 20px;text-align:center;color:var(--muted);font-size:13px;line-height:1.6">
+  return `${chatPushStrip()}${threads.length ? rows : `<div class="pb-card" style="padding:26px 20px;text-align:center;color:var(--muted);font-size:13px;line-height:1.6">
       ${icon("message-circle", 26, 'style="margin:0 auto 10px;display:block;color:var(--faint)"')}
       ${T("chat.empty")}
-    </div>`}
-    <div style="height:14px"></div>
-  </div>`;
+    </div>`}`;
+}
+
+/* Swap what is under the search field, and keep the clear button in step,
+   without touching the field itself. Called from `handleBind` on every
+   keystroke and from the clear button, so neither ever costs focus. */
+function chatPatchBody() {
+  const box = document.getElementById("chatBody");
+  if (box) { box.innerHTML = chatBodyHTML(); if (window.lucide) lucide.createIcons(); }
+  const clear = document.getElementById("chatFindClear");
+  if (clear) clear.style.display = (ui.chatFind || "") ? "flex" : "none";
 }
 
 /* The search results, patched in place rather than re-rendered, the same
@@ -10941,6 +11108,7 @@ function renderProfilesWindow() {
       const on = p.id === active;
       const st = stats[p.id] || { days: 0, entries: 0 };
       const sy = syncState(p.id);
+      const own = profileOwnerLine(p.id);
       return `<div style="display:flex;align-items:center;border-bottom:${i < list.length - 1 ? "1px solid var(--border-soft)" : "none"};background:${on ? "rgba(233,185,73,.06)" : "transparent"}">
         <button ${on ? "" : `data-action="profile-switch" data-id="${esc(p.id)}"`} style="flex:1;min-width:0;display:flex;align-items:center;gap:11px;padding:13px 4px 13px 14px;text-align:left;color:var(--text)">
           <span style="width:9px;height:9px;border-radius:5px;flex-shrink:0;background:${on ? "var(--gold)" : "var(--border)"}"></span>
@@ -10949,7 +11117,14 @@ function renderProfilesWindow() {
               <span style="min-width:0;font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(profileLabel(p, i))}</span>
               ${sy.icon ? icon(sy.icon, 13, `style="color:${sy.color};flex-shrink:0" aria-label="${esc(sy.label)}"`) : ""}
             </span>
-            <span style="display:block;font-size:11.5px;color:var(--faint)">${on ? T("profiles.current") + " · " : ""}${TN("day", st.days)} · ${TN("logEntry", st.entries)}${sy.icon ? ` · <span style="color:${sy.color}">${esc(sy.label)}</span>` : ""}</span>
+            <span style="display:block;font-size:11.5px;color:var(--faint)">${on ? T("profiles.current") + " · " : ""}${TN("day", st.days)} · ${TN("logEntry", st.entries)}</span>
+            ${/* A line of its own rather than a fourth clause on the one
+                  above: it is the answer to a different question, and the
+                  row it is answering it for is one somebody did not
+                  recognise. It also absorbs what the sync label used to
+                  say, since "shared by em · read only" states the level
+                  and whose it is in the space the level alone took. */""}
+            <span style="display:block;font-size:11px;margin-top:1px;color:${own.color}">${own.text}</span>
           </span>
         </button>
         <button data-action="profile-menu" data-id="${esc(p.id)}" title="${T("common.edit")}" style="flex-shrink:0;padding:13px 14px;color:var(--faint);align-self:stretch">${icon("pencil", 16)}</button>
@@ -11259,7 +11434,7 @@ function renderAccountSheet() {
     const cloudRows = cloudOnly.map((p) =>
       row(p.name || T("sync.joinedName"),
         T(p.isOwner ? "acct.owned" : p.level === "read" ? "sync.levelRead" : "sync.levelWrite"), "var(--faint)",
-        `<button data-action="acct-pull" data-p="${esc(p.profileId)}" data-n="${esc(p.name || "")}" data-lv="${esc(p.level || "write")}" data-own="${p.isOwner ? "1" : "0"}" class="pb-btn pb-ghost" style="flex-shrink:0;padding:7px 12px;font-size:12px;color:var(--gold);border-color:rgba(233,185,73,.4)">${icon("cloud-download", 13)} ${T("acct.getIt")}</button>`)
+        `<button data-action="acct-pull" data-p="${esc(p.profileId)}" data-n="${esc(p.name || "")}" data-lv="${esc(p.level || "write")}" data-own="${p.isOwner ? "1" : "0"}" data-owner="${esc(p.ownerName || "")}" class="pb-btn pb-ghost" style="flex-shrink:0;padding:7px 12px;font-size:12px;color:var(--gold);border-color:rgba(233,185,73,.4)">${icon("cloud-download", 13)} ${T("acct.getIt")}</button>`)
     ).join("");
 
     return sheet(T("acct.title"), "accountSheet", `
@@ -12571,6 +12746,12 @@ const actions = {
          conversations while the first poll is still in flight. */
       chatForget();
       ui.chatThread = null; ui.chatMenu = null; ui.chatFind = ""; ui.chatResults = null;
+      /* …and the profiles, for the same reason one level up: the sync
+         records on this device were made under whoever was signed in
+         before. Done HERE rather than left to the roster pass below so
+         nothing in between — an autosave, a poll — can act on a link
+         belonging to the previous account. */
+      reconcileAccount();
       ui.accountSheet = { ...ui.accountSheet, busy: false, password: "", free: null, error: null };
       render();
       chatLastPoll = 0;
@@ -12647,7 +12828,8 @@ const actions = {
       /* linked BEFORE the push, so one that dies half way leaves a profile
          that knows where it lives rather than an orphan on the server */
       syncSet(localId, { remoteId: made.profileId || made.id, level: "write", owned: true, marks: {}, cursor: null,
-        noSync: false, nameAt: at, srvName: made.name, srvNameAt: at, pos: i, seen: true });
+        noSync: false, nameAt: at, srvName: made.name, srvNameAt: at, pos: i, seen: true,
+        acct: acctUserId(), ownerName: ((window.ZenofitCloud.account() || {}).username || null) });
       await syncPush(localId);
       syncSet(localId, { lastOkAt: Date.now() });
     } catch (e) {
@@ -12669,7 +12851,8 @@ const actions = {
     const level = el.dataset.lv === "read" ? "read" : "write";
     const localId = addProfile(el.dataset.n || T("sync.joinedName"), { forRemote: true });
     if (!localId) { ui.accountSheet = { ...f, error: T("profiles.quota") }; render(); return; }
-    syncSet(localId, { remoteId, level, owned: el.dataset.own === "1", marks: {}, cursor: null, live: level === "read" });
+    syncSet(localId, { remoteId, level, owned: el.dataset.own === "1", marks: {}, cursor: null, live: level === "read",
+      acct: acctUserId(), ownerName: el.dataset.own === "1" ? ((window.ZenofitCloud.account() || {}).username || null) : (el.dataset.owner || null) });
     ui.accountSheet = null;
     if (level === "read") { try { localStorage.removeItem(stateKeyFor(localId)); } catch { /* none yet */ } }
     switchProfile(localId);
@@ -12708,7 +12891,8 @@ const actions = {
          profile that knows where it lives and can simply be synced again,
          rather than an orphan on the server nothing points at */
       syncSet(f.localId, { remoteId: made.profileId || made.id, level: "write", owned: true, marks: {}, cursor: null,
-        noSync: false, nameAt: at, srvName: made.name, srvNameAt: at, pos: i, seen: true });
+        noSync: false, nameAt: at, srvName: made.name, srvNameAt: at, pos: i, seen: true,
+        acct: acctUserId(), ownerName: ((window.ZenofitCloud.account() || {}).username || null) });
       ui.syncBusy = false;
       await syncNow(f.localId);
     } catch (e) {
@@ -12864,7 +13048,8 @@ const actions = {
        it needs a connection, and it is somebody else's log, so there is
        nothing here a failed fetch can lose. A WRITE grant is a profile you
        are expected to train in, so it is stored like any other. */
-    syncSet(localId, { remoteId, level, owned: false, marks: {}, cursor: null, live: level === "read" });
+    syncSet(localId, { remoteId, level, owned: false, marks: {}, cursor: null, live: level === "read",
+      acct: acctUserId(), ownerName: (joined && joined.ownerName) || null });
     ui.joinSheet = null;
     if (level === "read") { try { localStorage.removeItem(stateKeyFor(localId)); } catch { /* none yet */ } }
     switchProfile(localId);
@@ -13764,7 +13949,15 @@ const actions = {
      a profile somebody shared with you read-only has nothing to do with
      whether you can answer your girlfriend. Nothing here writes `state`. */
 
-  "chat-find-clear": () => { ui.chatFind = ""; ui.chatResults = null; render(); },
+  /* Clearing puts the thread list back and leaves you in the field, ready
+     to type the next name. A render() here would work and would also shut
+     the keyboard, which is the bug this whole path was rewritten for. */
+  "chat-find-clear": () => {
+    ui.chatFind = ""; ui.chatResults = null;
+    const field = document.querySelector('[data-bind="chatFind"]');
+    if (field) { field.value = ""; try { field.focus(); } catch { /* gone */ } }
+    chatPatchBody();
+  },
 
   /* Find-or-create on the server, so tapping a name you already have a
      conversation with takes you to it rather than making a second one.
@@ -13774,8 +13967,7 @@ const actions = {
     const C = window.ZenofitCloud;
     if (!C || ui.chatStarting) return;
     ui.chatStarting = true;
-    const list = document.getElementById("chatFindList");
-    if (list) { list.innerHTML = chatResultsHTML(); if (window.lucide) lucide.createIcons(); }
+    chatPatchBody();
     try {
       const res = await C.openChat(el.dataset.id);
       ui.chatStarting = false;
@@ -14482,17 +14674,19 @@ function handleBind(el) {
       el.value = clean;
       try { el.setSelectionRange(cut, cut); } catch { /* not a text field */ }
     }
-    const first = !ui.chatFind;
+    const was = ui.chatFind || "";
     ui.chatFind = clean;
-    /* The tab swaps between the thread list and the results on whether
-       this box has anything in it, and that IS a different screen, so the
-       first character and the last one deleted each earn a render. In
-       between, only the list is patched. */
-    if (first !== !clean) { ui.chatResults = null; render(); }
-    else {
-      const list = document.getElementById("chatFindList");
-      if (list) { list.innerHTML = chatResultsHTML(); if (window.lucide) lucide.createIcons(); }
-    }
+    /* ── NOT ONE render() ON THIS PATH, INCLUDING THE SWAP ───────────
+       The tab shows the thread list with nothing typed and the results
+       with something, and that swap USED to be done with render(). It
+       rebuilds `#app`, so the input the caret was in was thrown away
+       and focus went with it: you typed one letter, the keyboard shut,
+       and you had to tap back into the field to type the second. Same
+       on deleting the last one. `chatBodyHTML` is both states, the
+       field above it never moves, and this patches the box between
+       them exactly as the library and picker searches do. */
+    if (!clean || !was) ui.chatResults = null;   // entering or leaving the search
+    chatPatchBody();
     /* Asked while typing and only once it could return anything (the
        server refuses a single character outright), debounced so holding
        a key down is not a request per letter. */
@@ -14513,8 +14707,7 @@ function handleBind(el) {
           if ((ui.chatFind || "") !== asked) return;
           ui.chatResults = { q: asked, users: [], error: chatErrText(e) };
         }
-        const list = document.getElementById("chatFindList");
-        if (list) { list.innerHTML = chatResultsHTML(); if (window.lucide) lucide.createIcons(); }
+        chatPatchBody();
       }, 350);
     }
     return;
@@ -14851,6 +15044,10 @@ startTimerEngine();
     const rec = syncFor(p.id);
     if (rec && rec.level === "read" && !rec.live) liveAdopt(p.id);
   }
+  /* First, because everything below reads the sync records and they may
+     have been written under a different account than the one this device
+     is signed in as now. */
+  reconcileAccount();
   if (syncLive(activeProfileId())) liveEnter(activeProfileId());
   else syncQuiet();          // catch up on whatever the other phone did while this one was shut
   /* and the list itself, which is what makes a device that has just been

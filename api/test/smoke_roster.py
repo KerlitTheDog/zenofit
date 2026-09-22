@@ -14,7 +14,7 @@ before positions existed, and a listing that has to say enough for a second
 device to rebuild the whole list from it.
 """
 import os
-import json, urllib.request, urllib.error, sys
+import json, urllib.request, urllib.error, sys, hashlib, uuid
 
 # Override to run against a local `wrangler dev`:
 #   ZENOFIT_API=http://127.0.0.1:8787 python3 test/smoke_roster.py
@@ -47,6 +47,21 @@ def device(label):
     s, b = call("POST", "/v1/devices", body={"displayName": label})
     assert s == 201, (s, b)
     return b["token"], b["userId"]
+
+
+def derive(username, password):
+    """The client half of the password work, as zenofit-cloud.js does it."""
+    return hashlib.pbkdf2_hmac(
+        "sha256", password.encode(), ("zenofit:" + username.lower()).encode(), 210000, 32
+    ).hex()
+
+
+def account(label):
+    """A registered account, which is the only thing that HAS a username."""
+    name = (label + uuid.uuid4().hex[:8])[:24]
+    s, b = call("POST", "/v1/auth/register", body={"username": name, "key": derive(name, "correct horse battery")})
+    assert s == 201, (s, b)
+    return {"token": b["token"], "id": b["userId"], "name": b["username"]}
 
 names = lambda listing: [p["name"] for p in listing["profiles"]]
 ids = lambda listing: [p["profileId"] for p in listing["profiles"]]
@@ -118,6 +133,41 @@ s, _ = call("PUT", "/v1/profiles/%s" % a["profileId"], token=her,
 check("she cannot rename it", s == 404, s)
 s, o = call("POST", "/v1/profiles/order", token=her, body={"order": [a["profileId"]]})
 check("and ordering skips what she cannot write rather than failing", s == 200 and o.get("ordered") == 0, (s, o))
+
+print("\n== the roster says WHO owns each profile, by name ==")
+# isOwner only answers "is this mine". Once a phone has been signed in to
+# more than one account that is not enough: a profile you do not recognise
+# needs to say whose it is, and a boolean cannot.
+named = account("owner")
+s, np = call("POST", "/v1/profiles", token=named["token"], body={"name": "Named owner profile"})
+s, mine = call("GET", "/v1/profiles", token=named["token"])
+row = [p for p in mine.get("profiles", []) if p["profileId"] == np["profileId"]]
+check("your own profile is owned by your username",
+      row and row[0].get("ownerName") == named["name"], row)
+
+friend = account("friend")
+s, sd = call("POST", "/v1/profiles/%s/seeds" % np["profileId"], token=named["token"], body={"level": "write"})
+s, j = call("POST", "/v1/join", token=friend["token"], body={"seed": sd["seed"]})
+check("joining reports the owner straight away, so the row is labelled before any sync",
+      j.get("ownerName") == named["name"], j)
+s, theirs = call("GET", "/v1/profiles", token=friend["token"])
+row = [p for p in theirs.get("profiles", []) if p["profileId"] == np["profileId"]]
+check("and their listing names the owner rather than only saying not-yours",
+      row and row[0].get("ownerName") == named["name"] and row[0]["isOwner"] is False, row)
+
+# A device that never registered owns profiles under no username at all.
+# That must not drop the row, which is why the join is a LEFT JOIN.
+anon, _ = device("unclaimed owner")
+s, ap = call("POST", "/v1/profiles", token=anon, body={"name": "Owned by nobody"})
+s, sd2 = call("POST", "/v1/profiles/%s/seeds" % ap["profileId"], token=anon, body={"level": "read"})
+s, _ = call("POST", "/v1/join", token=friend["token"], body={"seed": sd2["seed"]})
+s, theirs = call("GET", "/v1/profiles", token=friend["token"])
+row = [p for p in theirs.get("profiles", []) if p["profileId"] == ap["profileId"]]
+check("an owner with no account leaves the row present and the name empty",
+      row and row[0].get("ownerName") is None, row)
+call("DELETE", "/v1/profiles/" + ap["profileId"], token=anon)
+call("DELETE", "/v1/profiles/" + np["profileId"], token=named["token"])
+
 
 print("\n== leaving a profile somebody shared with you ==")
 # The one that shipped broken: "delete" on a shared profile could only ever be

@@ -251,6 +251,31 @@ check("writing to them again puts the SAME thread back, not a second one",
 s, r = call("GET", "/v1/chats/%s/messages" % btid, token=blocker["token"])
 check("with the history still in it", len(r.get("messages", [])) >= 2, r.get("messages"))
 
+print("\n== the OTHER person writing brings a removed chat back too ==")
+# The confirm promises "writing to them again brings this same chat back". It
+# used to be true only for the person who removed it: the other side wrote
+# into a thread that reached nobody — no list entry, no badge, no push —
+# while their own screen showed it sent.
+s, r = call("DELETE", "/v1/chats/" + btid, token=blocker["token"])
+check("removed from my list again", s == 200, (s, r))
+s, r = call("POST", "/v1/chats/%s/messages" % btid, token=nosy["token"], body={"body": "are you there?", "clientId": "back1"})
+check("they write, and it reaches somebody", s == 201 and r.get("recipients") == 1, (s, r))
+s, r = call("GET", "/v1/chats", token=blocker["token"])
+mine = [c for c in r.get("chats", []) if c["threadId"] == btid]
+check("the chat is back in my list", len(mine) == 1, r)
+check("with their message counted as unread", mine and mine[0]["unread"] >= 1, mine)
+
+print("\n== a block holds when the blocker has also removed the chat ==")
+s, r = call("POST", "/v1/chats/blocks", token=blocker["token"], body={"userId": nosy["id"]})
+s, r = call("DELETE", "/v1/chats/" + btid, token=blocker["token"])
+s, r = call("POST", "/v1/chats/%s/messages" % btid, token=nosy["token"], body={"body": "sneaky", "clientId": "sneak1"})
+check("writing is still refused", s == 403 and r.get("error") == "blocked", (s, r))
+call("DELETE", "/v1/chats/blocks/" + nosy["id"], token=blocker["token"])
+s, r = call("POST", "/v1/chats", token=blocker["token"], body={"userId": nosy["id"]})
+s, r = call("GET", "/v1/chats/%s/messages" % btid, token=blocker["token"])
+check("and nothing sent during the block is waiting afterwards",
+      not any(m["body"] == "sneaky" for m in r.get("messages", [])), [m["body"] for m in r.get("messages", [])])
+
 print("\n== a conversation with nothing in it ==")
 quiet_a = account("dan")
 quiet_b = account("fay")

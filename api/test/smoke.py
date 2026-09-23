@@ -131,6 +131,40 @@ check("revoked person loses access", s == 404, (s, b))
 s, b, _ = call("GET", "/v1/profiles", token=tokC)
 check("revoked person's list is empty", s == 200 and b["profiles"] == [], (s, b))
 
+print("\n== removed means removed, and leaving is not removal ==")
+# "Remove this person? They lose access straight away." It used to revoke the
+# grant and leave the code alone, so the person typed the code again and was
+# straight back in, writing.
+tokE, uidE = device("removed")
+s, b, _ = call("POST", "/v1/join", token=tokE, body={"seed": rot["seed"]})
+check("joins on the live code", s == 201, (s, b))
+call("DELETE", "/v1/profiles/%s/grants/%s" % (PID, uidE), token=tokA)
+s, b, _ = call("POST", "/v1/join", token=tokE, body={"seed": rot["seed"]})
+check("once removed, the same code does not let them back", s == 404 and b.get("error") == "bad_code", (s, b))
+s, b, _ = call("POST", "/v1/profiles/%s/items" % PID, token=tokE, body={"items": [{"collection": "log", "itemId": "x", "json": {"id": "x"}}]})
+check("and they cannot write", s == 404, (s, b))
+s, fresh, _ = call("POST", "/v1/profiles/%s/seeds" % PID, token=tokA, body={"level": "write", "rotate": True})
+s, b, _ = call("POST", "/v1/join", token=tokE, body={"seed": fresh["seed"]})
+check("a code made afterwards is the owner inviting them back", s == 201, (s, b))
+tokF, uidF = device("leaves")
+call("POST", "/v1/join", token=tokF, body={"seed": fresh["seed"]})
+s, b, _ = call("DELETE", "/v1/profiles/%s/grants/me" % PID, token=tokF)
+check("leaving on your own works", s == 200 and b.get("left"), (s, b))
+s, b, _ = call("POST", "/v1/join", token=tokF, body={"seed": fresh["seed"]})
+check("and changing your mind with the same code is still allowed", s == 201, (s, b))
+
+print("\n== the people list names people ==")
+# display_name is NULL for every account made with a username, and the owner's
+# list read "Someone" for all of them.
+import hashlib, secrets as _secrets
+uname = "zt_named_" + _secrets.token_hex(3)
+s, acct, _ = call("POST", "/v1/auth/register", body={"username": uname, "key": hashlib.sha256(uname.encode()).hexdigest()})
+check("an account with a username", s == 201, (s, acct))
+call("POST", "/v1/join", token=acct["token"], body={"seed": fresh["seed"]})
+s, b, _ = call("GET", "/v1/profiles/%s/grants" % PID, token=tokA)
+named = [g for g in b.get("grants", []) if g["userId"] == acct["userId"]]
+check("its grant carries the username", named and named[0].get("username") == uname and named[0].get("displayName") == uname, named)
+
 print("\n== rate limit on join ==")
 codes = []
 for i in range(13):

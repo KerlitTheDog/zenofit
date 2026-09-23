@@ -154,11 +154,26 @@
     return res;
   }
 
-  /* Forgets this browser's credential and nothing else. The account and
-     everything in it stay exactly where they are, on the server; signing in
-     again brings it all back. The app clears its own local copies. */
+  /* Forgets this browser's credential, and tells the server to forget it
+     too. The account and everything in it stay exactly where they are;
+     signing in again brings it all back. The app clears its own local
+     copies.
+
+     The server half used to be missing, so a logged-out token went on
+     working for ever: anybody who had copied it off a borrowed phone still
+     had the account. It is sent and not awaited — logging out in a basement
+     must still log out — so a token that could not be revoked because there
+     was no signal is the one case left, and nothing on this phone holds it
+     any more. */
   function signOut() {
+    const d = read(DEVICE_KEY);
     try { localStorage.removeItem(DEVICE_KEY); } catch { /* already gone */ }
+    if (d && d.token) {
+      try {
+        fetch(API + "/v1/auth/logout", { method: "POST", headers: { Authorization: "Bearer " + d.token } })
+          .catch(() => { /* no signal: see above */ });
+      } catch { /* no fetch at all */ }
+    }
   }
 
   /* Does this password open this account? Answered without signing in:
@@ -436,8 +451,12 @@
    * rather than living on whichever phone the list was dragged on.
    */
   const listProfiles   = () => call("GET", "/v1/profiles");
+  /* opts.clientKey is this device's own id for the profile. Sent again after
+     a reply that never arrived, it gets the SAME profile back rather than a
+     second one (see POST /v1/profiles). */
   const createProfile  = (name, opts) =>
-    call("POST", "/v1/profiles", { name, position: (opts || {}).position, nameUpdatedAt: (opts || {}).nameUpdatedAt });
+    call("POST", "/v1/profiles", { name, position: (opts || {}).position, nameUpdatedAt: (opts || {}).nameUpdatedAt,
+      clientKey: (opts || {}).clientKey });
   /* The reply carries the name that WON, which is not always the one sent:
      a rename older than the stored one comes back `stale: true` with the
      newer name, and that is the answer, not an error to retry. */

@@ -35,11 +35,16 @@
   <link rel="apple-touch-icon" href="icon-192.png">
   <script>
     /* Stamp the saved theme before first paint to avoid a flash of the
-       wrong palette. app.js keeps this in sync afterward. */
+       wrong palette. app.js writes `zenofit:theme` every time it applies one
+       (applyTheme); the old single-save key is only read for a phone that
+       has not run a build that writes it yet. */
     (function () {
       try {
-        var s = JSON.parse(localStorage.getItem("powerbuild-tracker:v1"));
-        var t = s && s.settings && s.settings.theme;
+        var t = localStorage.getItem("zenofit:theme");
+        if (t !== "light" && t !== "dark") {
+          var s = JSON.parse(localStorage.getItem("powerbuild-tracker:v1"));
+          t = s && s.settings && s.settings.theme;
+        }
         document.documentElement.setAttribute("data-theme", t === "light" ? "light" : "dark");
       } catch (e) {
         document.documentElement.setAttribute("data-theme", "dark");
@@ -76,16 +81,20 @@
     if (!("serviceWorker" in navigator)) return;
 
     /* Phase 5 will read this: sw.js posts notification clicks here so the app
-       can jump to the timer that fired. Queued until app.js claims it. */
-    window.__zenofitSW = { pendingClicks: [], onClick: null };
+       can jump to the timer that fired. Queued until app.js claims it.
+       `updated` says a newer build than the one running is ready (see
+       updateReady), and `wantReload` that somebody asked for it — Refresh in
+       app.js reads both. */
+    window.__zenofitSW = { pendingClicks: [], onClick: null, updated: false, wantReload: false };
     navigator.serviceWorker.addEventListener("message", function (e) {
+      if (e.data && e.data.type === "shell-updated") { updateReady(); return; }
       if (!e.data || e.data.type !== "notification-click") return;
       var h = window.__zenofitSW.onClick;
       if (typeof h === "function") h(e.data.data);
       else window.__zenofitSW.pendingClicks.push(e.data.data);
     });
 
-    function banner(reg) {
+    function banner() {
       if (document.getElementById("sw-update-bar")) return;
       var bar = document.createElement("div");
       bar.id = "sw-update-bar";
@@ -105,8 +114,9 @@
         "font:600 14px system-ui,sans-serif;background:#4f7cff;color:#fff;";
       btn.onclick = function () {
         btn.disabled = true;
-        if (reg.waiting) reg.waiting.postMessage("skip-waiting");
-        else location.reload();
+        window.__zenofitSW.wantReload = true;
+        if (reg && reg.waiting) reg.waiting.postMessage("skip-waiting");
+        else reloadOnce();
       };
       var dismiss = document.createElement("button");
       dismiss.textContent = "Later";
@@ -122,10 +132,39 @@
     /* One reload only. Without the guard, skipWaiting plus controllerchange
        can bounce the page in a loop. */
     var reloading = false;
-    navigator.serviceWorker.addEventListener("controllerchange", function () {
+    function reloadOnce() {
       if (reloading) return;
       reloading = true;
       location.reload();
+    }
+
+    /* ── A NEW VERSION WAITS FOR A TAP, OR FOR NOBODY TO BE LOOKING ─────
+       sw.js takes over the moment it installs (skipWaiting), and this used
+       to reload the page on every controllerchange — so a deploy reloaded
+       the app out from under whoever had it open, mid-set, keyboard up,
+       and the banner below never got the chance to say anything. And on a
+       phone's very FIRST visit, the new worker claiming the page fired the
+       same event and reloaded it once for no reason.
+
+       Now: a first install is ignored (this page IS the version that just
+       installed). An update says so with the banner and reloads when
+       somebody taps Reload or Refresh — or straight away if the app is not
+       on screen, and otherwise the moment it leaves the screen, which is
+       the one reload nobody sees. Either way an app that is never closed
+       still ends up on the new build without anybody having to know. */
+    var hadController = !!navigator.serviceWorker.controller;
+    function updateReady() {
+      window.__zenofitSW.updated = true;
+      if (document.visibilityState === "hidden") { reloadOnce(); return; }
+      banner();
+    }
+    navigator.serviceWorker.addEventListener("controllerchange", function () {
+      if (window.__zenofitSW.wantReload) { reloadOnce(); return; }
+      if (!hadController) { hadController = true; return; }
+      updateReady();
+    });
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "hidden" && window.__zenofitSW.updated) reloadOnce();
     });
 
     /* ── A DEPLOY HAS TO REACH AN APP THAT IS NEVER CLOSED ──────────────
@@ -159,13 +198,13 @@
       navigator.serviceWorker.register("sw.js").then(function (r) {
         reg = r;
         lastLook = Date.now();          // registering IS this launch's look
-        if (reg.waiting && navigator.serviceWorker.controller) banner(reg);
+        if (reg.waiting && navigator.serviceWorker.controller) updateReady();
         reg.addEventListener("updatefound", function () {
           var sw = reg.installing;
           if (!sw) return;
           sw.addEventListener("statechange", function () {
             /* controller set means this is an update, not a first install */
-            if (sw.state === "installed" && navigator.serviceWorker.controller) banner(reg);
+            if (sw.state === "installed" && navigator.serviceWorker.controller) updateReady();
           });
         });
       }).catch(function (e) {

@@ -156,6 +156,39 @@ OLD_TOKEN, OLD_USER = device("plain device")
 s, b = call("GET", "/v1/me", token=OLD_TOKEN)
 check("a device with no account is still a user", s == 200 and b.get("userId") == OLD_USER, (s, b))
 
+print("\n== logging out ends the token, and only that one ==")
+# The app used to log out by forgetting the token on the phone, and every
+# token ever issued stayed good for ever.
+s, b = call("POST", "/v1/auth/login", body={"username": CLAIM, "key": derive(CLAIM, PW)})
+LAPTOP = b.get("token")
+s, b = call("POST", "/v1/auth/logout", token=LAPTOP)
+check("logout answers", s == 200 and b.get("loggedOut") is True, (s, b))
+s, b = call("GET", "/v1/profiles", token=LAPTOP)
+check("the token that logged out is refused from then on", s == 401, (s, b))
+s, b = call("GET", "/v1/profiles", token=FRESH)
+check("while the account's other devices stay signed in", s == 200, (s, b))
+s, b = call("POST", "/v1/auth/logout")
+check("logging out with no token is refused, not a crash", s == 401, (s, b))
+
+print("\n== a password can only be guessed so fast ==")
+GUESS = "zt_guess_" + tag
+s, b = call("POST", "/v1/auth/register", body={"username": GUESS, "key": derive(GUESS, PW)})
+check("an account to guess at", s == 201, (s, b))
+codes = []
+for i in range(10):
+    s, b = call("POST", "/v1/auth/login", body={"username": GUESS, "key": "%064x" % (i + 1)})
+    codes.append(s)
+check("ten wrong passwords are each just wrong", codes == [401] * 10, codes)
+s, b = call("POST", "/v1/auth/login", body={"username": GUESS, "key": "%064x" % 99})
+check("the eleventh is refused as too many", s == 429 and b.get("error") == "too_many_attempts", (s, b))
+s, b = call("POST", "/v1/auth/verify", body={"username": GUESS, "key": derive(GUESS, PW)})
+check("and Storage check's verify shares the count, right password or not", s == 429, (s, b))
+s, b = call("POST", "/v1/auth/login", body={"username": CLAIM, "key": derive(CLAIM, PW)})
+check("an account nobody is guessing at still logs in", s == 200, (s, b))
+for _ in range(3):
+    s, b = call("POST", "/v1/auth/login", body={"username": CLAIM, "key": derive(CLAIM, PW)})
+check("and right passwords are never counted against anyone", s == 200, (s, b))
+
 print("\n%d passed, %d failed" % (len(PASS), len(FAIL)))
 if FAIL:
     print("\nFAILED:")

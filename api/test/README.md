@@ -7,10 +7,13 @@ because the binding is missing, a migration that was never applied).
 
 Run all seven after every `wrangler deploy`:
 
-    python3 test/smoke.py          # devices, profiles, seeds, grants, CORS
-    python3 test/smoke_auth.py     # usernames, passwords, one account many phones
-    python3 test/smoke_sync.py     # the items inside a profile, and read grants
-    python3 test/smoke_roster.py   # the profile LIST: names, order, membership
+    python3 test/smoke.py          # devices, profiles, seeds, grants, removal, CORS
+    python3 test/smoke_auth.py     # usernames, passwords, one account many phones,
+                                   # logout, wrong-password limits
+    python3 test/smoke_sync.py     # the items inside a profile, read grants, the wipe
+                                   # guard across batches, stamp order, future clocks
+    python3 test/smoke_roster.py   # the profile LIST: names, order (yours and theirs),
+                                   # membership, a create sent twice
     python3 test/smoke_chat.py     # messages between accounts: threads, unread, blocks,
                                    # things in a message, unsending, chat photos
     python3 test/smoke_photos.py   # the photo store an exercise photo lives in

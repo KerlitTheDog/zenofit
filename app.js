@@ -191,7 +191,9 @@ const groupNames = () => groupList().map((g) => g.name);
 const groupColor = (name) => {
   if (name === UNCATEGORIZED) return UNCAT_COLOR;
   const g = groupList().find((x) => x.name === name);
-  return g ? g.color : null;
+  /* only ever a colour: this lands inside style="…" in two dozen places,
+     and a group can arrive from somebody else's device (see cleanRow) */
+  return g ? (cleanColor(g.color) || null) : null;
 };
 const colorFor = (muscle, i = 0) =>
   groupColor(muscle) || EXTRA_COLORS[i % EXTRA_COLORS.length];
@@ -564,8 +566,10 @@ const convertWeight = (w, from, to) =>
    precision a weight off the log is ever claiming. */
 const weightAs = (w, from, to) => Math.round(convertWeight(+w, from, to) * 100) / 100;
 
-/* the unit an entry was logged in, older entries fall back to the default */
-const unitOf = (e) => (e && e.unit) || state.settings.units;
+/* the unit an entry was logged in, older entries fall back to the default.
+   Only ever kg or lbs: it is printed straight into the page, and an entry
+   can come from somebody else's device (see cleanRow). */
+const unitOf = (e) => { const u = (e && e.unit) || state.settings.units; return UNITS.includes(u) ? u : UNITS[0]; };
 
 /* an entry's weight expressed in the default unit, for comparisons only */
 const baseWeight = (e) => convertWeight(+e.weight, unitOf(e), state.settings.units);
@@ -1907,6 +1911,142 @@ function migrate(s) {
   return s;
 }
 
+/* ── DATA FROM ANYWHERE ELSE IS DATA, NEVER MARKUP ─────────────────────
+   render() builds HTML out of strings, and every NAME, note and label in
+   it goes through esc(). What did not were the fields this app only ever
+   writes itself — ids, dates, units, colours, kinds, the numbers in a set
+   — because nothing typed ever reaches them. Something RECEIVED can: a
+   shared profile's rows come from whoever else can write to it, a backup
+   is a file people hand each other, and a group colour of
+   `#fff"><img onerror=…>` arriving by sync ran script on the owner's phone,
+   where the account's token sits in localStorage.
+
+   So those fields are held to the one shape this app ever gives them,
+   everywhere data comes IN: hydrate() (every load, every import, every
+   off-screen read) and syncApply() (every pulled row). Nothing the app
+   writes itself is ever changed by it — an id it made has no quote in it,
+   a unit is kg or lbs — which is what makes it safe to run on somebody's
+   whole history on every launch. Only what could close an attribute or
+   open a tag is taken out, and nothing is dropped: a row that arrives
+   malformed is still a row, just not a script.
+
+   `function` declarations, above `let state = loadState()`, for the reason
+   `uid` gives: hydrate runs while this file is still being evaluated. */
+function cleanToken(v) {
+  return typeof v === "string" && /[<>"'`&\\]/.test(v) ? v.replace(/[<>"'`&\\]/g, "") : v;
+}
+function cleanNum(v) {
+  return typeof v === "string" && /[^0-9.,+\-eE ]/.test(v) ? "" : v;
+}
+function cleanUnit(v) {
+  return v == null || v === "" || UNITS.includes(v) ? v : UNITS[0];
+}
+function cleanColor(v) {
+  return typeof v === "string" && /^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(v) ? v : undefined;
+}
+/* a link somebody else wrote is only a link: the schemes that run instead */
+function cleanHref(v) {
+  if (typeof v !== "string") return "";
+  return /^(?:javascript|vbscript|data):/i.test(v.replace(/[\u0000- ]/g, "")) ? "" : v;
+}
+const SET_NUMS = ["reps", "weight", "rpe", "secs"];
+const ENTRY_NUMS = ["sets", "reps", "weight", "rpe", "secs", "minutes", "intensity"];
+function cleanSet(s) {
+  if (!s || typeof s !== "object") return s;
+  const out = { ...s, id: cleanToken(s.id) };
+  for (const k of SET_NUMS) if (k in out) out[k] = cleanNum(out[k]);
+  return out;
+}
+function cleanEntry(e) {
+  if (!e || typeof e !== "object") return e;
+  const out = { ...e, id: cleanToken(e.id), date: cleanToken(e.date) };
+  if ("unit" in out) out.unit = cleanUnit(out.unit);
+  if ("kind" in out && !KIND[out.kind]) delete out.kind;
+  if ("planFrom" in out) out.planFrom = cleanToken(out.planFrom);
+  for (const k of ENTRY_NUMS) if (k in out) out[k] = cleanNum(out[k]);
+  if (Array.isArray(out.setList)) out.setList = out.setList.map(cleanSet);
+  if (out.plan && typeof out.plan === "object") {
+    const p = { ...out.plan };
+    if ("unit" in p) p.unit = cleanUnit(p.unit);
+    if ("kind" in p && !KIND[p.kind]) delete p.kind;
+    for (const k of ["minutes", "intensity"]) if (k in p) p[k] = cleanNum(p[k]);
+    if (Array.isArray(p.sets)) p.sets = p.sets.map(cleanSet);
+    out.plan = p;
+  }
+  return out;
+}
+const cleanEntries = (list) => (Array.isArray(list) ? list.map(cleanEntry) : list);
+/* One row of one collection, as it is stored in `state`. Shared by the
+   whole-state pass below and by syncApply, row by row. */
+function cleanRow(collection, r) {
+  if (!r || typeof r !== "object") return r;
+  switch (collection) {
+    case "log": return cleanEntry(r);
+    case "plans": return { ...r, id: cleanToken(r.id), date: cleanToken(r.date), startedOn: cleanToken(r.startedOn), entries: cleanEntries(r.entries) };
+    case "dayDrafts": return { ...r, id: cleanToken(r.id), date: cleanToken(r.date), entries: cleanEntries(r.entries),
+      ...(Array.isArray(r.planIds) ? { planIds: r.planIds.map(cleanToken) } : {}) };
+    case "unlogged": return { ...r, date: cleanToken(r.date), entries: cleanEntries(r.entries) };
+    case "body": {
+      const out = { ...r, id: cleanToken(r.id), date: cleanToken(r.date) };
+      for (const k of ["weight", "waist", "chest", "arm", "thigh", "glutes"]) if (k in out) out[k] = cleanNum(out[k]);
+      return out;
+    }
+    case "deloads": return { ...r, id: cleanToken(r.id), start: cleanToken(r.start), end: cleanToken(r.end) };
+    case "presets": return { ...r, id: cleanToken(r.id),
+      ...(Array.isArray(r.exercises) ? { exercises: r.exercises.map((x) => (x && typeof x === "object" && "kind" in x && !KIND[x.kind] ? (({ kind, ...rest }) => rest)(x) : x)) } : {}) };   // eslint-disable-line no-unused-vars
+    case "library": {
+      const out = { ...r, id: cleanToken(r.id) };
+      if ("variantOf" in out) out.variantOf = cleanToken(out.variantOf);
+      if ("kind" in out && !KIND[out.kind]) delete out.kind;
+      if ("video" in out) out.video = cleanHref(out.video);
+      if ("photoId" in out && !(typeof out.photoId === "string" && /^[0-9a-f]{64}$/.test(out.photoId))) delete out.photoId;
+      return out;
+    }
+    case "groups": {
+      const out = { ...r, key: cleanToken(r.key), kind: KIND[r.kind] ? r.kind : DEFAULT_KIND };
+      const c = cleanColor(r.color);
+      if (c) out.color = c; else delete out.color;
+      return out;
+    }
+    default: return r;
+  }
+}
+/* the three map collections, one value at a time */
+function cleanMapValue(collection, key, v) {
+  if (collection === "goals" || collection === "volumeGoals") return cleanNum(v);
+  if (collection === "settings") {
+    if (key === "units") return UNITS.includes(v) ? v : UNITS[0];
+    if (key === "weekMode") return v === "rolling" ? "rolling" : "program";
+    if (key === "sex") return v === "male" || v === "female" ? v : "";
+    if (key === "startDate") return cleanToken(v);
+  }
+  return v;
+}
+function cleanState(s) {
+  if (!s || typeof s !== "object") return s;
+  for (const c of ["log", "plans", "dayDrafts", "unlogged", "body", "deloads", "presets", "library", "groups"])
+    if (Array.isArray(s[c])) s[c] = s[c].map((r) => cleanRow(c, r));
+  for (const c of ["goals", "volumeGoals"])
+    if (s[c] && typeof s[c] === "object") for (const k of Object.keys(s[c])) s[c][k] = cleanMapValue(c, k, s[c][k]);
+  if (s.settings && typeof s.settings === "object") {
+    for (const k of ["units", "weekMode", "sex", "startDate"]) if (k in s.settings) s.settings[k] = cleanMapValue("settings", k, s.settings[k]);
+    if ("theme" in s.settings) s.settings.theme = s.settings.theme === "light" ? "light" : "dark";
+  }
+  if (Array.isArray(s.timers))
+    s.timers = s.timers.map((t) => (t && typeof t === "object" ? { ...t, id: cleanToken(t.id), duration: cleanNum(t.duration) } : t));
+  /* the crash snapshot holds copies of all of the above, taken from the
+     screen: a form open on a row that arrived before this existed */
+  if (s.drafts && typeof s.drafts === "object") {
+    const w = s.drafts.workout;
+    if (w && typeof w === "object") s.drafts.workout = { ...w, date: cleanToken(w.date), entries: cleanEntries(w.entries) };
+    const f = s.drafts.entry;
+    if (f && typeof f === "object" && f.f) s.drafts.entry = { ...f, f: cleanEntry(f.f) };
+    const st = s.drafts.set;
+    if (st && typeof st === "object" && st.s) s.drafts.set = { ...st, s: cleanSet(st.s) };
+  }
+  return s;
+}
+
 /* Fold a saved object into the shape this version expects: defaults for
    every key the save predates, then the migrations. Shared by the first
    load and by an imported backup on purpose: a file written by an older
@@ -1920,7 +2060,7 @@ function hydrate(saved) {
      today's number instead declared it current and skipped the lot. */
   const merged = { ...base, ...saved, settings: { ...base.settings, ...(saved && saved.settings) } };
   merged.version = (saved && saved.version) || 1;
-  return migrate(merged);
+  return cleanState(migrate(merged));
 }
 
 /* ══════════════════════ PROFILES ═════════════════════════
@@ -2734,7 +2874,9 @@ function syncApply(items, into) {
       if (def.keys && def.keys.indexOf(it.itemId) < 0) continue;
       const bag = { ...(dst[it.collection] || {}) };
       if (it.deleted) delete bag[it.itemId];
-      else if (it.json && "v" in it.json) bag[it.itemId] = it.json.v;
+      /* somebody else's value, held to the shape this app writes: see
+         DATA FROM ANYWHERE ELSE IS DATA, above hydrate */
+      else if (it.json && "v" in it.json) bag[it.itemId] = cleanMapValue(it.collection, it.itemId, it.json.v);
       else continue;
       dst[it.collection] = bag;
       n++;
@@ -2742,8 +2884,10 @@ function syncApply(items, into) {
       const list = Array.isArray(dst[it.collection]) ? [...dst[it.collection]] : [];
       const at = list.findIndex((x) => String(def.id(x)) === String(it.itemId));
       if (it.deleted) { if (at >= 0) { list.splice(at, 1); n++; } }
-      else if (it.json) {
-        const row = { ...it.json };
+      else if (it.json && typeof it.json === "object") {
+        /* cleaned before anything reads it: a pulled row is the one way
+           somebody else's data reaches a template in this app */
+        const row = cleanRow(it.collection, { ...it.json });
         delete row.__i;
         /* ── A ROW WITHOUT ITS PICTURE NEVER TAKES THE ONE THAT IS HERE ──
            A library row always travels without its photo (libraryWire),
@@ -2871,7 +3015,28 @@ async function syncPull(localId) {
   while (guard++ < 500) {
     const res = await C.pullChanges(rec.remoteId, cursor || { since: 0, limit: SYNC_PAGE });
     if (res.level) level = res.level;
-    const landed = syncApply(res.items, into);
+    /* ── A ROW THIS DEVICE ALREADY HAS IS NOT NEWS, AND MUST NOT ACT LIKE IT
+       The server does not filter a pull by who wrote it, and a push does
+       not move this device's cursor, so the next pull hands back this
+       device's OWN last push. Applied, that is the older copy of a row
+       overwriting whatever has been done to it since and not pushed yet:
+       a set added to a lift that had already synced, a weight corrected,
+       vanished the moment a poll (or Refresh) landed inside the push's
+       debounce — and every keystroke re-arms that debounce. The mark then
+       matched, so nothing went up afterwards and the edit was simply gone.
+       A lift deleted in that window came back and was never deleted.
+       A row whose content is exactly what this device last sent or last
+       received (its mark) carries nothing this device has not already
+       reconciled, so it is left out: the local row, edited or deleted, is
+       the newer of the two. Deletions always apply, and anything that
+       actually changed elsewhere has a different hash and lands as before. */
+    const had = (syncFor(localId) || {}).marks || {};
+    const news = (res.items || []).filter((it) => {
+      if (it.deleted) return true;
+      const m = had[it.collection + "/" + it.itemId];
+      return !(m && m[0] === syncHash(JSON.stringify(it.json)));
+    });
+    const landed = syncApply(news, into);
     applied += landed;
     if (landed && !keepPage()) { kept = false; break; }
     /* marks follow what just landed, or the very next push hands the server
@@ -3915,6 +4080,12 @@ async function rosterSync(opts) {
          adopting it back is how a delete undoes itself */
       if (pendingFor(cp.profileId)) continue;
       if (profileList().some((lp) => linked(lp) === cp.profileId)) continue;
+      /* One this device made, whose create reached the server while the
+         reply did not. It is not somebody else's profile to adopt: step 4
+         asks for it again under the same key and is handed this one back.
+         Adopting it here as well was how one lost reply became the same
+         profile twice, on every device. */
+      if (cp.clientKey && profileList().some((lp) => lp.id === cp.clientKey && !linked(lp))) continue;
       const level = cp.level === "read" ? "read" : cp.level === "owner" ? "owner" : "write";
       const localId = addProfile(cp.name || T("sync.joinedName"), { forRemote: true });
       if (!localId) break;                       // out of room: say nothing, try again later
@@ -4032,7 +4203,9 @@ async function rosterSync(opts) {
       if (i < 0) continue;
       const at = (syncFor(id) || {}).nameAt || Date.now();
       try {
-        const made = await C.createProfile(profileLabel(profileList()[i], i), { position: i, nameUpdatedAt: at });
+        /* the local id as the key, so a retry after a lost reply is the same
+           create rather than a second profile */
+        const made = await C.createProfile(profileLabel(profileList()[i], i), { position: i, nameUpdatedAt: at, clientKey: id });
         if (!stillMe()) return { ok: false, reason: "switched" };
         const remoteId = made.profileId || made.id;
         /* linked BEFORE the push, so one that dies half way leaves a
@@ -4962,16 +5135,26 @@ async function refreshNow() {
      that did nothing, and this one is pressed precisely when somebody is
      already unsure whether the app is listening. */
   const floor = new Promise((r) => setTimeout(r, 450));
+  const hub = window.__zenofitSW || {};
   try {
+    /* A newer build has already been noticed — a worker took over, or the
+       re-fetch behind this launch brought back different bytes (see sw.js)
+       — and this page is still the old one. Asking the network again would
+       compare it with a cache that already matches and say nothing changed. */
+    if (hub.updated) { location.reload(); return; }
     if ("serviceWorker" in navigator) {
       const reg = await navigator.serviceWorker.getRegistration();
       if (reg) {
         await reg.update().catch(() => { /* offline: the cached app stands */ });
         /* A worker already waiting is a new version that has finished
            installing and is holding the door. Taking it fires
-           controllerchange, which reloads the page, so there is nothing
-           after this worth doing. */
-        if (reg.waiting) { reg.waiting.postMessage("skip-waiting"); return; }
+           controllerchange, which reloads the page (it was asked for:
+           wantReload), so there is nothing after this worth doing. */
+        if (reg.waiting) { hub.wantReload = true; reg.waiting.postMessage("skip-waiting"); return; }
+        /* one that this very check found, still installing: it takes over
+           on its own (sw.js skips waiting), and that takeover is the reload */
+        if (reg.installing) { hub.wantReload = true; return; }
+        if (hub.updated) { location.reload(); return; }
       }
     }
     if (await swRefreshShell()) { location.reload(); return; }
@@ -5424,9 +5607,19 @@ document.addEventListener("visibilitychange", () => { if (document.hidden) write
 window.addEventListener("pagehide", writeNow);
 window.addEventListener("beforeunload", writeNow);
 
-/* Stamp the active theme onto <html> so the CSS variable blocks apply. */
+/* Stamp the active theme onto <html> so the CSS variable blocks apply.
+
+   And leave it where index.html's anti-flash script can read it before
+   anything else has loaded. That script used to read the theme out of
+   `powerbuild-tracker:v1`, the one key nothing has written since profiles
+   arrived, so a light-theme user got a dark first frame on every launch.
+   Its own key, outside `state`, because what the last screen looked like
+   is a fact about this phone, not about anybody's training. */
+const THEME_KEY = "zenofit:theme";
 function applyTheme(theme) {
-  document.documentElement.setAttribute("data-theme", theme === "light" ? "light" : "dark");
+  const t = theme === "light" ? "light" : "dark";
+  document.documentElement.setAttribute("data-theme", t);
+  try { localStorage.setItem(THEME_KEY, t); } catch { /* the next launch flashes, nothing worse */ }
 }
 
 /* ─────────────────────────── UI STATE ──────────────────────────────── */
@@ -7568,7 +7761,7 @@ function stdLiftValue(f, ex) {
 }
 
 const stdReady = (f) => {
-  const ex = f && f.slug ? STD_BY_SLUG[f.slug] : null;
+  const ex = f && f.slug ? stdOf(f.slug) : null;
   return !!ex && !!f.sex && +decimalize(f.bw) > 0 && (stdLiftValue(f, ex) || 0) > 0;
 };
 
@@ -7577,7 +7770,7 @@ const stdReady = (f) => {
    them and can never end up describing a lift you have since typed over. */
 function stdCheck(f, unit) {
   if (!stdReady(f)) return null;
-  const ex = STD_BY_SLUG[f.slug];
+  const ex = stdOf(f.slug);
   const bw = +decimalize(f.bw);
   const value = stdLiftValue(f, ex);
   /* the set it was worked out FROM, or null when a max was typed straight in.
@@ -7618,8 +7811,10 @@ function stdCheck(f, unit) {
    ties to a lift you do not do it as can be untied, and stays untied. */
 const stdSlugFor = (ex) => {
   if (!ex) return null;
-  if (typeof ex.std === "string") return ex.std || null;
-  return STD_MATCH[ex.id] || null;
+  /* only a lift the tables have: a row can arrive from another device, and
+     "constructor" is a key of every plain object, STD_BY_SLUG included */
+  if (typeof ex.std === "string") return ex.std && stdOf(ex.std) ? ex.std : null;
+  return Object.prototype.hasOwnProperty.call(STD_MATCH, ex.id) ? STD_MATCH[ex.id] : null;
 };
 
 /* ── YOUR BEST SET EVER ON ONE LIFT, IN THE TABLES' OWN TERMS ─────────
@@ -7654,7 +7849,7 @@ function stdBestSetFor(ex, sEx) {
    library row tied to this slug, by STD_MATCH or by hand, and only their
    est. 1RM, which is the number these tables are written in. */
 function stdBestFromLog(slug, log, library) {
-  const ex = STD_BY_SLUG[slug];
+  const ex = stdOf(slug);
   if (!ex || ex.reps) return null;
   const names = new Set(library.filter((x) => stdSlugFor(x) === slug).map((x) => x.name));
   if (!names.size) return null;
@@ -7730,7 +7925,7 @@ const stdCell = (v, reps, unit) => (reps
 
 function renderProgStandards(log, library, unit) {
   const f = stdForm();
-  const ex = f.slug ? STD_BY_SLUG[f.slug] : null;
+  const ex = f.slug ? stdOf(f.slug) : null;
   const res = ui.stdResult;
   const ready = stdReady(f);
   const mode = stdMode(f, ex);
@@ -7813,7 +8008,7 @@ function renderProgStandards(log, library, unit) {
       <div style="height:14px"></div>
     </div>`;
 
-  const resEx = STD_BY_SLUG[res.slug];
+  const resEx = stdOf(res.slug);
   const lvl = res.rank >= 0 ? STD_LEVELS[res.rank] : null;
   const color = lvl ? STD_COLORS[lvl] : "var(--muted)";
   const nextLvl = res.nextI == null ? null : STD_LEVELS[res.nextI];
@@ -8713,7 +8908,7 @@ async function chatSnapPhoto(ex, snap, ups) {
 function chatRankFor(name) {
   const ex = (state.library || []).find((x) => x.name === name);
   const slug = stdSlugFor(ex);
-  const sEx = slug ? STD_BY_SLUG[slug] : null;
+  const sEx = slug ? stdOf(slug) : null;
   const best = sEx ? stdBestSetFor(ex, sEx) : null;
   if (!best) return null;
   const unit = state.settings.units;
@@ -8832,7 +9027,7 @@ async function chatBuildThing(kind, ref) {
   if (kind === "rank") {
     const res = ref === "last" ? ui.stdResult : chatRankFor(ref);
     if (!res) return null;
-    const sEx = STD_BY_SLUG[res.slug];
+    const sEx = stdOf(res.slug);
     const lvl = res.rank >= 0 ? STD_LEVELS[res.rank] : null;
     return {
       body: T("chat.kind.rank") + ": " + (lvl ? stdLevelLabel(lvl) : T("chat.rankUnder")) + " · " + stdName(sEx),
@@ -9477,11 +9672,11 @@ function renderChatAttach() {
     const rows = [];
     for (const ex of state.library || []) {
       const slug = stdSlugFor(ex);
-      const sEx = slug ? STD_BY_SLUG[slug] : null;
+      const sEx = slug ? stdOf(slug) : null;
       const best = sEx ? stdBestSetFor(ex, sEx) : null;
       if (best) rows.push({ ex, sEx, best });
     }
-    const last = ui.stdResult && STD_BY_SLUG[ui.stdResult.slug];
+    const last = ui.stdResult && stdOf(ui.stdResult.slug);
     body = `${ready ? "" : `<div class="pb-card2" style="padding:10px 12px;margin-bottom:10px;font-size:12px;color:var(--steel);line-height:1.5">${T("chat.pickRankSetup")}</div>`}
       ${last ? `${sectionTitle(T("chat.pickRankLast"))}<div class="pb-card" style="overflow:hidden;margin-bottom:14px">${chatPickRow("rank", "last",
         `<span style="width:34px;height:34px;border-radius:9px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:var(--surface2);color:${ui.stdResult.rank >= 0 ? STD_COLORS[STD_LEVELS[ui.stdResult.rank]] : "var(--muted)"}">${icon("medal", 16)}</span>`,
@@ -10770,10 +10965,10 @@ function exWindowViewBody(ex, hist) {
             <iframe src="https://www.youtube.com/embed/${vid}" title="Tutorial video" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen loading="lazy" style="position:absolute;inset:0;width:100%;height:100%;border:0"></iframe>
           </div>
         </div>`
-      : (ex.video
+      : (cleanHref(ex.video)
           ? `<div style="margin-bottom:18px">
               <div class="pb-label" style="margin-bottom:6px">${T("ex.tutorial")}</div>
-              <a href="${esc(ex.video)}" target="_blank" rel="noopener" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;color:var(--blue)">${icon("external-link", 15)} ${T("ex.openLink")}</a>
+              <a href="${esc(cleanHref(ex.video))}" target="_blank" rel="noopener" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;color:var(--blue)">${icon("external-link", 15)} ${T("ex.openLink")}</a>
             </div>`
           : "")}
 
@@ -10812,7 +11007,7 @@ function exWindowViewBody(ex, hist) {
 function exWindowStandard(ex) {
   if (ex.missing) return "";
   const slug = stdSlugFor(ex);
-  const sEx = slug ? STD_BY_SLUG[slug] : null;
+  const sEx = slug ? stdOf(slug) : null;
   const best = sEx ? stdBestSetFor(ex, sEx) : null;
   const ready = !!best;
   const bestLine = !sEx ? T("std.exNoLink")
@@ -15091,7 +15286,8 @@ const actions = {
         try { free = !!(await C.nameAvailable(username)).available; } catch { /* say wrong password */ }
         ui.login = { ...ui.login, busy: false, confirmCreate: free, error: free ? null : T("acct.errWrong") };
       } else {
-        ui.login = { ...ui.login, busy: false, error: T("login.offline") };
+        /* the server slows guessing down; that is not "no signal" */
+        ui.login = { ...ui.login, busy: false, error: T(e && e.status === 429 ? "acct.errTooMany" : "login.offline") };
       }
       render();
       return;
@@ -15324,7 +15520,7 @@ const actions = {
       who = await C.verifyPassword(f.username.trim(), f.password);
     } catch (e) {
       ui.storUnlock = { ...ui.storUnlock, busy: false, password: "",
-        error: T(e && e.code === "bad_login" ? "stor.unlockWrong" : "stor.unlockOffline") };
+        error: T(e && e.code === "bad_login" ? "stor.unlockWrong" : e && e.status === 429 ? "acct.errTooMany" : "stor.unlockOffline") };
       render();
       return;
     }
@@ -15355,8 +15551,14 @@ const actions = {
   "open-body": () => { ui.showBody = true; render(); },
   "close-body": () => { ui.showBody = false; ui.bodyForm = null; render(); },
   "new-body": () => { ui.bodyForm = newBodyRow(); ui.bodyFormWasNew = true; render(); },
-  "new-workout": () => { ui.tab = "log"; ui.logSeg = "history"; resetTransient(); ui.workoutSheet = { date: todayStr(), entries: [] }; render(); },
-  "fab": () => { ui.workoutSheet = { date: todayStr(), entries: [] }; render(); },
+  /* There is only ever one workout for today (see sheetForDay), and these two
+     were the way round it: with a day already parked, each started a fresh
+     sheet, and backing out of that parked a SECOND day on the same date that
+     the other four doors into today could never find. So they open today's
+     parked day when there is one, exactly as Continue does, and a blank one
+     otherwise. */
+  "new-workout": () => { ui.tab = "log"; ui.logSeg = "history"; resetTransient(); ui.workoutSheet = sheetForDay(todayStr()); render(); },
+  "fab": () => { ui.workoutSheet = sheetForDay(todayStr()); render(); },
   "toggle-deload": () => { ui.deloadOpen = !ui.deloadOpen; render(); },
   "toggle-accordion": (el) => {
     const id = el.dataset.id;
@@ -15857,7 +16059,7 @@ const actions = {
   "ex-std-check": () => {
     const ex = (state.library || []).find((x) => x.name === (ui.exWin && ui.exWin.name));
     const slug = stdSlugFor(ex);
-    const sEx = slug ? STD_BY_SLUG[slug] : null;
+    const sEx = slug ? stdOf(slug) : null;
     const best = sEx ? stdBestSetFor(ex, sEx) : null;
     if (!best) return;                     // the button is disabled, but never trust that alone
     const unit = state.settings.units;
@@ -17011,7 +17213,9 @@ const READ_OK = new Set([
   /* reading a rank is looking; ex-std-link writes to the library and is
      deliberately not here */
   "ex-std-check",
-  "export-data", "share-data", "dismiss-new", "toast-dismiss", "toast-open",
+  /* dismiss-new is NOT here: it writes the library row, which is training,
+     and on somebody else's profile the next pull would simply put it back */
+  "export-data", "share-data", "toast-dismiss", "toast-open",
   "timer-start", "timer-pause", "timer-reset", "timer-sound-test", "timer-add", "timer-edit",
   "timer-save", "timer-delete", "timer-pin", "timer-form-pin", "timer-reorder", "timer-preset",
   "timer-sound",
@@ -17181,7 +17385,7 @@ function handleBind(el) {
     const setHint = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
     if (key === "lift" && f.liftFromLog) {
       f.liftFromLog = false;
-      const ex = STD_BY_SLUG[f.slug];
+      const ex = stdOf(f.slug);
       setHint("stdLiftHint", ex && ex.reps ? T("std.repsHint") : T("std.liftHint"));
     }
     /* A typed bodyweight is true as of TODAY, which is what keeps it from

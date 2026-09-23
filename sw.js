@@ -8,7 +8,7 @@
    Scope note: this file must stay in the repo root. A service worker can only
    control pages at or below its own URL, and the app lives at /zenofit/.       */
 
-const VERSION = "zenofit-v28";
+const VERSION = "zenofit-v29";
 /* Fetched photos, keyed by id (see the PHOTOS block in app.js). Not part of
    the shell and not versioned with it: a photo's id IS its content, so a
    new build has nothing to invalidate, and clearing it on every deploy
@@ -47,26 +47,53 @@ self.addEventListener("activate", (e) => {
 
 /* Stale-while-revalidate for our own files: the app paints from cache at once,
    and the next launch has the fresh copy. Cross-origin (fonts, lucide) is left
-   to the browser. */
+   to the browser.
+
+   ── AND THE PAGE IS TOLD WHEN WHAT IT IS RUNNING IS NO LONGER CURRENT ──
+   The re-fetch behind a launch quietly put the new bytes in the cache, so by
+   the time somebody pressed Refresh, refreshShell compared the network with a
+   cache that already matched it, answered "nothing changed", and the page
+   carried on running the old build. When a re-fetched SHELL file comes back
+   different from the copy just served, every window hears so (shell-updated,
+   see updateReady in index.html), which is the one moment anything knows. */
+const SHELL_URLS = new Set(SHELL.map((p) => new URL(p, self.location.href).href));
+
+function tellWindows(msg) {
+  return self.clients.matchAll({ type: "window", includeUncontrolled: true })
+    .then((list) => list.forEach((c) => c.postMessage(msg)))
+    .catch(() => {});
+}
+
 self.addEventListener("fetch", (e) => {
   const req = e.request;
   if (req.method !== "GET") return;
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
+  const shell = SHELL_URLS.has(url.href);
 
-  e.respondWith(
-    caches.open(VERSION).then((cache) =>
-      cache.match(req).then((hit) => {
-        const net = fetch(req)
-          .then((res) => {
-            if (res && res.ok) cache.put(req, res.clone());
-            return res;
-          })
-          .catch(() => hit);
-        return hit || net;
-      })
-    )
+  const work = caches.open(VERSION).then((cache) =>
+    cache.match(req).then((hit) => {
+      /* cloned now: the hit itself is handed to the page and read there */
+      const served = hit && shell ? hit.clone() : null;
+      /* A shell file is asked for with `no-cache`, which is a conditional
+         request (an unchanged file is a 304 of a few hundred bytes), because
+         a plain fetch is answered from the browser's own HTTP cache — GitHub
+         Pages allows it ten minutes — and would hand back the very bytes it
+         is meant to be checking against. */
+      const net = (shell ? fetch(url.href, { cache: "no-cache" }) : fetch(req))
+        .then(async (res) => {
+          if (res && res.ok) {
+            if (served && !(await sameBytes(served, res.clone()))) tellWindows({ type: "shell-updated" });
+            await cache.put(req, res.clone());
+          }
+          return res;
+        })
+        .catch(() => hit);
+      return { hit, net };
+    })
   );
+  e.respondWith(work.then(({ hit, net }) => hit || net));
+  e.waitUntil(work.then(({ net }) => net).catch(() => {}));
 });
 
 /* ---- Web push -------------------------------------------------------------

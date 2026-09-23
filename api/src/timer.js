@@ -43,6 +43,18 @@ export class TimerAlarm {
     const t = await this.state.storage.get("timer");
     if (!t) return;
 
+    /* A cancel that could not reach this object (index.js lets that call
+       fail quietly) still marks the row cancelled, and the row is the
+       answer: a rest somebody stopped must not ring them anyway. A row that
+       cannot be read is not a reason to stay silent, so only a definite
+       "not scheduled" stops it. */
+    const row = await this.env.DB.prepare("SELECT status FROM timers WHERE id = ?")
+      .bind(t.timerId).first().catch(() => null);
+    if (row && row.status !== "scheduled") {
+      await this.state.storage.deleteAll();
+      return;
+    }
+
     /* requireInteraction keeps a rest timer on screen until it is seen. A
        notification that auto-dismisses while the phone is in a pocket is the
        same as no notification. */

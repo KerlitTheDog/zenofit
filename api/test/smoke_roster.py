@@ -131,8 +131,55 @@ check("marked read, and not hers",
 s, _ = call("PUT", "/v1/profiles/%s" % a["profileId"], token=her,
             body={"name": "Hers now", "nameUpdatedAt": 99999})
 check("she cannot rename it", s == 404, s)
+owner_before = [(p["profileId"], p["position"]) for p in call("GET", "/v1/profiles", token=owner)[1]["profiles"]]
 s, o = call("POST", "/v1/profiles/order", token=her, body={"order": [a["profileId"]]})
-check("and ordering skips what she cannot write rather than failing", s == 200 and o.get("ordered") == 0, (s, o))
+check("ordering it places it in HER list", s == 200 and o.get("ordered") == 1, (s, o))
+s, hers = call("GET", "/v1/profiles", token=her)
+check("where it now has her own position",
+      [p["position"] for p in hers["profiles"] if p["profileId"] == a["profileId"]] == [0], hers["profiles"])
+owner_after = [(p["profileId"], p["position"]) for p in call("GET", "/v1/profiles", token=owner)[1]["profiles"]]
+check("and the owner's own order has not moved", owner_after == owner_before, (owner_before, owner_after))
+
+print("\n== somebody who can EDIT a shared profile still cannot reorder the owner's list ==")
+# The bug this pins: a write grantee dragging two of THEIR OWN profiles pushed
+# their whole order, and the shared profile's index was written into
+# profiles.position, which is the owner's. The owner's list reshuffled.
+ed, _ = device("can edit")
+s, wseed = call("POST", "/v1/profiles/%s/seeds" % a["profileId"], token=owner, body={"level": "write"})
+call("POST", "/v1/join", token=ed, body={"seed": wseed["seed"]})
+s, e1 = call("POST", "/v1/profiles", token=ed, body={"name": "Editor own 1"})
+s, e2 = call("POST", "/v1/profiles", token=ed, body={"name": "Editor own 2"})
+owner_before = [(p["profileId"], p["position"]) for p in call("GET", "/v1/profiles", token=owner)[1]["profiles"]]
+s, o = call("POST", "/v1/profiles/order", token=ed, body={"order": [e2["profileId"], e1["profileId"], a["profileId"]]})
+check("the editor's whole list is ordered", s == 200 and o.get("ordered") == 3, (s, o))
+owner_after = [(p["profileId"], p["position"]) for p in call("GET", "/v1/profiles", token=owner)[1]["profiles"]]
+check("and the OWNER's positions are exactly as they were", owner_after == owner_before, (owner_before, owner_after))
+s, eds = call("GET", "/v1/profiles", token=ed)
+check("while the editor's own listing carries the editor's order",
+      [p["position"] for p in eds["profiles"] if p["profileId"] == a["profileId"]] == [2], eds["profiles"])
+s, _ = call("PUT", "/v1/profiles/%s" % a["profileId"], token=ed, body={"position": 7})
+owner_after = [(p["profileId"], p["position"]) for p in call("GET", "/v1/profiles", token=owner)[1]["profiles"]]
+check("a position sent with PUT by the editor does not reach the owner either", owner_after == owner_before, owner_after)
+
+print("\n== the same create, sent twice, is one profile ==")
+# A create whose reply is lost on gym wifi is retried by the next roster
+# pass. With the device's own id for the profile, the retry finds the first.
+dup, _ = device("flaky wifi")
+s, c1 = call("POST", "/v1/profiles", token=dup, body={"name": "Retried", "clientKey": "localid123"})
+check("first create is 201", s == 201, (s, c1))
+s, c2 = call("POST", "/v1/profiles", token=dup, body={"name": "Retried", "clientKey": "localid123"})
+check("the retry hands back the SAME profile", s == 200 and c2.get("profileId") == c1.get("profileId") and c2.get("existing"), (s, c2))
+s, lst = call("GET", "/v1/profiles", token=dup)
+check("the account holds one of it, carrying its key",
+      [p.get("clientKey") for p in lst["profiles"]] == ["localid123"], lst["profiles"])
+other, _ = device("someone else")
+s, c3 = call("POST", "/v1/profiles", token=other, body={"name": "Retried", "clientKey": "localid123"})
+check("the same key from another account is its own profile", s == 201 and c3["profileId"] != c1["profileId"], (s, c3))
+call("DELETE", "/v1/profiles/" + c1["profileId"], token=dup)
+s, c4 = call("POST", "/v1/profiles", token=dup, body={"name": "Retried", "clientKey": "localid123"})
+check("once deleted, the key makes a new one", s == 201 and c4["profileId"] != c1["profileId"], (s, c4))
+for pid, tok in [(c3["profileId"], other), (c4["profileId"], dup), (e1["profileId"], ed), (e2["profileId"], ed)]:
+    call("DELETE", "/v1/profiles/" + pid, token=tok)
 
 print("\n== the roster says WHO owns each profile, by name ==")
 # isOwner only answers "is this mine". Once a phone has been signed in to

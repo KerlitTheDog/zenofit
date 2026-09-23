@@ -281,6 +281,71 @@ check("allowWipe lets the same batch through", s == 200 and b.get("accepted") ==
 
 call("DELETE", "/v1/profiles/" + P3, token=owner)
 
+print("\n== a wipe split into batches is still one wipe ==")
+# Judged one batch at a time, a 1,000-row profile deleted 200 rows at a time
+# lost 800 before the fifth batch tripped the guard. Deletions are now summed
+# over a short window and judged against what the profile held when the run
+# began, so the run stops once it has taken half, whichever batch that is.
+P4 = call("POST", "/v1/profiles", token=owner, body={"name": "Big wipe"})[1]["profileId"]
+BIG = [item("log", "b%04d" % i, {"id": "b%04d" % i, "date": "2026-09-01"}) for i in range(1000)]
+for i in range(0, 1000, 200):
+    call("POST", "/v1/profiles/%s/items" % P4, token=owner, body={"items": BIG[i:i + 200]})
+codes = []
+for i in range(0, 1000, 200):
+    s, b = call("POST", "/v1/profiles/%s/items" % P4, token=owner,
+                body={"items": [item("log", "b%04d" % j, None, deleted=True) for j in range(i, i + 200)]})
+    codes.append(s)
+    if s != 200: break
+check("the batches stop being accepted once the run passes half", codes == [200, 200, 409], codes)
+s, b = call("GET", "/v1/profiles/%s/changes?limit=500" % P4, token=owner)
+alive = sum(1 for x in b.get("items", []) if not x.get("deleted"))
+while b.get("hasMore"):
+    s, b = call("GET", "/v1/profiles/%s/changes?limit=500&cursor=%s" % (P4, b["cursor"]), token=owner)
+    alive += sum(1 for x in b.get("items", []) if not x.get("deleted"))
+check("and at least half the profile is still there", alive >= 600, "%d alive" % alive)
+s, b = call("POST", "/v1/profiles/%s/items" % P4, token=owner,
+            body={"allowWipe": True, "items": [item("log", "b%04d" % j, None, deleted=True) for j in range(400, 600)]})
+check("a restore saying so out loud still goes through", s == 200 and b.get("accepted") == 200, (s, b))
+call("DELETE", "/v1/profiles/" + P4, token=owner)
+
+print("\n== a clock from the future does not win for ever ==")
+# clientUpdatedAt only refuses to go backwards, which a stamp from next century
+# turned into a lock: every honest edit of that row afterwards was "stale".
+P6 = call("POST", "/v1/profiles", token=owner, body={"name": "Future clock"})[1]["profileId"]
+s, b = call("POST", "/v1/profiles/%s/items" % P6, token=owner,
+            body={"items": [item("log", "f1", {"v": "from the future"}, clientUpdatedAt=9999999999999)]})
+check("a far-future stamp is accepted", s == 200 and b.get("accepted") == 1, (s, b))
+import time as _t
+s, b = call("POST", "/v1/profiles/%s/items" % P6, token=owner,
+            body={"items": [item("log", "f1", {"v": "honest"}, clientUpdatedAt=int(_t.time() * 1000) + 11 * 60_000)]})
+check("but held to minutes ahead, so a later honest edit still lands", s == 200 and b.get("accepted") == 1 and not b.get("staleItems"), (s, b))
+s, b = call("POST", "/v1/profiles/%s/items" % P6, token=owner,
+            body={"items": [item("log", "f1", {"v": "older"}, clientUpdatedAt=1)]})
+check("while a genuinely older one is still refused", s == 200 and len(b.get("staleItems", [])) == 1, (s, b))
+call("DELETE", "/v1/profiles/" + P6, token=owner)
+
+print("\n== a row that lands later is stamped later ==")
+# The stamp used to be read before a push's chunks were written, so rows
+# committed after a pull had moved past could carry an OLDER stamp and never
+# be seen by it. Each chunk now takes the next value of the profile's own
+# counter inside its own transaction.
+P5 = call("POST", "/v1/profiles", token=owner, body={"name": "Stamps"})[1]["profileId"]
+s, b = call("POST", "/v1/profiles/%s/items" % P5, token=owner,
+            body={"items": [item("log", "s%03d" % (150 - i), {"n": i}) for i in range(150)]})
+check("150 rows in one push", s == 200 and b.get("accepted") == 150, (s, b))
+s, b = call("GET", "/v1/profiles/%s/changes?limit=500" % P5, token=owner)
+by_id = {x["itemId"]: x["updatedAt"] for x in b.get("items", [])}
+chunks = [sorted({by_id["s%03d" % (150 - i)] for i in range(k, min(k + 50, 150))}) for k in range(0, 150, 50)]
+check("each chunk carries one stamp", all(len(c) == 1 for c in chunks), chunks)
+check("and every chunk's stamp is later than the one before it",
+      chunks[0][0] < chunks[1][0] < chunks[2][0], chunks)
+first_max = max(by_id.values())
+s, b = call("POST", "/v1/profiles/%s/items" % P5, token=owner, body={"items": [item("log", "later", {"n": 1})]})
+s, b = call("GET", "/v1/profiles/%s/changes?limit=500" % P5, token=owner)
+later = [x["updatedAt"] for x in b.get("items", []) if x["itemId"] == "later"]
+check("a later push is stamped after all of it", later and later[0] > first_max, (later, first_max))
+call("DELETE", "/v1/profiles/" + P5, token=owner)
+
 call("DELETE", "/v1/profiles/" + PID, token=owner)
 call("DELETE", "/v1/profiles/" + P2, token=owner)
 

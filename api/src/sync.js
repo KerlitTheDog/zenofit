@@ -79,12 +79,21 @@ export const BATCH_CHUNK = 50;
  * escape, and the client only sets it when the user has said "replace what
  * is there" out loud, behind a confirm: restoring a backup, or a reset.
  *
- * Counted per batch rather than per push, because a push arrives as up to
- * 200 items at a time and there is no transaction spanning them. Halving
- * rather than comparing outright is what makes that safe: a wipe split
- * across two batches is caught on the first, not after the first has
- * already landed.                                                        */
+ * ── A WIPE ARRIVES IN BATCHES, SO IT IS COUNTED ACROSS THEM ────────────
+ * A push arrives as up to 200 items at a time and there is no transaction
+ * spanning them. This used to be judged one batch at a time, which only
+ * caught a batch bigger than half the profile: a 1,000-row profile deleted
+ * 200 rows at a time lost 800 before the fifth batch finally tripped it —
+ * so the profiles with the most in them, the ones this exists for, were the
+ * ones it protected least. Deletions are now summed over WIPE_WINDOW_MS
+ * (under the `wipe:<profileId>` key in rate_limits) and judged against what
+ * the profile held when that run began, so a wipe split across five
+ * batches is refused once it has taken half, whichever batch that is.
+ * The window is short on purpose: a client pushes its batches back to back
+ * inside a few seconds, while a person deleting things by hand is spread
+ * over the eight-second debounce and far more, and never sums up to it. */
 export const WIPE_FLOOR = 10;
+export const WIPE_WINDOW_MS = 60_000;
 
 export function wipeRefused(deletions, liveCount) {
   return deletions >= WIPE_FLOOR && deletions * 2 > liveCount;

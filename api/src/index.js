@@ -27,11 +27,12 @@ import { accessFor, canRead, canWrite, canAdmin } from "./access.js";
 import { sendToUser } from "./push.js";
 import { chatRoute } from "./chat.js";
 import { photoRoute, setHoldings, dropHoldingsUnder, itemHolder, sweepPhotos } from "./photos.js";
+import { overLimit, recordMiss, countIn } from "./limits.js";
 import {
   validateItem, encodeCursor, decodeCursor,
   MAX_ITEMS_PER_PUSH, MAX_PUSH_BODY_BYTES,
   PAGE_DEFAULT, PAGE_MAX, PAGE_BYTE_BUDGET, BATCH_CHUNK,
-  wipeRefused, WIPE_FLOOR,
+  wipeRefused, WIPE_FLOOR, WIPE_WINDOW_MS,
 } from "./sync.js";
 export { TimerAlarm } from "./timer.js";
 
@@ -84,6 +85,36 @@ async function sha256Hex(s) {
 
 const cleanName = (v, fallback = null) =>
   typeof v === "string" && v.trim() ? v.trim().slice(0, MAX_NAME) : fallback;
+
+/* ── A PASSWORD CAN ONLY BE GUESSED SO FAST ─────────────────────────────
+   The expensive half of a password check happens in the browser (auth.js),
+   which is the right call for a 10ms Worker and also means the server's
+   half costs nothing to ask — so nothing stopped anybody asking it a
+   thousand times a minute. Failures are counted, never successes, so a
+   person logging in correctly is never refused because of somebody else:
+   per address AND name (the account being guessed at from one place), and
+   per address alone (one password tried against many names). Login and
+   Storage check's verify share the counters, or one would be the way
+   round the other. */
+const LOGIN_WINDOW_MS = 15 * 60_000;
+const LOGIN_MAX_PER_NAME = 10;
+const LOGIN_MAX_PER_ADDRESS = 100;
+const clientAddress = (request) =>
+  request.headers.get("CF-Connecting-IP") || request.headers.get("X-Forwarded-For") || "local";
+const loginKeys = (request, usernameLc) => {
+  const ip = clientAddress(request);
+  return { name: "login:" + ip + ":" + (usernameLc || "?"), addr: "login:" + ip };
+};
+async function loginBlocked(env, keys) {
+  return (await overLimit(env, keys.name, LOGIN_WINDOW_MS, LOGIN_MAX_PER_NAME)) ||
+         (await overLimit(env, keys.addr, LOGIN_WINDOW_MS, LOGIN_MAX_PER_ADDRESS));
+}
+async function loginMissed(env, keys) {
+  await recordMiss(env, keys.name, LOGIN_WINDOW_MS);
+  await recordMiss(env, keys.addr, LOGIN_WINDOW_MS);
+}
+const tooManyLogins = () =>
+  fail(429, "too_many_attempts", "Too many wrong passwords. Wait a few minutes and try again.");
 
 async function authenticate(request, env) {
   const h = request.headers.get("Authorization") || "";
@@ -269,6 +300,9 @@ async function route(request, env, url, ctx) {
     const username = cleanUsername(body.username);
     const key = cleanKey(body.key);
 
+    const keys = loginKeys(request, username && username.toLowerCase());
+    if (await loginBlocked(env, keys)) return tooManyLogins();
+
     /* One reply for every way this can fail, and the same amount of work
        done either way: a wrong username and a wrong password have to be
        indistinguishable, or the endpoint is a list of who has an account. */
@@ -278,6 +312,7 @@ async function route(request, env, url, ctx) {
     const salt = (row && row.pw_salt) || "00000000000000000000000000000000";
     const attempt = await hashKey(salt, key || "0".repeat(64));
     if (!row || !row.pw_hash || !sameHash(attempt, row.pw_hash)) {
+      await loginMissed(env, keys);
       return fail(401, "bad_login", "That username and password do not match an account.");
     }
 
@@ -303,12 +338,15 @@ async function route(request, env, url, ctx) {
     const body = await readJson(request).catch(() => ({}));
     const username = cleanUsername(body.username);
     const key = cleanKey(body.key);
+    const keys = loginKeys(request, username && username.toLowerCase());
+    if (await loginBlocked(env, keys)) return tooManyLogins();
     const row = username && key
       ? await env.DB.prepare("SELECT id, username, pw_hash, pw_salt FROM users WHERE username_lc = ?").bind(username.toLowerCase()).first()
       : null;
     const salt = (row && row.pw_salt) || "00000000000000000000000000000000";
     const attempt = await hashKey(salt, key || "0".repeat(64));
     if (!row || !row.pw_hash || !sameHash(attempt, row.pw_hash)) {
+      await loginMissed(env, keys);
       return fail(401, "bad_login", "That username and password do not match an account.");
     }
     return json({ userId: row.id, username: row.username });
@@ -330,6 +368,19 @@ async function route(request, env, url, ctx) {
 
   if (p === "/v1/me" && method === "GET") {
     return json({ userId: user.id, displayName: user.display_name, createdAt: user.created_at });
+  }
+
+  /* ── LOGGING OUT ENDS THE TOKEN, NOT ONLY THE PHONE'S COPY OF IT ────────
+     The app used to log out by forgetting the token and nothing else, so
+     every token ever issued stayed good for ever: one copied off a borrowed
+     phone before its owner logged out still read every profile in the
+     account. This revokes the token the request came in on and no other —
+     the phone in the gym bag is signed in with its own and stays that way. */
+  if (p === "/v1/auth/logout" && method === "POST") {
+    const h = (request.headers.get("Authorization") || "").match(/^Bearer\s+(.+)$/i);
+    const hash = await sha256Hex(h[1].trim());
+    await env.DB.prepare("DELETE FROM tokens WHERE token_hash = ? AND user_id = ?").bind(hash, user.id).run();
+    return json({ loggedOut: true });
   }
 
   /* ---- chat --------------------------------------------------------------
@@ -376,7 +427,7 @@ async function route(request, env, url, ctx) {
      order they already had. */
   if (p === "/v1/profiles" && method === "GET") {
     const owned = await env.DB.prepare(
-      "SELECT id, name, owner_id, created_at, updated_at, position, name_updated_at FROM profiles " +
+      "SELECT id, name, owner_id, created_at, updated_at, position, name_updated_at, client_key FROM profiles " +
       "WHERE owner_id = ? AND deleted_at IS NULL " +
       "ORDER BY CASE WHEN position IS NULL THEN 1 ELSE 0 END, position, created_at"
     ).bind(user.id).all();
@@ -388,9 +439,13 @@ async function route(request, env, url, ctx) {
        signed in to more than one account, at which point "not yours" is
        the one thing a list of profiles must not be vague about. LEFT JOIN
        because an owner who never claimed their device has no username, and
-       a missing name is not a reason to drop the row. */
+       a missing name is not a reason to drop the row.
+
+       A shared profile's POSITION is the grantee's own (grants.position,
+       migration 0009), never the owner's: where it sits in your list is
+       yours to drag, and where it sits in theirs is not yours to change. */
     const joined = await env.DB.prepare(
-      "SELECT p.id, p.name, p.owner_id, p.created_at, p.updated_at, p.position, p.name_updated_at, " +
+      "SELECT p.id, p.name, p.owner_id, p.created_at, p.updated_at, g.position AS position, p.name_updated_at, " +
       "       g.level, u.username AS owner_name " +
       "FROM grants g JOIN profiles p ON p.id = g.profile_id " +
       "LEFT JOIN users u ON u.id = p.owner_id " +
@@ -404,6 +459,9 @@ async function route(request, env, url, ctx) {
       ownerName: r.owner_id === user.id ? user.username : (r.owner_name || null),
       position: r.position, nameUpdatedAt: r.name_updated_at,
       createdAt: r.created_at, updatedAt: r.updated_at,
+      /* the creating device's own id for it, so that device can tell its
+         own profile from one it has never seen (see POST below) */
+      ...(r.client_key ? { clientKey: r.client_key } : {}),
     });
 
     return json({
@@ -418,8 +476,14 @@ async function route(request, env, url, ctx) {
      rather than of the phone it was dragged on. One call rather than a PUT
      per profile: a drag moves one row and renumbers every row after it, and
      six round trips for one gesture is how a reorder ends up half-applied.
-     Silently skips anything you cannot write to, so a list containing a
-     profile somebody shared with you for reading still orders the rest. */
+
+     ── YOUR LIST, NEVER SOMEBODY ELSE'S ───────────────────────────────
+     This used to write profiles.position for anything the caller could
+     WRITE to, and profiles.position is the owner's order. So somebody you
+     had shared a profile with, dragging two of their own profiles, moved
+     yours down your list on your phone. A profile you own is ordered on
+     the profile; one shared with you is ordered on your own grant, which
+     is what GET /v1/profiles hands back to you and to nobody else. */
   if (p === "/v1/profiles/order" && method === "POST") {
     const body = await readJson(request).catch(() => ({}));
     const order = Array.isArray(body.order) ? body.order.filter((x) => typeof x === "string") : null;
@@ -430,9 +494,13 @@ async function route(request, env, url, ctx) {
     const done = [];
     for (let i = 0; i < order.length; i++) {
       const { level } = await accessFor(env, user.id, order[i]);
-      if (!canWrite(level)) continue;
-      await env.DB.prepare("UPDATE profiles SET position = ?, updated_at = ? WHERE id = ?")
-        .bind(i, now, order[i]).run();
+      if (level === "owner") {
+        await env.DB.prepare("UPDATE profiles SET position = ?, updated_at = ? WHERE id = ?")
+          .bind(i, now, order[i]).run();
+      } else if (canRead(level)) {
+        await env.DB.prepare("UPDATE grants SET position = ? WHERE profile_id = ? AND user_id = ? AND revoked_at IS NULL")
+          .bind(i, order[i], user.id).run();
+      } else continue;
       done.push(order[i]);
     }
     return json({ ordered: done.length, profileIds: done, updatedAt: now });
@@ -448,10 +516,42 @@ async function route(request, env, url, ctx) {
        migration for why a name needs a stamp at all. */
     const nameAt = Number.isFinite(body.nameUpdatedAt) ? body.nameUpdatedAt : now;
 
-    await env.DB.prepare(
-      "INSERT INTO profiles (id, owner_id, name, created_at, updated_at, position, name_updated_at) " +
-      "VALUES (?, ?, ?, ?, ?, ?, ?)"
-    ).bind(id, user.id, name, now, now, position, nameAt).run();
+    /* ── THE SAME CREATE, SENT TWICE, IS ONE PROFILE ─────────────────────
+       A create whose reply was lost on gym wifi used to be sent again by
+       the next roster pass as a second profile, and both then turned up on
+       every device. `clientKey` is the device's own id for the profile it
+       is putting into the account: asked for a second time, the first one
+       is handed back. Old builds send none and are unaffected. */
+    const clientKey = typeof body.clientKey === "string" && /^[A-Za-z0-9_-]{1,120}$/.test(body.clientKey) ? body.clientKey : null;
+    const sameCreate = async () => {
+      const had = await env.DB.prepare(
+        "SELECT id, name, position, name_updated_at, created_at, deleted_at FROM profiles WHERE owner_id = ? AND client_key = ?"
+      ).bind(user.id, clientKey).first();
+      if (!had) return null;
+      if (had.deleted_at) {
+        /* deleted since: the key is free again, and this is a new profile */
+        await env.DB.prepare("UPDATE profiles SET client_key = NULL WHERE id = ?").bind(had.id).run();
+        return null;
+      }
+      const s = await env.DB.prepare(
+        "SELECT seed FROM seeds WHERE profile_id = ? AND revoked_at IS NULL ORDER BY created_at LIMIT 1"
+      ).bind(had.id).first();
+      return json({ profileId: had.id, name: had.name, level: "owner", isOwner: true, seed: s ? s.seed : null,
+        position: had.position, nameUpdatedAt: had.name_updated_at, createdAt: had.created_at, existing: true });
+    };
+    if (clientKey) { const again = await sameCreate(); if (again) return again; }
+
+    try {
+      await env.DB.prepare(
+        "INSERT INTO profiles (id, owner_id, name, created_at, updated_at, position, name_updated_at, client_key) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+      ).bind(id, user.id, name, now, now, position, nameAt, clientKey).run();
+    } catch (e) {
+      /* two copies of the same create landing at once: the index let one in */
+      const again = clientKey ? await sameCreate() : null;
+      if (again) return again;
+      throw e;
+    }
 
     /* Every profile ships with one write seed, so sharing is one tap and not
        a setup flow. The owner can revoke or rotate it later. */
@@ -489,8 +589,14 @@ async function route(request, env, url, ctx) {
       const at = Number.isFinite(body.nameUpdatedAt) ? body.nameUpdatedAt : now;
 
       if (Number.isFinite(body.position)) {
-        await env.DB.prepare("UPDATE profiles SET position = ?, updated_at = ? WHERE id = ?")
-          .bind(Math.trunc(body.position), now, profile.id).run();
+        /* the owner's order is the owner's; see /v1/profiles/order */
+        if (level === "owner") {
+          await env.DB.prepare("UPDATE profiles SET position = ?, updated_at = ? WHERE id = ?")
+            .bind(Math.trunc(body.position), now, profile.id).run();
+        } else {
+          await env.DB.prepare("UPDATE grants SET position = ? WHERE profile_id = ? AND user_id = ? AND revoked_at IS NULL")
+            .bind(Math.trunc(body.position), profile.id, user.id).run();
+        }
       }
 
       if (body.name === undefined) {
@@ -584,7 +690,7 @@ async function route(request, env, url, ctx) {
     if (!seed) return fail(400, "bad_code", "That code is not the right shape.");
 
     const row = await env.DB.prepare(
-      "SELECT s.seed, s.level, s.profile_id, p.name, p.owner_id, p.deleted_at, u.username AS owner_name " +
+      "SELECT s.seed, s.level, s.profile_id, s.created_at AS seed_at, p.name, p.owner_id, p.deleted_at, u.username AS owner_name " +
       "FROM seeds s JOIN profiles p ON p.id = s.profile_id " +
       "LEFT JOIN users u ON u.id = p.owner_id " +
       "WHERE s.seed = ? AND s.revoked_at IS NULL"
@@ -594,6 +700,21 @@ async function route(request, env, url, ctx) {
 
     if (row.owner_id === user.id) {
       return json({ profileId: row.profile_id, name: row.name, level: "owner", isOwner: true, alreadyMine: true });
+    }
+
+    /* ── REMOVED MEANS REMOVED ────────────────────────────────────────────
+       "Remove this person? They lose access straight away." It revoked the
+       grant and left the code alone, so the person typed the same code
+       again and was straight back in, at the same level, writing. The
+       owner removing somebody now shuts every code that existed at that
+       moment to THAT person; a code made afterwards is the owner inviting
+       them back, and works as any code does. Leaving on your own is not
+       this (removed_at stays NULL), so changing your mind is still free. */
+    const prior = await env.DB.prepare(
+      "SELECT removed_at FROM grants WHERE profile_id = ? AND user_id = ?"
+    ).bind(row.profile_id, user.id).first();
+    if (prior && prior.removed_at && row.seed_at <= prior.removed_at) {
+      return fail(404, "bad_code", "That code does not work.");
     }
 
     /* ── THE CODE YOU CAME IN ON DECIDES YOUR LEVEL, BOTH WAYS ──────────
@@ -615,7 +736,7 @@ async function route(request, env, url, ctx) {
     await env.DB.prepare(
       "INSERT INTO grants (profile_id, user_id, level, seed, joined_at) VALUES (?, ?, ?, ?, ?) " +
       "ON CONFLICT(profile_id, user_id) DO UPDATE SET " +
-      "  level = excluded.level, seed = excluded.seed, revoked_at = NULL"
+      "  level = excluded.level, seed = excluded.seed, revoked_at = NULL, removed_at = NULL"
     ).bind(row.profile_id, user.id, row.level, seed, Date.now()).run();
 
     const after = await env.DB.prepare(
@@ -659,14 +780,19 @@ async function route(request, env, url, ctx) {
     if (!canAdmin(level)) return gone();
 
     if (seg.length === 4 && method === "GET") {
+      /* The USERNAME as well: display_name is only ever set on the device
+         rows of old, and every account made with a username has it NULL, so
+         the owner's list of who is in read "Someone" for every one of them
+         and there was no telling two people apart before removing one. */
       const rows = await env.DB.prepare(
-        "SELECT g.user_id, g.level, g.joined_at, u.display_name " +
+        "SELECT g.user_id, g.level, g.joined_at, u.display_name, u.username " +
         "FROM grants g LEFT JOIN users u ON u.id = g.user_id " +
         "WHERE g.profile_id = ? AND g.revoked_at IS NULL ORDER BY g.joined_at"
       ).bind(profile.id).all();
       return json({
         grants: (rows.results || []).map((r) => ({
-          userId: r.user_id, displayName: r.display_name, level: r.level, joinedAt: r.joined_at,
+          userId: r.user_id, displayName: r.display_name || r.username || null,
+          username: r.username || null, level: r.level, joinedAt: r.joined_at,
         })),
       });
     }
@@ -689,9 +815,11 @@ async function route(request, env, url, ctx) {
     }
 
     if (seg.length === 5 && method === "DELETE") {
+      /* removed_at as well as revoked_at: see REMOVED MEANS REMOVED in /v1/join */
+      const now = Date.now();
       await env.DB.prepare(
-        "UPDATE grants SET revoked_at = ? WHERE profile_id = ? AND user_id = ? AND revoked_at IS NULL"
-      ).bind(Date.now(), profile.id, seg[4]).run();
+        "UPDATE grants SET revoked_at = ?, removed_at = ? WHERE profile_id = ? AND user_id = ? AND revoked_at IS NULL"
+      ).bind(now, now, profile.id, seg[4]).run();
       return json({ profileId: profile.id, userId: seg[4], revoked: true });
     }
   }
@@ -978,18 +1106,27 @@ async function route(request, env, url, ctx) {
        answered with 409 rather than 400: nothing about the request is
        malformed, it is the one shape of valid request this refuses. */
     const deletions = incoming.reduce((n, i) => n + (i.deleted ? 1 : 0), 0);
-    /* gated on the floor, not on there being any deletion at all: below it
-       nothing can be refused, and the COUNT is a query per push that would
-       buy nothing on a budget of ten milliseconds */
-    if (deletions >= WIPE_FLOOR && body.allowWipe !== true) {
-      const held = await env.DB.prepare(
-        "SELECT COUNT(*) AS n FROM items WHERE profile_id = ? AND deleted = 0"
-      ).bind(profile.id).first();
-      const live = (held && held.n) || 0;
-      if (wipeRefused(deletions, live)) {
-        return fail(409, "wipe_refused",
-          "That would delete " + deletions + " items from a profile holding " + live +
-          ". Refused. If you meant it, restore a backup or reset the profile.");
+    /* Summed with whatever this profile has had deleted in the last
+       WIPE_WINDOW_MS, because a wipe arrives as several batches (see the
+       block in sync.js). `before` is what the profile held when that run of
+       deletions began: what it holds now plus what the run already took.
+       Only read at all when this push deletes something, and only counted
+       once past the floor, so an ordinary push costs no extra query. */
+    const wipeKey = "wipe:" + profile.id;
+    let wipePrior = 0;
+    if (deletions && body.allowWipe !== true) {
+      wipePrior = await countIn(env, wipeKey, WIPE_WINDOW_MS);
+      const run = wipePrior + deletions;
+      if (run >= WIPE_FLOOR) {
+        const held = await env.DB.prepare(
+          "SELECT COUNT(*) AS n FROM items WHERE profile_id = ? AND deleted = 0"
+        ).bind(profile.id).first();
+        const live = (held && held.n) || 0;
+        if (wipeRefused(run, live + wipePrior)) {
+          return fail(409, "wipe_refused",
+            "That would delete " + run + " items from a profile holding " + (live + wipePrior) +
+            ". Refused. If you meant it, restore a backup or reset the profile.");
+        }
       }
     }
 
@@ -1019,10 +1156,22 @@ async function route(request, env, url, ctx) {
       }
     }
 
+    /* ── A CLOCK FROM THE FUTURE DOES NOT GET TO WIN FOR EVER ────────────
+       clientUpdatedAt is the device's own clock, trusted only to refuse
+       going backwards — which a stamp from next century turns into a lock:
+       every honest edit of that row after it is "stale", on every device,
+       for good. Phones are seconds off, not days, so a stamp is held to at
+       most CLOCK_AHEAD_MS past this server's clock, on the way in and when
+       an old one is read back. */
+    const CLOCK_AHEAD_MS = 10 * 60_000;
+    const clampStamp = (v) => (Number.isFinite(v) ? Math.min(v, now + CLOCK_AHEAD_MS) : v);
+    for (const item of incoming) if (Number.isFinite(item.clientUpdatedAt)) item.clientUpdatedAt = clampStamp(item.clientUpdatedAt);
+
     const toWrite = [];
     const stale = [];
     for (const item of incoming) {
-      const ours = stored.get(keyOf(item.collection, item.itemId));
+      const found = stored.get(keyOf(item.collection, item.itemId));
+      const ours = found != null ? clampStamp(found) : found;
       if (Number.isFinite(item.clientUpdatedAt) && ours != null && ours > item.clientUpdatedAt) {
         stale.push({ collection: item.collection, itemId: item.itemId, storedClientUpdatedAt: ours });
         continue;
@@ -1032,29 +1181,50 @@ async function route(request, env, url, ctx) {
 
     /* D1 allows 100 bound parameters per query, so this cannot be one large
        INSERT with a values list. One statement per item through batch() stays
-       inside that limit and is a single round trip per chunk. */
+       inside that limit and is a single round trip per chunk.
+
+       ── THE STAMP IS TAKEN WHERE THE ROWS LAND ───────────────────────────
+       updated_at used to be `now`, read before any of this ran. Two pushes
+       racing — or one push's later chunks against somebody's pull — could
+       therefore commit rows stamped OLDER than a cursor another device had
+       already moved past, and that device never saw them. Each chunk is one
+       transaction (a D1 batch is), and its first statement moves the
+       profile's own counter to MAX(counter + 1, now); every row in the chunk
+       takes that value. So a chunk that commits later always carries a
+       larger stamp than every row already visible, which is the one thing a
+       cursor needs to be true. It is still a clock reading to the
+       millisecond in practice, and the cursor's shape does not change. */
+    const stampNext = () =>
+      env.DB.prepare("UPDATE profiles SET item_seq = MAX(item_seq + 1, ?) WHERE id = ?").bind(Date.now(), profile.id);
     for (let i = 0; i < toWrite.length; i += BATCH_CHUNK) {
       const chunk = toWrite.slice(i, i + BATCH_CHUNK);
-      await env.DB.batch(chunk.map((item) =>
+      await env.DB.batch([stampNext(), ...chunk.map((item) =>
         env.DB.prepare(
           "INSERT INTO items (profile_id, collection, item_id, json, updated_at, deleted, client_updated_at) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?) " +
+          "VALUES (?, ?, ?, ?, (SELECT item_seq FROM profiles WHERE id = ?), ?, ?) " +
           "ON CONFLICT(profile_id, collection, item_id) DO UPDATE SET " +
           "  json = excluded.json, updated_at = excluded.updated_at, " +
           "  deleted = excluded.deleted, client_updated_at = excluded.client_updated_at"
         ).bind(
           profile.id, item.collection, item.itemId,
           item.deleted ? null : JSON.stringify(item.json),
-          now,
+          profile.id,
           item.deleted ? 1 : 0,
           Number.isFinite(item.clientUpdatedAt) ? item.clientUpdatedAt : null
         )
-      ));
+      )]);
     }
 
     if (toWrite.length) {
       await env.DB.prepare("UPDATE profiles SET updated_at = ? WHERE id = ?")
         .bind(now, profile.id).run().catch(() => {});
+    }
+
+    /* the deletions this push really made join the run the wipe guard sums */
+    const deleted = toWrite.reduce((n, i) => n + (i.deleted ? 1 : 0), 0);
+    if (deleted && body.allowWipe !== true) {
+      try { await recordMiss(env, wipeKey, WIPE_WINDOW_MS, deleted); }
+      catch (e) { console.error("wipe count failed; the rows are written", e && e.message ? e.message : e); }
     }
 
     /* ── A LIBRARY ROW HOLDS THE PHOTO IT NAMES, AND ONLY THAT ONE ───────

@@ -460,9 +460,16 @@ export async function chatRoute(ctx) {
 
       /* Who else is here, and does any of them refuse to hear from me. A DM
          has exactly one other person, so a block is the whole answer; a
-         group would drop the blocked member rather than the message. */
+         group would drop the blocked member rather than the message.
+
+         EVERYBODY in the thread, including somebody who has cleared it out
+         of their list. Only counting the ones still listing it meant a
+         message to somebody who had removed the chat went to nobody — no
+         list entry, no badge, no notification, while the sender saw it as
+         sent — and it meant a block was never checked once the blocker had
+         also removed the chat, so the messages piled up for them to find. */
       const others = await env.DB.prepare(
-        "SELECT user_id FROM chat_members WHERE thread_id = ? AND user_id != ? AND left_at IS NULL"
+        "SELECT user_id FROM chat_members WHERE thread_id = ? AND user_id != ?"
       ).bind(threadId, user.id).all();
       const recipients = (others.results || []).map((r) => r.user_id);
 
@@ -506,11 +513,19 @@ export async function chatRoute(ctx) {
       }
 
       /* Sending is reading: a message of your own must not come back as
-         something you have not seen. */
+         something you have not seen.
+
+         And writing to somebody puts the conversation back in their list,
+         which is exactly what "Remove this chat" promises them: "writing to
+         them again brings this same chat back, messages and all". It is the
+         other person writing that has to bring it back — they are the one
+         who cannot know it was removed. */
       await env.DB.batch([
         env.DB.prepare("UPDATE chat_threads SET last_message_at = ? WHERE id = ?").bind(now, threadId),
         env.DB.prepare("UPDATE chat_members SET last_read_at = ? WHERE thread_id = ? AND user_id = ?")
           .bind(now, threadId, user.id),
+        env.DB.prepare("UPDATE chat_members SET left_at = NULL WHERE thread_id = ? AND user_id != ? AND left_at IS NOT NULL")
+          .bind(threadId, user.id),
       ]);
 
       /* ── THE NOTIFICATION ──────────────────────────────────────────

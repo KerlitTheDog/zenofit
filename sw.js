@@ -8,7 +8,7 @@
    Scope note: this file must stay in the repo root. A service worker can only
    control pages at or below its own URL, and the app lives at /zenofit/.       */
 
-const VERSION = "zenofit-v29";
+const VERSION = "zenofit-v31";
 /* Fetched photos, keyed by id (see the PHOTOS block in app.js). Not part of
    the shell and not versioned with it: a photo's id IS its content, so a
    new build has nothing to invalidate, and clearing it on every deploy
@@ -64,6 +64,16 @@ function tellWindows(msg) {
     .catch(() => {});
 }
 
+/* ── A CACHE THAT FAILS IS A CACHE THAT IS NOT THERE, NOT A DEAD APP ────
+   Keeping a copy is the extra; the response is the job. `cache.put` used to
+   sit inside the chain that produced the response, so when it threw — a
+   full phone's QuotaExceededError, or Cache Storage broken outright — the
+   perfectly good response fell through to `.catch(() => hit)`, and with
+   nothing cached (which is exactly the state a failed install leaves) the
+   page got a network error instead of the app: it would not open at all,
+   on the very phone with no room to spare. So a failure to KEEP a copy is
+   swallowed where it happens, and a cache that will not even open or
+   answer means straight to the network, as if there were no worker. */
 self.addEventListener("fetch", (e) => {
   const req = e.request;
   if (req.method !== "GET") return;
@@ -84,14 +94,15 @@ self.addEventListener("fetch", (e) => {
         .then(async (res) => {
           if (res && res.ok) {
             if (served && !(await sameBytes(served, res.clone()))) tellWindows({ type: "shell-updated" });
-            await cache.put(req, res.clone());
+            try { await cache.put(req, res.clone()); }
+            catch { /* no copy kept this time; the response is still good */ }
           }
           return res;
         })
-        .catch(() => hit);
+        .catch(() => hit);     // offline: whatever the cache had
       return { hit, net };
     })
-  );
+  ).catch(() => ({ hit: null, net: fetch(req) }));
   e.respondWith(work.then(({ hit, net }) => hit || net));
   e.waitUntil(work.then(({ net }) => net).catch(() => {}));
 });
@@ -100,56 +111,110 @@ self.addEventListener("fetch", (e) => {
    The page is frozen or gone by the time this runs. A visible notification is
    mandatory: skip it and Chrome eventually revokes push permission.
 
-   ONE EXCEPTION, AND IT IS THE ONE THE SPEC ALLOWS: a window that is on
-   screen RIGHT NOW. A notification for a message you are watching arrive is
-   noise, and the permission budget is spent on pushes that show nothing,
-   which is not what this does — it hands the push to the page instead, and
-   the page is what the user sees. Only a FOCUSED client counts. "A tab
-   exists" is not the same claim: an installed app sitting behind the lock
-   screen still has its window, and that is exactly when a message has to
-   ring.
+   ONE EXCEPTION: somebody LOOKING AT THAT CONVERSATION right now. A
+   notification for a message you are watching arrive is noise, so the push
+   is handed to the page instead, which draws it. Only the page knows what is
+   on its screen, so the service worker ASKS it (chatShowing in app.js) and
+   waits a moment for the answer; a page that does not answer — frozen, or a
+   build from before this — gets the notification, because a message nobody
+   was told about is the worse of the two mistakes.
 
-   A timer is deliberately not treated this way. It already rings locally
-   when the page is alive (fireTimer cancels the server's copy on the way
-   past) so a timer push arriving at all means the page did NOT get there,
-   and it must be shown whatever any window claims.                         */
+   It used to be "any window of the app is focused", and that silenced far
+   too much: the app open on Home in the middle of a workout is focused, and
+   a message from somebody else arrived with nothing but a small count on
+   the nav, which is not being told. Nor is it "a window exists": an
+   installed app behind the lock screen still has its window, and that is
+   exactly when a message has to ring.
+
+   AND ON WEBKIT THERE IS NO EXCEPTION AT ALL. Safari, and every web app
+   installed on an iPhone, counts a push that shows nothing as a silent push
+   whatever the app was doing, and after a handful revokes the subscription —
+   notifications then simply stop, for every kind, until somebody turns them
+   on again. Chrome has the focused-window allowance; WebKit does not. So on
+   WebKit even the conversation you are reading gets a notification, shown
+   silently and closed at once: shown because it must be, gone because
+   nobody needs it. (A real iPhone is the only thing that can prove what
+   that looks like; see CLAUDE.md.)
+
+   A timer is deliberately not treated any of these ways. It already rings
+   locally when the page is alive (fireTimer cancels the server's copy on the
+   way past) so a timer push arriving at all means the page did NOT get
+   there, and it must be shown whatever any window claims.                   */
+const UA = (self.navigator && self.navigator.userAgent) || "";
+const STRICT_PUSH = /AppleWebKit/.test(UA) && !/Chrome|Chromium|Android|Edg\//.test(UA);
+const ASK_MS = 1500;
+
+/* Every window hears about the message, the one behind the lock screen
+   included — it wants the message waiting when it comes back, and it costs
+   nothing to say so now. The ones on screen are also asked whether that
+   conversation is what they are showing. Resolves true if one says yes AND
+   is focused: Chrome only forgives a push that shows nothing while a window
+   of the site has focus, and otherwise puts up a notice of its own saying
+   the site "has been updated in the background". */
+function tellAndAsk(live, d) {
+  const msg = { type: "chat-push", data: { threadId: d.id || null, from: d.title || null, at: d.at || Date.now() } };
+  const asks = [];
+  for (const c of live) {
+    if (c.visibilityState !== "visible") { c.postMessage(msg); continue; }
+    asks.push(new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), ASK_MS);
+      try {
+        const ch = new MessageChannel();
+        ch.port1.onmessage = (ev) => { clearTimeout(timer); resolve(!!(ev.data && ev.data.showing) && c.focused); };
+        c.postMessage(msg, [ch.port2]);
+      } catch { clearTimeout(timer); resolve(false); }
+    }));
+  }
+  return Promise.all(asks).then((all) => all.some(Boolean));
+}
+
+const closeTagged = (tag) => self.registration.getNotifications({ tag })
+  .then((list) => list.forEach((n) => n.close()))
+  .catch(() => {});
+
 self.addEventListener("push", (e) => {
   let d = {};
   try { d = e.data ? e.data.json() : {}; } catch { d = { title: "Zenofit" }; }
 
   e.waitUntil((async () => {
     const kind = d.kind || "generic";
+    const tag = d.tag || "zenofit";
+    let watching = false;
 
     if (kind === "chat") {
       const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
       const live = clients.filter((c) => c.url.startsWith(self.registration.scope));
-      const watching = live.some((c) => c.focused && c.visibilityState === "visible");
-
-      /* Tell every window either way, focused or not: the one behind the
-         lock screen wants the message waiting for it when it comes back,
-         and it costs nothing to say so now. */
-      for (const c of live) {
-        c.postMessage({ type: "chat-push", data: { threadId: d.id || null, from: d.title || null, at: Date.now() } });
-      }
-      if (watching) return;
+      watching = await tellAndAsk(live, d);
+      if (watching && !STRICT_PUSH) return;
+      /* One notification per conversation rather than one per message, so a
+         burst of five replies is one line in the shade and not five — but
+         each of them still has to ALERT. `renotify` says so and only
+         Chrome listens: Safari and Firefox swap a same-tag notification in
+         without a sound, so the second message of a conversation arrived in
+         silence. Taking the old one down first makes every message a new
+         notification, everywhere, and still leaves one line. */
+      await closeTagged(tag);
     }
 
-    return self.registration.showNotification(d.title || "Zenofit", {
+    await self.registration.showNotification(d.title || "Zenofit", {
       body: d.body || "",
       icon: "./icon-192.png",
       badge: "./icon-192.png",
-      /* One notification per conversation rather than one per message, so a
-         burst of five replies is one line in the shade and not five. */
-      tag: d.tag || "zenofit",
-      renotify: true,
+      tag,
+      renotify: !watching,
+      silent: watching,
       /* A timer waits to be acknowledged because missing it ends the set.
          A message does not: it is still there when you pick the phone up,
          and a notification that refuses to go away is a notification
          people turn off. The server says which this is. */
       requireInteraction: d.requireInteraction !== false,
-      vibrate: kind === "chat" ? [120, 80, 120] : [250, 120, 250, 120, 400],
-      data: { url: d.url || "./", kind, id: d.id || null },
+      vibrate: watching ? undefined : kind === "chat" ? [120, 80, 120] : [250, 120, 250, 120, 400],
+      /* `at` is the server's stamp on the message, which is what lets the
+         page take this down once the conversation is read on ANY device
+         (chatCloseRead) without taking down a newer one by mistake. */
+      data: { url: d.url || "./", kind, id: d.id || null, at: d.at || null },
     });
+    if (watching) await closeTagged(tag);
   })());
 });
 

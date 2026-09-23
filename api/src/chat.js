@@ -27,6 +27,10 @@ import { cleanDataUrl, sha256Hex, storePhoto, setHoldings, msgHolder, payloadPho
    a thread is never a payload problem. */
 export const MAX_BODY = 2000;
 
+/* How long a push service holds a message's notification for a phone it
+   cannot reach, in seconds (see the send route). */
+export const CHAT_PUSH_TTL = 24 * 60 * 60;
+
 /* ── WHAT A MESSAGE CAN CARRY ──────────────────────────────────────────
    Words, or a thing from the app: an exercise, a preset, a logged day, a
    personal record, a strength-standard rank, a photo. The thing travels as
@@ -536,9 +540,21 @@ export async function chatRoute(ctx) {
          that is stored has been sent whether or not the other phone rings.
 
          A muted member is delivered to and not announced. Whether the
-         notification is SHOWN is sw.js's decision -- a focused window gets
-         the message handed straight to the page instead -- because only
-         the other device knows whether somebody is already looking at it. */
+         notification is SHOWN is sw.js's decision -- a window showing this
+         very conversation gets the message handed straight to the page
+         instead -- because only the other device knows whether somebody is
+         already looking at it.
+
+         `at` is this message's stamp, which is what lets the other phone
+         take the notification down once the conversation has been read on
+         any device, without taking down one for a newer message.
+
+         And it is held for a DAY for a phone that cannot be reached, not
+         the five minutes a rest timer gets. The phone that most needs to
+         hear about a message is the one in a basement gym with no signal,
+         and five minutes meant that when it came back up, what had arrived
+         in the meantime never rang at all. A message is still worth
+         announcing an hour later; a timer is not. */
       const notify = await env.DB.prepare(
         "SELECT user_id FROM chat_members WHERE thread_id = ? AND user_id != ? AND left_at IS NULL AND muted = 0"
       ).bind(threadId, user.id).all();
@@ -550,9 +566,10 @@ export async function chatRoute(ctx) {
         tag: "chat-" + threadId,
         kind: "chat",
         id: threadId,
+        at: now,
         url: "./",
         requireInteraction: false,
-      }).catch(() => null));
+      }, { ttl: CHAT_PUSH_TTL }).catch(() => null));
 
       if (ctx.waitUntil) ctx.waitUntil(Promise.all(fan));
       else await Promise.all(fan);

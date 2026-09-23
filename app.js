@@ -4307,6 +4307,9 @@ async function enterAccount() {
   liveEnter(profiles.active);
   chatLastPoll = 0;
   chatPoll();
+  /* this phone now rings for the account that just signed in, and not for
+     whoever was here before (see notifyAttach) */
+  notifyAttach();
   await rosterSync({ force: true });
   ui.rosterLoading = false;
   if (!syncLive(activeProfileId())) syncQuiet();
@@ -4520,6 +4523,7 @@ function chatForget() {
   chatCache = null;
   chatUploads.clear();
   chatGone.clear();
+  chatReadMarks.clear();
   try { localStorage.removeItem(CHAT_KEY); } catch { /* already gone */ }
   /* the pictures fetched for this account's chats and profiles are the
      account's, exactly as its messages are (see the PHOTOS block) */
@@ -4602,6 +4606,7 @@ function chatMerge(threadId, incoming) {
    server's to report. */
 const chatGone = new Set();           // unsent from here this session; a late poll must not bring one back
 const chatUploads = new Map();        // clientId -> {chatPhoto?, ups?}, see chatPost
+const chatReadMarks = new Map();      // threadId -> {at, sent}: read here, not yet confirmed, see chatApplyMarks
 const chatLocal = (m) => m.pending || m.failed || String(m.messageId).startsWith("local:");
 
 function chatDrop(threadId, ids) {
@@ -4670,7 +4675,9 @@ async function chatPoll(opts) {
       lastMessage: t.lastMessage || null, lastMessageAt: t.lastMessageAt || t.createdAt || 0,
       lastReadAt: t.lastReadAt || 0,
     }));
+    chatApplyMarks(c.threads);
     if (JSON.stringify(c.threads.map((t) => [t.threadId, t.unread, t.lastMessageAt, t.muted])) !== before) changed = true;
+    chatCloseRead();
 
     /* The open conversation, if there is one. Asked for by the stamp of
        the newest message already held: the boundary millisecond comes
@@ -4705,33 +4712,131 @@ async function chatPoll(opts) {
     if (stale) ui.chatThread.error = null;
 
     if (changed) chatWrite();
-    if ((changed || stale) && !syncTyping()) render();
+    if (changed || stale) chatRepaint();
     return { ok: true, changed };
   } catch (e) {
     /* Silent by design, exactly as syncQuiet is: an unattended poll that
        raises an alert is a phone interrupting a set to say the wifi is
        bad. A thread that is OPEN says so on its own screen instead. */
     if (e && e.status === 401) chatForget();
-    if (ui.chatThread) { ui.chatThread.error = chatErrText(e); if (!syncTyping()) render(); }
+    if (ui.chatThread) { ui.chatThread.error = chatErrText(e); chatRepaint(); }
     return { ok: false, error: e };
   } finally {
     chatBusy = false;
   }
 }
 
+/* ── WHAT THIS PHONE HAS READ, UNTIL THE SERVER HAS SAID SO BACK ───────
+   The badge used to come back after a conversation had been read. A poll
+   asks for the list, the conversation is opened and marked read while that
+   request is still out, and then the list lands — an answer the server gave
+   BEFORE the mark — and puts the old count straight back over it. Nothing
+   corrected it until the next poll, a minute and a half away on another
+   tab. So a mark is remembered here until a list shows the server has it,
+   and a list that has not caught up yet cannot resurrect a count for
+   messages this phone has already read: if nothing arrived after the mark,
+   there is nothing unread. A mark the server never took (no signal) is sent
+   again by every poll until it is, rather than being "the next poll's"
+   problem, which it only was while the conversation stayed open. In
+   memory: a mark that outlives the app is one the server already has.
+   (The Map is declared with chatGone, above the poll.) */
+function chatApplyMarks(threads) {
+  const C = window.ZenofitCloud;
+  const listed = new Set();
+  for (const t of threads) {
+    const m = chatReadMarks.get(t.threadId);
+    if (!m) continue;
+    listed.add(t.threadId);
+    if (m.sent && (t.lastReadAt || 0) >= m.at) { chatReadMarks.delete(t.threadId); continue; }
+    if (m.at >= (t.lastMessageAt || 0)) { t.unread = 0; t.lastReadAt = Math.max(t.lastReadAt || 0, m.at); }
+    if (!m.sent && C && !m.sending) {
+      m.sending = true;
+      C.markChatRead(t.threadId, m.at).then(() => { m.sent = true; }, () => {}).finally(() => { m.sending = false; });
+    }
+  }
+  for (const id of chatReadMarks.keys()) if (!listed.has(id)) chatReadMarks.delete(id);
+}
+
 /* The server keeps this only moving forwards, so a late call from a screen
-   that has since scrolled cannot bring the badge back. Fire and forget:
-   a failed mark costs one poll's worth of a stale count, not data. */
+   that has since scrolled cannot bring the badge back.
+
+   Reading a conversation also takes its notification out of the shade. It
+   used to stay there — and on Android that also leaves the dot on the app
+   icon — after the messages it announced had been read, which is exactly
+   the notification nobody should still be looking at. */
 async function chatMarkRead(threadId) {
   const C = window.ZenofitCloud;
   const t = chatThreadOf(threadId);
+  chatCloseNotifs(threadId);
   if (!C || !t) return;
   const msgs = chatMsgs(threadId).filter((m) => !m.pending && !m.failed);
   const at = msgs.length ? msgs[msgs.length - 1].at : Date.now();
   if (!t.unread && t.lastReadAt >= at) return;
   t.unread = 0; t.lastReadAt = Math.max(t.lastReadAt || 0, at);
+  const had = chatReadMarks.get(threadId);
+  const mark = { at: Math.max(at, had ? had.at : 0), sent: false };
+  chatReadMarks.set(threadId, mark);
   chatWrite();
-  try { await C.markChatRead(threadId, at); } catch { /* the next poll will */ }
+  try { await C.markChatRead(threadId, mark.at); mark.sent = true; }
+  catch { /* sent again by the next poll, see chatApplyMarks */ }
+}
+
+/* ── A NOTIFICATION FOR SOMETHING ALREADY READ IS TAKEN DOWN ───────────
+   Read on the laptop, and the phone's notification used to sit in the
+   shade for good. Every list the poll brings back says, per conversation,
+   how far this account has read, and a notification carries the server's
+   stamp of the message it announced (`at`, see sw.js), so anything at or
+   before that point is gone — and a notification for a message that
+   landed after the list was put together is left alone. One from a server
+   that did not stamp it yet is taken down once nothing is unread. */
+function chatCloseRead() {
+  try {
+    if (!("serviceWorker" in navigator)) return;
+    const read = new Map(chatThreads().filter((t) => !t.unread).map((t) => [t.threadId, t.lastReadAt || 0]));
+    if (!read.size) return;
+    navigator.serviceWorker.ready
+      .then((reg) => reg.getNotifications())
+      .then((list) => list.forEach((n) => {
+        const d = n.data || {};
+        if (d.kind !== "chat" || !read.has(d.id)) return;
+        if (d.at && d.at > read.get(d.id)) return;
+        n.close();
+      }))
+      .catch(() => {});
+  } catch { /* nothing to close */ }
+}
+
+/* ── A MESSAGE ARRIVING DOES NOT WAIT FOR THE KEYBOARD TO CLOSE ────────
+   Everything the poll changed reached the screen through render(), and
+   render() is skipped while a field has the caret (syncTyping), because it
+   rebuilds `#app` and would take the field away mid-word. But the poll that
+   fetched a reply had already merged it, so the next one found nothing new
+   and never tried again: somebody sat in a conversation with the keyboard
+   up, waiting for an answer, and it never appeared. Nor were they told any
+   other way — sw.js stays quiet for the conversation on screen, and a
+   conversation on screen is marked read. The same went for the count on
+   the nav while a set was being typed in somewhere else.
+
+   So while a field is being typed in, the three things a message changes
+   are patched in place instead, the way every search in this app patches
+   its results: the messages in the open conversation, the list on the chat
+   tab, and the count on the nav. None of them is the field. */
+function chatRepaint() {
+  if (!syncTyping()) { render(); return; }
+  chatPatchBadge();
+  const f = ui.chatThread;
+  const scroll = f && app.querySelector("[data-chatscroll]");
+  if (scroll) {
+    const top = scroll.scrollTop;
+    scroll.innerHTML = chatThreadBodyHTML(f);
+    const err = document.getElementById("chatErr");
+    if (err) err.innerHTML = chatErrHTML(f);
+    if (window.lucide) lucide.createIcons();
+    if (ui.chatStick) chatStickBottom();
+    else scroll.scrollTop = top;
+  } else if (!f && ui.tab === "chat") {
+    chatPatchBody();
+  }
 }
 
 /* The server's own sentence wherever it has one, since it is the useful
@@ -4773,20 +4878,34 @@ document.addEventListener("visibilitychange", () => {
 });
 
 /* ── WHAT THE SERVICE WORKER HANDS OVER ───────────────────────────────
-   sw.js does not show a notification for a message when a window of this
-   app is focused (see the push handler there for why that is the one case
-   the spec allows): it posts the push to the page instead, and the page
-   is what the user is already looking at. So this is the other half of
-   that decision — without it, a message arriving while the app is open
-   would wait for the next poll and nothing would have rung at all.
+   sw.js posts every chat push to the page, and does not show a
+   notification for a message in the conversation somebody is looking at
+   (see the push handler there): the page is what they are already looking
+   at. So this is the other half of that decision — without it, a message
+   arriving in the open conversation would wait for the next poll and
+   nothing would have rung at all.
 
    It carries no message body, deliberately. A push is a nudge, not a
    transport: the thread is fetched from the server like everything else,
    so there is exactly one road a message travels and no second copy to
-   disagree with it.                                                    */
+   disagree with it.
+
+   A window on screen is also ASKED, on the port that comes with the push,
+   whether that conversation is the one it is showing — only the page knows
+   what is on its own screen, and the answer decides whether sw.js shows a
+   notification at all. It must be answered at once and synchronously: the
+   worker gives up waiting after a moment and rings anyway. */
+const chatShowing = (threadId) =>
+  !!threadId && !document.hidden && !!ui.chatThread && ui.chatThread.threadId === threadId;
+
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.addEventListener("message", (e) => {
     if (!e.data || e.data.type !== "chat-push") return;
+    const port = e.ports && e.ports[0];
+    if (port) {
+      try { port.postMessage({ showing: chatShowing((e.data.data || {}).threadId) }); }
+      catch { /* the worker has stopped waiting; it rings */ }
+    }
     chatLastPoll = 0;               // whatever the pace was, this beats it
     chatPoll();
   });
@@ -4866,7 +4985,7 @@ async function chatOpenFetch(threadId) {
     }
     chatWrite();
     await chatMarkRead(threadId);
-    if (!syncTyping()) render();
+    chatRepaint();
   } catch (e) {
     if (e && e.status === 401) chatForget();
     if (ui.chatThread && ui.chatThread.threadId === threadId) {
@@ -5067,7 +5186,7 @@ async function chatDeliver(threadId, clientId) {
     chatUploads.delete(clientId);
     chatMerge(threadId, [res.message]);
     chatWrite();
-    if (!syncTyping()) render();
+    chatRepaint();
     /* the list's own ordering and the other side's unread count are the
        server's to report, and this is the moment they changed */
     chatLastPoll = 0;
@@ -5076,7 +5195,7 @@ async function chatDeliver(threadId, clientId) {
     const still = chatMsgs(threadId).find((m) => m.clientId === clientId);
     if (still) { delete still.pending; still.failed = true; still.error = chatErrText(e); }
     chatWrite();
-    render();
+    chatRepaint();
   }
 }
 
@@ -5664,6 +5783,7 @@ const ui = {
   pickerQ: "",
   pickerQuick: null,    // {name, muscle}
   pickerSeg: "exercises", // exercises | presets, picker mode
+  pickerFilter: "All",  // one muscle group, or All: the picker's chip strip (see pickerChips)
   entryForm: null,      // {f, isDraft}
   setForm: null,        // {s, isNew}, the single-set editor inside a Detailed entry
   timerForm: null,      // {t, isNew}, the custom-timer editor
@@ -6346,9 +6466,7 @@ function render() {
        waiting" is a different decision from "one". */
     const dot = id === "timer" && timersRunning
       ? `<span style="position:absolute;top:1px;right:50%;margin-right:-14px;width:7px;height:7px;border-radius:4px;background:var(--gold)"></span>`
-      : id === "chat" && unread
-        ? `<span style="position:absolute;top:-1px;right:50%;margin-right:-22px;min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--gold);color:var(--gold-ink);font-size:9.5px;font-weight:700;display:flex;align-items:center;justify-content:center">${unread > 9 ? "9+" : unread}</span>`
-        : "";
+      : id === "chat" ? chatBadgeHTML(unread) : "";
     html += `<button data-action="nav" data-id="${id}" style="position:relative;flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;gap:3px;color:${active ? "var(--gold)" : "var(--faint)"};padding:4px 0">
       ${dot}${icon(ic, 21, `stroke-width="${active ? 2.4 : 2}"`)}
       <span style="font-size:9.5px;font-weight:700;letter-spacing:.02em">${label}</span>
@@ -8569,6 +8687,23 @@ function chatBodyHTML() {
     </div>`}`;
 }
 
+/* The count on the nav's chat icon. A function of its own because it is
+   drawn by render() and also patched in place by chatRepaint, while a field
+   somewhere else in the app has the caret. */
+function chatBadgeHTML(unread) {
+  if (!unread) return "";
+  return `<span data-chatbadge style="position:absolute;top:-1px;right:50%;margin-right:-22px;min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:var(--gold);color:var(--gold-ink);font-size:9.5px;font-weight:700;display:flex;align-items:center;justify-content:center">${unread > 9 ? "9+" : unread}</span>`;
+}
+
+function chatPatchBadge() {
+  const btn = app.querySelector('[data-action="nav"][data-id="chat"]');
+  if (!btn) return;
+  const old = btn.querySelector("[data-chatbadge]");
+  if (old) old.remove();
+  const html = chatBadgeHTML(chatSignedIn() ? chatUnread() : 0);
+  if (html) btn.insertAdjacentHTML("afterbegin", html);
+}
+
 /* Swap what is under the search field, and keep the clear button in step,
    without touching the field itself. Called from `handleBind` on every
    keystroke and from the clear button, so neither ever costs focus. */
@@ -8637,10 +8772,62 @@ function chatResultsHTML() {
 function renderChatThread() {
   const f = ui.chatThread;
   const t = chatThreadOf(f.threadId);
+  const name = chatName(t);
+  const ready = (f.draft || "").trim().length > 0;
+  const body = chatThreadBodyHTML(f);
+
+  return `<div data-overlay="chatThread" data-layer="fs" class="${_lastOverlayKeys.has("chatThread") ? "" : "pb-sheet"}"
+    style="position:absolute;inset:0;z-index:70;background:var(--bg);display:flex;flex-direction:column;padding-bottom:var(--pb-kb, 0px)">
+
+    <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 12px 10px;border-bottom:1px solid var(--border-soft);background:var(--bg);flex-shrink:0">
+      <button data-action="chat-close" style="color:var(--muted);padding:4px;flex-shrink:0">${icon("chevron-left", 24)}</button>
+      ${chatAvatar(name, 34)}
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:700;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(name)}</div>
+        ${t && t.muted ? `<div style="font-size:10.5px;color:var(--faint);display:flex;align-items:center;gap:4px">${icon("bell-off", 10)} ${T("chat.muted")}</div>` : ""}
+      </div>
+      <button data-action="chat-menu" data-id="${esc(f.threadId)}" style="color:var(--muted);padding:6px;flex-shrink:0">${icon("more-vertical", 20)}</button>
+    </div>
+
+    <div id="chatErr">${chatErrHTML(f)}</div>
+
+    <div class="pb-scroll" data-scrollkey="chat-${esc(f.threadId)}" data-chatscroll
+      style="flex:1;min-height:0;overflow-y:auto;padding:10px 14px 12px">${body}</div>
+
+    ${/* The composer. A textarea rather than an input, because people
+          write more than one line and enter has to be able to mean a new
+          line — sending is the button, always, which is also what stops
+          a stray keyboard return posting half a sentence. It grows to
+          four lines and then scrolls. */""}
+    <div style="flex-shrink:0;display:flex;align-items:flex-end;gap:8px;padding:9px 12px calc(9px + var(--pb-sab));border-top:1px solid var(--border-soft);background:var(--surface)">
+      <button data-action="chat-attach" data-id="${esc(f.threadId)}" title="${esc(T("chat.attachTitle"))}"
+        style="flex-shrink:0;width:42px;height:42px;border-radius:14px;display:flex;align-items:center;justify-content:center;color:var(--muted);background:var(--surface2);border:1px solid var(--border)">${icon("plus", 20)}</button>
+      <textarea class="pb-input" data-bind="chatDraft" rows="1" enterkeyhint="enter"
+        placeholder="${esc(T("chat.composePh"))}" maxlength="2000"
+        style="flex:1;min-width:0;resize:none;max-height:104px;line-height:1.4;padding-top:9px;padding-bottom:9px">${esc(f.draft || "")}</textarea>
+      <button id="chatSendBtn" data-action="chat-send" data-id="${esc(f.threadId)}" ${ready ? "" : "disabled"}
+        class="pb-btn pb-gold" style="flex-shrink:0;width:42px;height:42px;border-radius:14px;opacity:${ready ? 1 : 0.4}">
+        ${icon("send", 18)}
+      </button>
+    </div>
+  </div>`;
+}
+
+/* The red line under the header, alone, so chatRepaint can put it up or
+   take it down without touching the composer. */
+function chatErrHTML(f) {
+  if (!f || !f.error) return "";
+  return `<div style="padding:8px 16px;background:rgba(208,90,80,.12);border-bottom:1px solid var(--border-soft);font-size:11.5px;color:var(--red);line-height:1.4">${esc(f.error)}</div>`;
+}
+
+/* Everything inside the scrolling part of a conversation: the messages,
+   and above them the button for older ones. Its own function because it is
+   what chatRepaint swaps in while the composer has the caret. */
+function chatThreadBodyHTML(f) {
+  const t = chatThreadOf(f.threadId);
   const me = chatMe();
   const name = chatName(t);
   const msgs = chatMsgs(f.threadId);
-  const ready = (f.draft || "").trim().length > 0;
 
   /* A date line between days, because "14:32" with nothing above it is a
      time on no particular day. */
@@ -8709,47 +8896,11 @@ function renderChatThread() {
     </div>`;
   }).join("");
 
-  const body = f.loading && !msgs.length
+  return f.loading && !msgs.length
     ? `<div style="padding:40px 0;text-align:center;font-size:12.5px;color:var(--faint)">${T("sync.working")}</div>`
     : !msgs.length
       ? `<div style="padding:40px 20px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T("chat.sayHi", { name: esc(name) })}</div>`
       : `${f.hasMore ? `<div style="text-align:center;margin:4px 0 12px"><button data-action="chat-earlier" data-id="${esc(f.threadId)}" ${f.paging ? "disabled" : ""} class="pb-btn pb-ghost" style="padding:7px 14px;font-size:12px">${f.paging ? T("sync.working") : T("chat.earlier")}</button></div>` : ""}${bubbles}`;
-
-  return `<div data-overlay="chatThread" data-layer="fs" class="${_lastOverlayKeys.has("chatThread") ? "" : "pb-sheet"}"
-    style="position:absolute;inset:0;z-index:70;background:var(--bg);display:flex;flex-direction:column;padding-bottom:var(--pb-kb, 0px)">
-
-    <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 12px 10px;border-bottom:1px solid var(--border-soft);background:var(--bg);flex-shrink:0">
-      <button data-action="chat-close" style="color:var(--muted);padding:4px;flex-shrink:0">${icon("chevron-left", 24)}</button>
-      ${chatAvatar(name, 34)}
-      <div style="flex:1;min-width:0">
-        <div style="font-weight:700;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(name)}</div>
-        ${t && t.muted ? `<div style="font-size:10.5px;color:var(--faint);display:flex;align-items:center;gap:4px">${icon("bell-off", 10)} ${T("chat.muted")}</div>` : ""}
-      </div>
-      <button data-action="chat-menu" data-id="${esc(f.threadId)}" style="color:var(--muted);padding:6px;flex-shrink:0">${icon("more-vertical", 20)}</button>
-    </div>
-
-    ${f.error ? `<div style="padding:8px 16px;background:rgba(208,90,80,.12);border-bottom:1px solid var(--border-soft);font-size:11.5px;color:var(--red);line-height:1.4">${esc(f.error)}</div>` : ""}
-
-    <div class="pb-scroll" data-scrollkey="chat-${esc(f.threadId)}" data-chatscroll
-      style="flex:1;min-height:0;overflow-y:auto;padding:10px 14px 12px">${body}</div>
-
-    ${/* The composer. A textarea rather than an input, because people
-          write more than one line and enter has to be able to mean a new
-          line — sending is the button, always, which is also what stops
-          a stray keyboard return posting half a sentence. It grows to
-          four lines and then scrolls. */""}
-    <div style="flex-shrink:0;display:flex;align-items:flex-end;gap:8px;padding:9px 12px calc(9px + var(--pb-sab));border-top:1px solid var(--border-soft);background:var(--surface)">
-      <button data-action="chat-attach" data-id="${esc(f.threadId)}" title="${esc(T("chat.attachTitle"))}"
-        style="flex-shrink:0;width:42px;height:42px;border-radius:14px;display:flex;align-items:center;justify-content:center;color:var(--muted);background:var(--surface2);border:1px solid var(--border)">${icon("plus", 20)}</button>
-      <textarea class="pb-input" data-bind="chatDraft" rows="1" enterkeyhint="enter"
-        placeholder="${esc(T("chat.composePh"))}" maxlength="2000"
-        style="flex:1;min-width:0;resize:none;max-height:104px;line-height:1.4;padding-top:9px;padding-bottom:9px">${esc(f.draft || "")}</textarea>
-      <button id="chatSendBtn" data-action="chat-send" data-id="${esc(f.threadId)}" ${ready ? "" : "disabled"}
-        class="pb-btn pb-gold" style="flex-shrink:0;width:42px;height:42px;border-radius:14px;opacity:${ready ? 1 : 0.4}">
-        ${icon("send", 18)}
-      </button>
-    </div>
-  </div>`;
 }
 
 /* Mute, block, leave. A sheet rather than three icons in the header: they
@@ -11728,18 +11879,54 @@ function renderStorUnlock() {
   `, 126);
 }
 
+/* ── THE PICKER CAN BE NARROWED TO ONE GROUP, AS THE LIBRARY CAN ───────
+   Adding a lift mid-workout meant typing its name or scrolling the whole
+   library, while the Library tab two taps away has had a chip per muscle
+   group all along. Same chips here, same test (`ex.muscle`), and the same
+   list of groups the Library offers — minus any with nothing in them, since
+   a chip that empties the list is no use to somebody picking a lift. It
+   narrows what is SHOWN and nothing else: whether a typed name is new to
+   the library is still asked of the whole library, so a lift filed under
+   another group is never offered as an addition, and a search that finds
+   something only outside the chosen group says so rather than looking empty.
+
+   A tap patches the list and the strip in place, like the search does:
+   render() re-focuses the search field, which on a phone throws the
+   keyboard back up over the list the chip was pressed to look at. Starts
+   on "All" every time the picker opens, exactly as the search starts empty. */
+function pickerChips(library) {
+  const groups = libraryGroups(library).filter((g) => library.some((x) => x.muscle === g));
+  const on = ui.pickerFilter || "All";
+  return ["All", ...groups].map((g) => `<button data-action="pick-filter" data-id="${esc(g)}" class="pb-chip" style="flex-shrink:0;padding:6px 12px;font-size:12.5px;color:${on === g ? "var(--gold-ink)" : "var(--muted)"};background:${on === g ? "var(--gold)" : "var(--surface2)"};border-color:${on === g ? "var(--gold)" : "var(--border)"}">${g === "All" ? T("common.all") : esc(groupLabel(g))}</button>`).join("");
+}
+
+function pickerPatch() {
+  const chips = document.getElementById("pickChips");
+  if (chips) chips.innerHTML = pickerChips(state.library);
+  const list = document.getElementById("pickList");
+  if (list) list.innerHTML = renderPickerList(state.library);
+  if (window.lucide) lucide.createIcons();
+}
+
 /* exercise picker with quick-add (name + muscle only, like the sheet) */
 function renderPickerList(library) {
   const q = ui.pickerQ, quick = ui.pickerQuick;
+  const filter = ui.pickerFilter || "All";
   /* two different lists on one screen: allGroups() shows the bucket so an
      uncategorized lift can still be picked, libraryGroups() is what a new one
      can be filed under, and the bucket is never a choice, only a Skip. */
   const groups = allGroups(library);
   const pickable = libraryGroups(library);
-  const match = library.filter((x) => exMatches(x, q));
+  const found = library.filter((x) => exMatches(x, q));
+  const match = found.filter((x) => filter === "All" || x.muscle === filter);
   const exact = library.some((x) => exIsNamed(x, q));
 
   let html = "";
+  if (found.length > match.length && q.trim()) {
+    html += `<button data-action="pick-filter" data-id="All" class="pb-btn pb-ghost" style="width:100%;padding:10px 14px;justify-content:flex-start;margin-bottom:10px;font-size:13px;color:var(--muted)">
+      ${icon("filter-x", 15)} ${T("pick.moreElsewhere", { n: found.length - match.length })}
+    </button>`;
+  }
   if (q.trim() && !exact && !quick) {
     html += `<button data-action="quick-add-start" class="pb-btn pb-ghost" style="width:100%;padding:12px 14px;justify-content:flex-start;margin-bottom:10px;border-color:rgba(233,185,73,.4);color:var(--gold)">
       ${icon("plus", 16)} ${T("pick.addToLibrary", { name: esc(q.trim()) })}
@@ -11818,6 +12005,7 @@ function renderExercisePicker(library) {
     <div style="padding:0 16px 4px">
       ${segControl("picker-seg", seg, [["exercises", T("lib.exercises")], ["presets", T("lib.presets")]])}
     </div>
+    ${seg === "exercises" ? `<div id="pickChips" class="pb-scroll" style="display:flex;gap:6px;overflow-x:auto;padding:6px 16px 8px;flex-shrink:0">${pickerChips(library)}</div>` : ""}
     <div class="pb-scroll" data-scrollkey="picker" style="flex:1;overflow-y:auto;padding:4px 16px calc(30px + var(--pb-sab))">
       ${seg === "presets"
         ? `<div id="presetPickList">${renderPresetPickerList()}</div>`
@@ -12870,6 +13058,57 @@ function notifySetKind(kind, on) {
   notifySave({ off });
   render();
   notifySyncPrefs();
+}
+
+/* ── AT LAUNCH, AND AT EVERY LOGIN ─────────────────────────────────────
+   Is push already on? Only the browser knows, and only asynchronously (it
+   is a question for the service worker's PushManager), so the first frame
+   is drawn assuming not and corrected once the answer lands. That order is
+   deliberate: a launch must not wait on it.
+
+   If it IS on, the subscription is filed again under whoever is signed in
+   now (refilePush). The server's copy used to be written only by the
+   switch, so it stayed with whoever last pressed it: log out and in as
+   somebody else and this phone rang for the first person and never for
+   you, and relaunching did not help. The same request carries this
+   device's kinds, so it also does what notifySyncPrefs did here.
+
+   If it is NOT on while the browser has already said yes — the old
+   first-timer prompt asked for exactly that permission and stopped short of
+   subscribing — the switch is on as far as anybody decided, so the
+   subscription that makes a locked phone ring is made now, quietly. No
+   prompt can appear: the browser only prompts while the answer is still
+   "default". A device that was switched OFF is left off.
+
+   Nobody signed in, nothing is done. This used to subscribe at a logged-out
+   launch as well, and a subscription needs an account to file it under, so
+   it quietly made one — an anonymous device the phone then rang for, which
+   nobody would ever sign in to. */
+async function notifyAttach() {
+  const C = window.ZenofitCloud;
+  if (!C || !C.pushEnabled || !signedInAs()) return;
+  try {
+    const prefs = notifyPrefs();
+    const on = await C.pushEnabled();
+    /* switched off here, and a subscription survived it (a disable that
+       failed half way): "off" is what was said, so finish saying it */
+    if (on && prefs.want === false) { C.disablePush().catch(() => {}); return; }
+    if (on) {
+      ui.notifyOn = true;
+      if (!syncTyping()) render();
+      const res = await C.refilePush({ off: prefs.off });
+      if (res && res.ok) notifySave({ sent: notifyOffKey(prefs.off) });
+      return;
+    }
+    if (prefs.want === false || C.pushBlockedReason()) return;
+    if (!window.Notification || Notification.permission !== "granted") return;
+    const res = await C.enablePush({ off: prefs.off });
+    if (res && res.ok) {
+      ui.notifyOn = true;
+      notifySave({ want: true, sent: notifyOffKey(prefs.off) });
+      if (!syncTyping()) render();
+    }
+  } catch { /* unsupported, or blocked: the window says which */ }
 }
 
 /* The first Start of a rest timer, on a device nobody has decided about
@@ -15972,6 +16211,7 @@ const actions = {
           p.volumeGoals = vg;
         }
         if (ui.libraryFilter === f.orig) ui.libraryFilter = name;
+        if (ui.pickerFilter === f.orig) ui.pickerFilter = name;
       }
     } else {
       p.groups = [...groups, { name, color: f.color, kind: KIND[f.kind] ? f.kind : DEFAULT_KIND }];
@@ -16034,6 +16274,7 @@ const actions = {
     }
     ui.groupForm = null;
     if (ui.libraryFilter === name) ui.libraryFilter = "All";
+    if (ui.pickerFilter === name) ui.pickerFilter = "All";
     patch(p);
   },
 
@@ -16780,8 +17021,14 @@ const actions = {
       patch({ presets: (state.presets || []).filter((x) => x.id !== id) });
     }
   },
-  "open-picker": () => { ui.picking = true; ui.pickerQ = ""; ui.pickerQuick = null; ui.pickerSeg = "exercises"; render(); },
+  "open-picker": () => { ui.picking = true; ui.pickerQ = ""; ui.pickerQuick = null; ui.pickerSeg = "exercises"; ui.pickerFilter = "All"; render(); },
   "close-picker": () => { ui.picking = false; ui.pickerQ = ""; ui.pickerQuick = null; render(); },
+  "pick-filter": (el) => {
+    ui.pickerFilter = el.dataset.id || "All";
+    pickerPatch();
+    const box = app.querySelector('[data-scrollkey="picker"]');
+    if (box) box.scrollTop = 0;
+  },
   "picker-seg": (el) => { ui.pickerSeg = el.dataset.id; if (el.dataset.id === "exercises") { ui.pickerQuick = null; } render(); },
   "quick-add-start": () => { ui.pickerQuick = { name: ui.pickerQ.trim(), muscle: "" }; render(); },
   /* The name is the only thing that has to be answered here. "Skip for now"
@@ -17182,7 +17429,7 @@ const actions = {
    answering your girlfriend, and nothing in the chat actions writes
    `state`, which is the test everything else on this list has to pass. */
 const READ_OK = new Set([
-  "nav", "fab", "log-seg", "timer-seg", "library-seg", "prog-seg", "picker-seg", "lib-filter",
+  "nav", "fab", "log-seg", "timer-seg", "library-seg", "prog-seg", "picker-seg", "pick-filter", "lib-filter",
   "chat-open", "chat-close", "chat-send", "chat-start", "chat-find-clear", "chat-earlier",
   "chat-retry", "chat-menu", "chat-mute", "chat-block", "chat-leave",
   /* looking at and sending things is chat; ADDING one to your library is a
@@ -17710,38 +17957,7 @@ startTimerEngine();
   chatPollStart();
   if (chatSignedIn()) chatPoll();
 
-  /* Is push already on? Only the browser knows, and only asynchronously
-     (it is a question for the service worker's PushManager), so the first
-     frame is drawn assuming not and corrected once the answer lands. That
-     order is deliberate: a launch must not wait on it.
-
-     And if it is NOT on while the browser has already said yes — the old
-     first-timer prompt asked for exactly that permission and stopped short
-     of subscribing — the switch is on as far as anybody decided, so the
-     subscription that makes a locked phone ring is made now, quietly. No
-     prompt can appear: the browser only prompts while the answer is still
-     "default". A device that was switched OFF is left off. */
-  const C = window.ZenofitCloud;
-  if (C && C.pushEnabled) {
-    C.pushEnabled().then(async (on) => {
-      /* switched off here, and a subscription survived it (a disable that
-         failed half way): "off" is what was said, so finish saying it */
-      if (on && notifyPrefs().want === false) { C.disablePush().catch(() => {}); return; }
-      if (on) {
-        ui.notifyOn = true;
-        notifySyncPrefs();
-        if (!syncTyping()) render();
-        return;
-      }
-      const prefs = notifyPrefs();
-      if (prefs.want === false || C.pushBlockedReason()) return;
-      if (!window.Notification || Notification.permission !== "granted") return;
-      const res = await C.enablePush({ off: prefs.off });
-      if (res && res.ok) {
-        ui.notifyOn = true;
-        notifySave({ want: true, sent: notifyOffKey(prefs.off) });
-        if (!syncTyping()) render();
-      }
-    }).catch(() => { /* unsupported, or blocked: the window says which */ });
-  }
+  /* Is push on, and is it ringing for the account signed in? See
+     notifyAttach; enterAccount asks the same question after a login. */
+  notifyAttach();
 })();

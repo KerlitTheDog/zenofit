@@ -101,6 +101,43 @@ check("bogus endpoint counted as failed, not sent", b.get("sent") == 0, b)
 s, b = call("GET", "/v1/push/status", token=tok)
 check("dead subscription was pruned", b.get("subscriptions") == 0, b)
 
+print("\n== logging out lets go of this device ==")
+# A phone nobody is signed in to must stop ringing for the account that left
+# it, and only for that account: somebody who has since signed in on the same
+# phone owns the subscription now. Needs real accounts, because the check is
+# read with a SECOND token after the first one has been logged out.
+import hashlib, uuid
+derive = lambda u, p: hashlib.pbkdf2_hmac("sha256", p.encode(), ("zenofit:" + u.lower()).encode(), 210000, 32).hex()
+def person(label):
+    name = (label + uuid.uuid4().hex[:8]).lower()
+    s, b = call("POST", "/v1/auth/register", body={"username": name, "key": derive(name, "correct horse battery")})
+    assert s in (200, 201), (s, b)
+    return name
+def login(name):
+    s, b = call("POST", "/v1/auth/login", body={"username": name, "key": derive(name, "correct horse battery")})
+    assert s == 200, (s, b)
+    return b["token"]
+anna, bert = person("pa"), person("pb")
+phone = {"endpoint": "https://example.com/push/" + b64u(16), "keys": {"p256dh": fake["keys"]["p256dh"], "auth": fake["keys"]["auth"]}}
+a1, a2 = login(anna), login(anna)
+s, b = call("POST", "/v1/push/subscribe", token=a1, body=phone)
+check("anna's phone is subscribed", s == 201, (s, b))
+s, b = call("POST", "/v1/auth/logout", token=a1, body={"endpoint": phone["endpoint"]})
+check("logout naming the endpoint succeeds", s == 200, (s, b))
+s, b = call("GET", "/v1/push/status", token=a2)
+check("the account no longer rings that phone", b.get("subscriptions") == 0, b)
+s, b = call("POST", "/v1/push/subscribe", token=a2, body=phone)
+b1 = login(bert)
+s, b = call("POST", "/v1/push/subscribe", token=b1, body=phone)
+check("bert signs in on the same phone and takes it over", s == 201, (s, b))
+s, b = call("POST", "/v1/auth/logout", token=a2, body={"endpoint": phone["endpoint"]})
+s, b = call("GET", "/v1/push/status", token=b1)
+check("anna logging out elsewhere does not unsubscribe bert", b.get("subscriptions") == 1, b)
+a3 = login(anna)
+s, b = call("POST", "/v1/auth/logout", token=a3)
+check("a logout with no body (an older build) still logs out", s == 200, (s, b))
+call("DELETE", "/v1/push/subscribe", token=b1, body={"endpoint": phone["endpoint"]})
+
 print("\n== timer validation ==")
 now = int(time.time() * 1000)
 for fire, why, code in [

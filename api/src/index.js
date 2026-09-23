@@ -379,7 +379,16 @@ async function route(request, env, url, ctx) {
   if (p === "/v1/auth/logout" && method === "POST") {
     const h = (request.headers.get("Authorization") || "").match(/^Bearer\s+(.+)$/i);
     const hash = await sha256Hex(h[1].trim());
-    await env.DB.prepare("DELETE FROM tokens WHERE token_hash = ? AND user_id = ?").bind(hash, user.id).run();
+    /* The device logging out names its push endpoint, and this account
+       stops ringing it: a phone nobody is signed in to used to go on
+       showing the account's messages on its lock screen. Only this
+       account's row for that endpoint, so a phone somebody else has since
+       signed in on is left ringing for them. */
+    const body = await readJson(request).catch(() => ({}));
+    const endpoint = body && typeof body.endpoint === "string" ? body.endpoint : null;
+    const drops = [env.DB.prepare("DELETE FROM tokens WHERE token_hash = ? AND user_id = ?").bind(hash, user.id)];
+    if (endpoint) drops.push(env.DB.prepare("DELETE FROM push_subs WHERE endpoint = ? AND user_id = ?").bind(endpoint, user.id));
+    await env.DB.batch(drops);
     return json({ loggedOut: true });
   }
 

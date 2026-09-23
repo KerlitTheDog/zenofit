@@ -834,6 +834,7 @@ UI.en = {
   "pick.whichMuscle": "\"{name}\", which muscle does it train?",
   "pick.skipMuscle": "Skip for now",
   "pick.quickHint": "The name is all it really needs. Missing a group? Tap ＋ to make one right here, no trip to the Library. Or skip it and file the exercise later.",
+  "pick.moreElsewhere": "{n} more in other groups, show all",
 
   /* ── entry & set forms ──────────────────────────────────────────── */
   "entry.subCardio": "time × intensity",
@@ -1898,6 +1899,7 @@ UI.uk = {
   "pick.whichMuscle": "\"{name}\": який м'яз вона тренує?",
   "pick.skipMuscle": "Пропустити поки що",
   "pick.quickHint": "Насправді достатньо самої назви. Немає потрібної групи? Торкніться ＋, щоб створити її прямо тут, без походу в бібліотеку. Або пропустіть і розподіліть вправу пізніше.",
+  "pick.moreElsewhere": "Ще {n} в інших групах, показати всі",
 
   "entry.subCardio": "час × інтенсивність",
   "entry.subSets": "кожен підхід",
@@ -2950,6 +2952,7 @@ UI.sv = {
   "pick.whichMuscle": "\"{name}\", vilken muskel tränar den?",
   "pick.skipMuscle": "Hoppa över just nu",
   "pick.quickHint": "Namnet är egentligen allt som krävs. Saknas en grupp? Tryck på ＋ för att skapa en direkt här, ingen omväg via biblioteket. Eller hoppa över och sortera in övningen senare.",
+  "pick.moreElsewhere": "{n} till i andra grupper, visa alla",
 
   "entry.subCardio": "tid × intensitet",
   "entry.subSets": "varje set",

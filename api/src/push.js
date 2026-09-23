@@ -22,8 +22,13 @@ const vapidFrom = (env) => ({
  * Returns a per-device result so a caller can log what happened. A dead
  * subscription (404 or 410) is deleted on the spot: a browser that was
  * reinstalled or had notifications turned off never comes back to the same
- * endpoint, and keeping it means paying for a failed request forever.        */
-export async function sendToUser(env, userId, message) {
+ * endpoint, and keeping it means paying for a failed request forever.
+ *
+ * `opts.ttl` is how long, in seconds, the push service holds this for a
+ * phone it cannot reach right now. Five minutes unless the caller says
+ * otherwise, which is right for a rest timer: one that rings twenty minutes
+ * late is worse than one that never rings.                                   */
+export async function sendToUser(env, userId, message, opts = {}) {
   if (!env.VAPID_PRIVATE_KEY || !env.VAPID_PUBLIC_KEY) {
     return { sent: 0, failed: 0, skipped: "vapid keys not configured" };
   }
@@ -55,7 +60,7 @@ export async function sendToUser(env, userId, message) {
     let payload;
     try {
       payload = await buildPushPayload(
-        { data: message, options: { ttl: 300, urgency: "high" } },
+        { data: message, options: { ttl: opts.ttl || 300, urgency: "high" } },
         { endpoint: row.endpoint, expirationTime: null, keys: { p256dh: row.p256dh, auth: row.auth } },
         vapid
       );

@@ -164,14 +164,24 @@
      had the account. It is sent and not awaited — logging out in a basement
      must still log out — so a token that could not be revoked because there
      was no signal is the one case left, and nothing on this phone holds it
-     any more. */
+     any more.
+
+     It names this device's push endpoint too, so the account stops ringing
+     a phone nobody is signed in to: its messages used to go on arriving
+     here, on the lock screen, after its owner had logged out. The browser's
+     subscription itself stays — it is the device's, like its theme — and
+     whoever signs in next has it filed under them (refilePush). */
   function signOut() {
     const d = read(DEVICE_KEY);
+    const push = read(PUSH_KEY);
     try { localStorage.removeItem(DEVICE_KEY); } catch { /* already gone */ }
     if (d && d.token) {
       try {
-        fetch(API + "/v1/auth/logout", { method: "POST", headers: { Authorization: "Bearer " + d.token } })
-          .catch(() => { /* no signal: see above */ });
+        fetch(API + "/v1/auth/logout", {
+          method: "POST",
+          headers: { Authorization: "Bearer " + d.token, "content-type": "application/json" },
+          body: JSON.stringify({ endpoint: push && push.endpoint ? push.endpoint : null }),
+        }).catch(() => { /* no signal: see above */ });
       } catch { /* no fetch at all */ }
     }
   }
@@ -226,7 +236,17 @@
 
      opts.off is the kinds this device has said no to ("chat", "timer"),
      sent with the subscription so the server never pushes them here. */
-  async function enablePush(opts) {
+  /* One at a time. The launch's quiet subscribe and a tap on the switch
+     could both find no subscription and both ask the browser for one; the
+     second replaces the first, and the server was left holding an endpoint
+     that no longer existed beside the one that did. */
+  let enabling = null;
+  function enablePush(opts) {
+    if (!enabling) enabling = enablePushOnce(opts).finally(() => { enabling = null; });
+    return enabling;
+  }
+
+  async function enablePushOnce(opts) {
     const blocked = pushBlockedReason();
     if (blocked) return { ok: false, reason: blocked };
 
@@ -259,18 +279,52 @@
         });
       }
 
-      const raw = sub.toJSON();
-      await call("POST", "/v1/push/subscribe", {
-        endpoint: raw.endpoint,
-        keys: raw.keys,
-        platform: isIOS() ? "ios" : /Android/.test(navigator.userAgent) ? "android" : "desktop",
-        off: (opts && Array.isArray(opts.off)) ? opts.off : [],
-      });
-
-      write(PUSH_KEY, { endpoint: raw.endpoint });
+      await fileSubscription(sub, opts);
       return { ok: true };
     } catch (e) {
       console.warn("enablePush failed", e);
+      return { ok: false, reason: "error", error: e && e.message };
+    }
+  }
+
+  /* The server files a subscription under whoever sends it (the row follows
+     the endpoint, see /v1/push/subscribe), so this is also what moves this
+     device from one account to another. */
+  async function fileSubscription(sub, opts) {
+    const raw = sub.toJSON();
+    await call("POST", "/v1/push/subscribe", {
+      endpoint: raw.endpoint,
+      keys: raw.keys,
+      platform: isIOS() ? "ios" : /Android/.test(navigator.userAgent) ? "android" : "desktop",
+      off: (opts && Array.isArray(opts.off)) ? opts.off : [],
+    });
+    write(PUSH_KEY, { endpoint: raw.endpoint });
+  }
+
+  /* ── THIS DEVICE RINGS FOR WHOEVER IS SIGNED IN ON IT ─────────────────
+     The browser's subscription belongs to the device and outlives any
+     login; the server's copy says which ACCOUNT it rings for. That copy was
+     only ever written by enablePush, so it stayed with whoever had last
+     pressed the switch: sign out and in as somebody else and this phone went
+     on ringing with the first person's messages and never with yours, a
+     relaunch did not fix it, and only switching notifications off and on
+     again did. So the existing subscription is filed again, under the
+     account signed in NOW, every launch and every login.
+
+     Never prompts and never makes a device: nobody signed in means nobody
+     to file it under. Also picks up a subscription the browser has quietly
+     replaced (it may, and says so only to the service worker). */
+  async function refilePush(opts) {
+    if (!signedIn() || pushBlockedReason() || Notification.permission !== "granted") {
+      return { ok: false, reason: "not-now" };
+    }
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.getSubscription();
+      if (!sub) return { ok: false, reason: "not-subscribed" };
+      await fileSubscription(sub, opts);
+      return { ok: true };
+    } catch (e) {
       return { ok: false, reason: "error", error: e && e.message };
     }
   }
@@ -574,7 +628,7 @@
     ensureDevice, hasDevice,
     deriveKey, register, signIn, signOut, account, signedIn, nameAvailable, verifyPassword,
     isStandalone, isIOS, pushBlockedReason,
-    enablePush, disablePush, pushEnabled, testPush, pushEndpoint, setPushPrefs, pushStatus,
+    enablePush, refilePush, disablePush, pushEnabled, testPush, pushEndpoint, setPushPrefs, pushStatus,
     photoId, photoHave, photoPut, photoGet,
     scheduleTimer, cancelTimer, clockDrift,
     pullChanges, pushChanges,

@@ -66,9 +66,24 @@
       const err = new Error((data && data.message) || ("HTTP " + res.status));
       err.status = res.status;
       err.code = data && data.error;
+      if (err.code === "account_deleted") accountGone(device);
       throw err;
     }
     return data;
+  }
+
+  /* ── THE ACCOUNT THIS PHONE IS SIGNED IN TO HAS BEEN DELETED ─────────
+     On another phone, usually, and this one is still holding its training.
+     The server says so to any request carrying one of that account's old
+     tokens (DELETE /v1/me), and whichever request hears it first tells the
+     app, which takes the account off this phone (accountErased in app.js).
+     Only if the token that was refused is still the one stored here: a
+     request can come back after somebody else has signed in. */
+  function accountGone(device) {
+    const now = read(DEVICE_KEY);
+    if (!device || !device.token || !now || now.token !== device.token) return;
+    try { window.dispatchEvent(new CustomEvent("zenofit:account-deleted", { detail: { userId: device.userId || null } })); }
+    catch { /* no window to tell */ }
   }
 
   /* ---- identity ----------------------------------------------------------- */
@@ -184,6 +199,26 @@
         }).catch(() => { /* no signal: see above */ });
       } catch { /* no fetch at all */ }
     }
+  }
+
+  /* ── DELETING THE ACCOUNT ──────────────────────────────────────────────
+     For good, on the server (DELETE /v1/me), which asks for the password
+     again and is given the derived key, exactly as a login is. Throws like
+     `call` does: 403 bad_password, 429 too many wrong passwords, no status
+     at all with no signal — and in every one of those nothing has been
+     deleted. It does NOT forget this device's credential: app.js does
+     that, once it has taken the account's training off this phone too. */
+  async function deleteAccount(password) {
+    const d = read(DEVICE_KEY) || {};
+    const key = d.username ? await deriveKey(d.username, password) : null;
+    return call("DELETE", "/v1/me", key ? { key } : {});
+  }
+
+  /* The credential, gone from this phone and nowhere else. For an account
+     that no longer exists: logging out would only tell the server about a
+     token it has already thrown away. */
+  function forgetAccount() {
+    try { localStorage.removeItem(DEVICE_KEY); } catch { /* already gone */ }
   }
 
   /* Does this password open this account? Answered without signing in:
@@ -408,6 +443,12 @@
       title: opts.title || opts.label || "Timer done",
       body: opts.body || "",
     };
+    /* Which of the app's timers this is (the push is tagged with it, so
+       the app can take the notification down again) and which phone it is
+       on (the only one the server rings). See POST /v1/timers. */
+    if (typeof opts.ref === "string" && opts.ref) payload.ref = opts.ref;
+    const endpoint = await pushEndpoint();
+    if (endpoint) payload.endpoint = endpoint;
 
     if (Number.isFinite(opts.inMs)) payload.durationMs = opts.inMs;
     else if (Number.isFinite(opts.fireAt)) payload.fireAt = opts.fireAt;
@@ -627,6 +668,7 @@
     API,
     ensureDevice, hasDevice,
     deriveKey, register, signIn, signOut, account, signedIn, nameAvailable, verifyPassword,
+    deleteAccount, forgetAccount,
     isStandalone, isIOS, pushBlockedReason,
     enablePush, refilePush, disablePush, pushEnabled, testPush, pushEndpoint, setPushPrefs, pushStatus,
     photoId, photoHave, photoPut, photoGet,

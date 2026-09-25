@@ -27,7 +27,13 @@ const vapidFrom = (env) => ({
  * `opts.ttl` is how long, in seconds, the push service holds this for a
  * phone it cannot reach right now. Five minutes unless the caller says
  * otherwise, which is right for a rest timer: one that rings twenty minutes
- * late is worse than one that never rings.                                   */
+ * late is worse than one that never rings.
+ *
+ * `opts.endpoint` narrows it to ONE of the user's devices, for a push that
+ * belongs to a phone rather than to the account (a rest timer). If that
+ * endpoint is not this user's any more — logged out, handed to somebody
+ * else, notifications switched off — nothing is sent: ringing the
+ * account's other devices instead is exactly what the narrowing is for. */
 export async function sendToUser(env, userId, message, opts = {}) {
   if (!env.VAPID_PRIVATE_KEY || !env.VAPID_PUBLIC_KEY) {
     return { sent: 0, failed: 0, skipped: "vapid keys not configured" };
@@ -41,7 +47,9 @@ export async function sendToUser(env, userId, message, opts = {}) {
      /v1/push/prefs). Never a test: a test is somebody asking whether push
      reaches this phone, and answering "it would, but you said no to
      messages" by showing nothing is the wrong answer to that question. */
-  const all = subs.results || [];
+  const mine = subs.results || [];
+  const all = opts.endpoint ? mine.filter((r) => r.endpoint === opts.endpoint) : mine;
+  if (opts.endpoint && !all.length) return { sent: 0, failed: 0, skipped: "that device is not subscribed" };
   const rows = message.kind === "test" ? all
     : all.filter((r) => !String(r.off_kinds || "").split(",").includes(message.kind));
   if (!rows.length) return { sent: 0, failed: 0, skipped: all.length ? "turned off for " + message.kind : "no subscriptions" };

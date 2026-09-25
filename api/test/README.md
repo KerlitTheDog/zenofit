@@ -5,7 +5,7 @@ the real `zenofit-api` and the real D1, which is the only way to catch the
 things that actually break (CORS headers, an access check that passes locally
 because the binding is missing, a migration that was never applied).
 
-Run all seven after every `wrangler deploy`:
+Run all eight after every `wrangler deploy`:
 
     python3 test/smoke.py          # devices, profiles, seeds, grants, removal, CORS
     python3 test/smoke_auth.py     # usernames, passwords, one account many phones,
@@ -19,10 +19,13 @@ Run all seven after every `wrangler deploy`:
     python3 test/smoke_photos.py   # the photo store an exercise photo lives in
     python3 test/smoke_push.py     # VAPID config, push subscriptions and per-kind prefs, timers
                                    # (two checks need the production secret and fail under wrangler dev)
+    python3 test/smoke_delete.py   # deleting an account: the password, what goes and what stays,
+                                   # every token told `account_deleted`, the name free again
 
 Each creates throwaway devices and profiles, exercises its routes, and deletes
 the profiles at the end. The devices are left behind; they are a few rows and
-cost nothing.
+cost nothing. `smoke_delete.py` deletes its accounts outright, through the
+route it tests, except the one its password-limit check locks for a while.
 
 Any of them runs against a local `wrangler dev` instead:
 

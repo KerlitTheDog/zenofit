@@ -185,6 +185,21 @@ s, b = call("POST", "/v1/timers", token=tok, body={"label": "no time given"})
 check("refuses a timer with no time at all", s == 400, (s, b))
 call("DELETE", "/v1/timers/" + td["timerId"], token=tok)
 
+print("\n== which timer, and which phone ==")
+# The app sends its own id for the timer, which the push is tagged with so the
+# app can take the notification down once the rest is dealt with, and this
+# phone's endpoint, the only one that rings. Both ride inside the push, where
+# nothing here can see them (a real phone can: see CLAUDE.md), but both must
+# be accepted, and a malformed one must never cost somebody their timer.
+s, tr = call("POST", "/v1/timers", token=tok, body={"durationMs": 90_000, "label": "Rest",
+             "ref": "k3j2h1q9_seed-timer-90", "endpoint": "https://fcm.googleapis.com/fcm/send/abc"})
+check("takes the app's own id and this phone's endpoint", s == 201 and tr.get("timerId"), (s, tr))
+s, tm = call("POST", "/v1/timers", token=tok, body={"durationMs": 90_000, "label": "Rest",
+             "ref": "has spaces <and tags>", "endpoint": "javascript:alert(1)"})
+check("a malformed id or endpoint is dropped, never the timer", s == 201 and tm.get("timerId"), (s, tm))
+for t in (tr, tm):
+    if t.get("timerId"): call("DELETE", "/v1/timers/" + t["timerId"], token=tok)
+
 print("\n%d passed, %d failed" % (len(PASS), len(FAIL)))
 if FAIL:
     print("FAILED:")

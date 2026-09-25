@@ -19,6 +19,8 @@
  * Phase 7 gives photos a store of their own (photos.js), so a library row
  * carries a photo's id instead of the photo, and a message can carry a
  * thing from the app as well as words.
+ * Phase 8 lets an account be deleted, for good and everywhere (account.js,
+ * DELETE /v1/me), and every phone still holding one of its tokens told so.
  */
 
 import { cleanUsername, cleanKey, newSalt, hashKey, sameHash } from "./auth.js";
@@ -28,6 +30,7 @@ import { sendToUser } from "./push.js";
 import { chatRoute } from "./chat.js";
 import { photoRoute, setHoldings, dropHoldingsUnder, itemHolder, sweepPhotos } from "./photos.js";
 import { overLimit, recordMiss, countIn } from "./limits.js";
+import { deleteAccount } from "./account.js";
 import {
   validateItem, encodeCursor, decodeCursor,
   MAX_ITEMS_PER_PUSH, MAX_PUSH_BODY_BYTES,
@@ -138,6 +141,18 @@ async function authenticate(request, env) {
   env.DB.prepare("UPDATE users SET last_seen_at = ? WHERE id = ?").bind(now, user.id).run().catch(() => {});
 
   return user;
+}
+
+/* A token that authenticate() did not recognise: was it one of a DELETED
+   account's (gone_tokens, migration 0010)? Only ever asked on the way to a
+   401, so a request that authenticates pays nothing for it, and a table
+   that is not there yet answers no rather than failing the request. */
+async function tokenGone(request, env) {
+  const m = (request.headers.get("Authorization") || "").match(/^Bearer\s+(.+)$/i);
+  if (!m) return false;
+  const row = await env.DB.prepare("SELECT 1 AS gone FROM gone_tokens WHERE token_hash = ?")
+    .bind(await sha256Hex(m[1].trim())).first().catch(() => null);
+  return !!row;
 }
 
 async function readJson(request, limit = 1_000_000) {
@@ -362,9 +377,16 @@ async function route(request, env, url, ctx) {
     return json({ username, available: !taken });
   }
 
-  /* Everything past here needs a token. */
+  /* Everything past here needs a token. One from an account that has been
+     deleted is told so in as many words, because the phone holding it is
+     also holding a copy of that account's training and has to know to let
+     go of it (see DELETE /v1/me). A plain 401 says only "log in again". */
   const user = await authenticate(request, env);
-  if (!user) return fail(401, "unauthorized", "Missing or unknown device token.");
+  if (!user) {
+    return (await tokenGone(request, env))
+      ? fail(401, "account_deleted", "This account has been deleted.")
+      : fail(401, "unauthorized", "Missing or unknown device token.");
+  }
 
   if (p === "/v1/me" && method === "GET") {
     return json({ userId: user.id, displayName: user.display_name, createdAt: user.created_at });
@@ -390,6 +412,40 @@ async function route(request, env, url, ctx) {
     if (endpoint) drops.push(env.DB.prepare("DELETE FROM push_subs WHERE endpoint = ? AND user_id = ?").bind(endpoint, user.id));
     await env.DB.batch(drops);
     return json({ loggedOut: true });
+  }
+
+  /* ── DELETING THE ACCOUNT, FOR GOOD ──────────────────────────────────────
+     Everything that is only this account's leaves the server in one
+     transaction (account.js says what, what stays, and why), and every
+     other phone signed in to it is told on its next request.
+
+     It asks for the PASSWORD, not only the token. A token is a thing left
+     lying around: on a borrowed phone somebody forgot to log out of, in a
+     browser's storage. Logging out with one costs nothing, and this cannot
+     be taken back. The check is login's own — the client's derived key,
+     never the password — and its misses count against the same limits, so
+     this is not a way round them. A device row that never had a password
+     has nothing to check, and its token is the whole of it. A wrong
+     password is 403, never 401: 401 means the token itself is no good,
+     and the app treats it that way. */
+  if (p === "/v1/me" && method === "DELETE") {
+    const body = await readJson(request).catch(() => ({}));
+    const row = await env.DB.prepare(
+      "SELECT id, username, username_lc, pw_hash, pw_salt FROM users WHERE id = ?"
+    ).bind(user.id).first();
+    if (!row) return fail(401, "unauthorized", "Missing or unknown device token.");
+    if (row.pw_hash) {
+      const keys = loginKeys(request, row.username_lc);
+      if (await loginBlocked(env, keys)) return tooManyLogins();
+      const key = cleanKey(body.key);
+      const attempt = await hashKey(row.pw_salt, key || "0".repeat(64));
+      if (!key || !sameHash(attempt, row.pw_hash)) {
+        await loginMissed(env, keys);
+        return fail(403, "bad_password", "That is not this account's password. Nothing was deleted.");
+      }
+    }
+    const gone = await deleteAccount(env, row);
+    return json({ deleted: true, userId: row.id, ...gone });
   }
 
   /* ---- chat --------------------------------------------------------------
@@ -960,6 +1016,26 @@ async function route(request, env, url, ctx) {
     const timerId = newId();
     const label = cleanName(body.label, null);
 
+    /* ── WHICH TIMER, ON WHICH PHONE ────────────────────────────────────
+       `ref` is the app's own id for the timer this rest belongs to. The
+       push carries it, and is tagged with it the way the app tags its own
+       notification for the same timer, so the two are one notification
+       rather than two, and the app can find it again to take it down once
+       the rest has been dealt with in the app — Done, Reset, starting it
+       again. Without it the push's tag named this server's id, which the
+       app forgets the moment the timer fires, and a finished rest sat in
+       the shade (and as the dot on the app icon) until swiped away by hand.
+
+       `endpoint` is the push subscription of the phone that started it,
+       and that phone is the only one that rings. A timer is not account
+       data — it lives on one phone and never syncs — so ringing every
+       device on the account put a rest nobody there was taking on a
+       laptop's screen, where nothing could ever acknowledge it. Neither is
+       required: a build that sends neither is answered exactly as before. */
+    const ref = typeof body.ref === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(body.ref) ? body.ref : null;
+    const endpoint = typeof body.endpoint === "string" && body.endpoint.startsWith("https://") && body.endpoint.length <= 2048
+      ? body.endpoint : null;
+
     await env.DB.prepare(
       "INSERT INTO timers (id, user_id, label, fire_at, status, payload, created_at) " +
       "VALUES (?, ?, ?, ?, 'scheduled', ?, ?)"
@@ -972,6 +1048,7 @@ async function route(request, env, url, ctx) {
         timerId, userId: user.id, fireAt,
         title: cleanName(body.title, label || "Timer done"),
         body: cleanName(body.body, ""),
+        ref, endpoint,
       }),
     });
 

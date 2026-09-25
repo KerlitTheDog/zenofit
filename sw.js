@@ -8,7 +8,7 @@
    Scope note: this file must stay in the repo root. A service worker can only
    control pages at or below its own URL, and the app lives at /zenofit/.       */
 
-const VERSION = "zenofit-v31";
+const VERSION = "zenofit-v32";
 /* Fetched photos, keyed by id (see the PHOTOS block in app.js). Not part of
    the shell and not versioned with it: a photo's id IS its content, so a
    new build has nothing to invalidate, and clearing it on every deploy
@@ -38,12 +38,26 @@ self.addEventListener("install", (e) => {
 });
 
 self.addEventListener("activate", (e) => {
-  e.waitUntil(
+  e.waitUntil(Promise.all([
     caches.keys()
       .then((keys) => Promise.all(keys.filter((k) => k !== VERSION && k !== PHOTO_CACHE).map((k) => caches.delete(k))))
-      .then(() => self.clients.claim())
-  );
+      .then(() => self.clients.claim()),
+    closeUnmatchedTimers(),
+  ]));
 });
+
+/* A timer notification from a build before v32 carries no `ref` (see the
+   push handler), so nothing can ever match it to the rest it announced and
+   take it down: it would sit in the shade, and as the dot on the app's
+   icon, until swiped away by hand — which is the bug v32 fixes. A new
+   worker activates while the app is open, where the rest itself is on
+   screen, so these are cleared then. The Notifications window's test
+   timer has no `ref` either, and goes the same way if it is still there. */
+function closeUnmatchedTimers() {
+  return self.registration.getNotifications()
+    .then((list) => list.forEach((n) => { const d = n.data || {}; if (d.kind === "timer" && !d.ref) n.close(); }))
+    .catch(() => {});
+}
 
 /* Stale-while-revalidate for our own files: the app paints from cache at once,
    and the next launch has the fresh copy. Cross-origin (fonts, lucide) is left
@@ -139,7 +153,20 @@ self.addEventListener("fetch", (e) => {
    A timer is deliberately not treated any of these ways. It already rings
    locally when the page is alive (fireTimer cancels the server's copy on the
    way past) so a timer push arriving at all means the page did NOT get
-   there, and it must be shown whatever any window claims.                   */
+   there, and it must be shown whatever any window claims.
+
+   ── A REST IS ONE NOTIFICATION, AND IT GOES WHEN THE REST IS DEALT WITH ──
+   The push and the page's own notification for the same timer share a tag
+   ("pbt-<the app's timer id>", which the server is handed as `ref`), so a
+   rest announced by both is one line in the shade. One that is already
+   there is replaced WITHOUT a second alert: the page got there first, or
+   the cancel that should have stopped this push was still on its way.
+   And every window hears about the push afterwards, because the one thing
+   the worker cannot know is whether that rest has already been dealt with
+   in the app — Done, Reset, started again — in which case the page takes
+   the notification straight back down (timerNotifsTidy in app.js). It
+   used to stay in the shade, and as the dot on the app's icon, until it
+   was swiped away by hand.                                                  */
 const UA = (self.navigator && self.navigator.userAgent) || "";
 const STRICT_PUSH = /AppleWebKit/.test(UA) && !/Chrome|Chromium|Android|Edg\//.test(UA);
 const ASK_MS = 1500;
@@ -180,6 +207,13 @@ self.addEventListener("push", (e) => {
     const kind = d.kind || "generic";
     const tag = d.tag || "zenofit";
     let watching = false;
+    /* this rest is already in the shade: replaced, not rung twice */
+    let again = false;
+
+    if (kind === "timer") {
+      again = await self.registration.getNotifications({ tag })
+        .then((list) => list.length > 0).catch(() => false);
+    }
 
     if (kind === "chat") {
       const clients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
@@ -196,25 +230,30 @@ self.addEventListener("push", (e) => {
       await closeTagged(tag);
     }
 
+    const quiet = watching || again;
     await self.registration.showNotification(d.title || "Zenofit", {
       body: d.body || "",
       icon: "./icon-192.png",
       badge: "./icon-192.png",
       tag,
-      renotify: !watching,
-      silent: watching,
+      renotify: !quiet,
+      silent: quiet,
       /* A timer waits to be acknowledged because missing it ends the set.
          A message does not: it is still there when you pick the phone up,
          and a notification that refuses to go away is a notification
          people turn off. The server says which this is. */
       requireInteraction: d.requireInteraction !== false,
-      vibrate: watching ? undefined : kind === "chat" ? [120, 80, 120] : [250, 120, 250, 120, 400],
+      vibrate: quiet ? undefined : kind === "chat" ? [120, 80, 120] : [250, 120, 250, 120, 400],
       /* `at` is the server's stamp on the message, which is what lets the
          page take this down once the conversation is read on ANY device
-         (chatCloseRead) without taking down a newer one by mistake. */
-      data: { url: d.url || "./", kind, id: d.id || null, at: d.at || null },
+         (chatCloseRead) without taking down a newer one by mistake.
+         `ref` is the app's id for a timer, which is how the page finds
+         this one again (timerNotifsTidy). */
+      data: { url: d.url || "./", kind, id: d.id || null, at: d.at || null, ref: d.ref || null },
     });
     if (watching) await closeTagged(tag);
+    /* after it is shown, never instead: see the block above */
+    if (kind === "timer") await tellWindows({ type: "timer-push", data: { ref: d.ref || null, tag } });
   })());
 });
 

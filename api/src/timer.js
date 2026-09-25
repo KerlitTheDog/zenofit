@@ -57,16 +57,23 @@ export class TimerAlarm {
 
     /* requireInteraction keeps a rest timer on screen until it is seen. A
        notification that auto-dismisses while the phone is in a pocket is the
-       same as no notification. */
+       same as no notification.
+
+       Tagged with the APP's id for the timer where the app sent one (`ref`,
+       see POST /v1/timers): "pbt-<id>" is the tag the app gives its own
+       notification for the same timer, so a rest announced by both is one
+       notification, and the app can take it down when the rest is done
+       with. Only the phone that started it rings (`endpoint`). */
     const result = await sendToUser(this.env, t.userId, {
       title: t.title || "Timer done",
       body: t.body || "",
-      tag: "timer-" + t.timerId,
+      tag: t.ref ? "pbt-" + t.ref : "timer-" + t.timerId,
       kind: "timer",
       id: t.timerId,
+      ref: t.ref || null,
       url: "./",
       requireInteraction: true,
-    });
+    }, { endpoint: t.endpoint || null });
 
     console.log("timer fired", t.timerId, JSON.stringify(result));
 

@@ -2106,6 +2106,12 @@ const PROFILES_KEY = "powerbuild-tracker:profiles";   // the old device-wide lis
 const ROSTER_PREFIX = "powerbuild-tracker:roster:";
 const stateKeyFor = (id) => "powerbuild-tracker:state:" + id;
 const rosterKeyFor = (userId) => ROSTER_PREFIX + userId;
+/* Profiles whose account was deleted this session and whose saves have
+   been taken off this phone (accountErased). A pull or a roster pass that
+   was already on the wire when that happened must not write one back, so
+   the three places that write a profile's records by id refuse these.
+   Declared up here, above everything that can run while the file loads. */
+const erasedIds = new Set();
 
 /* Who is signed in, read off the cloud client's own record. Null for a
    device that has never logged in, and for one whose account has not been
@@ -2133,7 +2139,7 @@ function ownersSave(all) {
   try { localStorage.setItem(OWNERS_KEY, JSON.stringify(all)); } catch (e) { console.error("owner index save failed", e); }
 }
 function ownerSet(localId, userId, username) {
-  if (!localId || !userId) return;
+  if (!localId || !userId || erasedIds.has(localId)) return;
   const all = ownersAll();
   all[localId] = { userId, username: username || (all[localId] || {}).username || null };
   ownersSave(all);
@@ -2348,7 +2354,7 @@ function writeProfileState(id, data) {
      save and fails on a full store, and a caller asking whether the bytes
      are down has to hear about both */
   if (id === profiles.active) return writeNow();
-  if (unreadable === id) return false;
+  if (unreadable === id || erasedIds.has(id)) return false;
   try { localStorage.setItem(stateKeyFor(id), JSON.stringify(data)); return true; }
   catch (e) {
     console.error("background save failed", e);
@@ -2479,7 +2485,7 @@ function closeEverything() {
   ui.profilesWin = false; ui.profileForm = null; ui.profileOrder = false;
   /* the sync sheets name a profile by id, so leaving one open across a
      switch would point them at somebody else's */
-  ui.syncSheet = null; ui.joinSheet = null; ui.syncError = null; ui.accountSheet = null;
+  ui.syncSheet = null; ui.joinSheet = null; ui.syncError = null; ui.accountSheet = null; ui.deleteAcct = null;
   /* a password given to Storage check opens that screen for that visit
      and not for whatever comes after it */
   ui.showStorage = false; ui.storUnlock = null; ui.storUnlocked = new Set();
@@ -2772,6 +2778,7 @@ const syncedActive = () => syncFor(activeProfileId());
 const syncReadOnly = () => { const r = syncedActive(); return !!(r && r.level === "read"); };
 
 function syncSet(localId, patch) {
+  if (erasedIds.has(localId)) return null;
   const all = syncAll();
   all[localId] = { ...(all[localId] || {}), ...patch };
   try { localStorage.setItem(SYNC_KEY, JSON.stringify(all)); }
@@ -3502,7 +3509,9 @@ async function photoCacheGet(id) {
 }
 async function photoCachePut(id, data) {
   try {
-    if (!("caches" in window)) return;
+    /* the cache is the account's (cleared with it, see chatForget), so a
+       fetch that lands after the account has gone keeps nothing */
+    if (!("caches" in window) || !acctUserId()) return;
     await (await caches.open(PHOTO_CACHE)).put("photo/" + id, new Response(data, { headers: { "content-type": "text/plain" } }));
   } catch { /* a cache is a convenience; the photo is still on the server */ }
 }
@@ -4383,6 +4392,101 @@ function leaveAccount() {
   render();
 }
 
+/* ── AN ACCOUNT THAT IS GONE LEAVES NOTHING OF ITSELF ON THIS PHONE ────
+   Logging out keeps every save exactly where it is (see leaveAccount);
+   this is the opposite, and it runs in two situations only: this phone
+   deleted the account and the server has confirmed it, or any request
+   from this phone was answered `account_deleted` because another phone
+   did (zenofit-cloud.js dispatches that, see accountGone there). Either
+   way the server already holds nothing, so there is nothing left to send
+   and nothing worth keeping, and the account's training still on this
+   phone would otherwise sit here for good, signed in to nobody.
+
+   What goes is everything filed under the account: every profile in its
+   list — its own and the ones shared with it — and every save the owner
+   index says is its, including ones it logged out of and left for Storage
+   check; their sync records, its queued removals, its list, its messages
+   and fetched pictures, anything it put in the shade, and the credential.
+   What stays is the phone's: the theme, the notification choice, the push
+   subscription (whoever signs in next has it filed under them), and every
+   other account's saves, untouched.
+
+   `state` and `profiles` are emptied BEFORE the keys go, so no debounced
+   save can write the profile on screen back; erasedIds stops anything
+   already on the wire (a pull, a roster pass) writing the others back. */
+function accountErased(userId, how) {
+  const me = signedInAs();
+  if (!userId || !me || me.userId !== userId) return false;
+  const C = window.ZenofitCloud;
+
+  clearTimeout(saveTimer); saveTimer = null;
+  clearTimeout(syncPushTimer); syncPushTimer = null;
+
+  const ids = new Set(readRoster(userId).list.map((p) => p.id));
+  const owners = ownersAll();
+  for (const [id, o] of Object.entries(owners)) if (o && o.userId === userId) ids.add(id);
+  const recs = syncAll();
+  for (const [id, r] of Object.entries(recs)) if (r && r.acct === userId) ids.add(id);
+
+  /* the login screen that follows stays in the language it was being read
+     in, since it is about to say what happened */
+  const lang = state.settings && state.settings.lang;
+  profiles = { userId: null, active: null, list: [] };
+  state = defaultState();
+  if (lang) state.settings = { ...state.settings, lang };
+
+  for (const id of ids) {
+    erasedIds.add(id);
+    try { localStorage.removeItem(stateKeyFor(id)); } catch { /* already gone */ }
+    delete owners[id];
+    delete recs[id];
+  }
+  ownersSave(owners);
+  try { localStorage.setItem(SYNC_KEY, JSON.stringify(recs)); } catch { /* nothing to forget */ }
+  try { localStorage.removeItem(rosterKeyFor(userId)); } catch { /* already gone */ }
+  /* a removal made by nobody in particular was made by whoever was signed
+     in, which is this account (see pendingMine) */
+  setPendingOps(pendingOps().filter((x) => x.acct && x.acct !== userId));
+  if (unreadable && ids.has(unreadable)) { unreadable = null; unreadableWhy = null; }
+
+  chatReset();
+  closeAllNotifs();
+  if (C && C.forgetAccount) C.forgetAccount();
+
+  closeEverything();
+  resetTransient();
+  ui.tab = "home";
+  ui.rosterLoading = false;
+  ui.syncError = null;
+  ui.signingOut = false;
+  ui.timerToast = null;
+  ui.login = { ...freshLogin(), notice: T(how === "here" ? "delacct.doneHere" : "delacct.doneElsewhere") };
+  render();
+  return true;
+}
+
+/* Everything this app has in the shade, for an account that no longer has
+   anything to announce. */
+function closeAllNotifs() {
+  for (const n of timerPageNotifs.values()) { try { n.close(); } catch { /* already gone */ } }
+  timerPageNotifs.clear();
+  try {
+    if (!("serviceWorker" in navigator)) return;
+    navigator.serviceWorker.ready
+      .then((reg) => reg.getNotifications())
+      .then((list) => list.forEach((n) => n.close()))
+      .catch(() => {});
+  } catch { /* nothing to close */ }
+}
+
+/* Deleted on another phone: whichever request heard it first tells us.
+   On the next turn rather than inside that request, whose own error
+   handling runs first and then finds nothing left to handle. */
+window.addEventListener("zenofit:account-deleted", (e) => {
+  const userId = e && e.detail && e.detail.userId;
+  setTimeout(() => accountErased(userId, "elsewhere"), 0);
+});
+
 /* ══ CHAT: MESSAGES, AND WHY THEY ARE NOT IN `state` ══════════════════
    Everything above this line belongs to a PROFILE. A set, a goal, a
    check-in, the roster those profiles sit in: all of it is training, all
@@ -4496,9 +4600,13 @@ function chatDraftSet(threadId, text) {
    screen over — the cache is a convenience and the server has the
    messages. */
 function chatWrite() {
-  const c = chatRead();
   const me = chatMe();
-  c.userId = me ? me.userId : null;
+  /* A cache belongs to an account, so with nobody signed in there is no
+     cache to keep: a poll that was on the wire when the account logged out,
+     or was deleted, must not land its thread list back on the disk. */
+  if (!me) return false;
+  const c = chatRead();
+  c.userId = me.userId;
   /* nothing is kept for a thread that is no longer in the list, or a
      conversation left months ago would sit in storage for ever */
   const live = new Set(c.threads.map((t) => t.threadId));
@@ -4669,6 +4777,7 @@ async function chatPoll(opts) {
     const res = await C.listChats();
     const c = chatRead();
     const before = JSON.stringify(c.threads.map((t) => [t.threadId, t.unread, t.lastMessageAt, t.muted]));
+    const had = c.threads.map((t) => t.threadId);
     c.threads = (res.chats || []).map((t) => ({
       threadId: t.threadId, kind: t.kind, title: t.title || null,
       members: t.members || [], unread: t.unread || 0, muted: !!t.muted,
@@ -4678,6 +4787,11 @@ async function chatPoll(opts) {
     chatApplyMarks(c.threads);
     if (JSON.stringify(c.threads.map((t) => [t.threadId, t.unread, t.lastMessageAt, t.muted])) !== before) changed = true;
     chatCloseRead();
+    /* A conversation that has left the list — removed here or on another
+       phone, or deleted with the other person's account — takes its
+       notifications with it: there is nothing left for them to open. */
+    const listed = new Set(c.threads.map((t) => t.threadId));
+    for (const id of had) if (!listed.has(id)) chatCloseNotifs(id);
 
     /* The open conversation, if there is one. Asked for by the stamp of
        the newest message already held: the boundary millisecond comes
@@ -5759,6 +5873,7 @@ const ui = {
   login: null,          // {username, password, busy, error, confirmCreate} the login screen
   rosterLoading: false, // first login on this device: the account's list is on its way
   signingOut: false,    // logging out is sending what has not gone up yet
+  deleteAcct: null,     // {password, busy, error} the sheet that deletes the account, see accountErased
   firstProfileName: "", // the name field on the no-profiles screen
   syncSheet: null,      // {localId, grants, code, copied} the share sheet
   joinSheet: null,      // {code, busy, error} redeeming somebody's code
@@ -6496,6 +6611,7 @@ function render() {
   if (ui.profilesWin) html += renderProfilesWindow();
   if (ui.profileForm) html += renderProfileForm();
   if (ui.accountSheet) html += renderAccountSheet();
+  if (ui.deleteAcct) html += renderDeleteAccount();
   if (ui.syncSheet) html += renderSyncSheet();
   if (ui.joinSheet) html += renderJoinSheet();
   if (ui.showBody) html += renderBodyWindow(body, unit);
@@ -6598,6 +6714,7 @@ function renderGate(scrolls) {
     if (ui.showStorage) html += renderStorage();
     if (ui.storUnlock) html += renderStorUnlock();
     if (ui.joinSheet) html += renderJoinSheet();
+    if (ui.deleteAcct) html += renderDeleteAccount();
   }
   html += `</div></div>`;
   app.innerHTML = html;
@@ -6632,6 +6749,10 @@ function renderLoginGate() {
       <div class="pb-num" style="font-size:26px;font-weight:700;letter-spacing:.01em">Zenofit</div>
       <div style="font-size:13.5px;color:var(--muted);margin-top:6px;line-height:1.5">${T("login.subtitle")}</div>
     </div>
+    ${/* what just happened to the account this phone was signed in to,
+          when it was deleted (accountErased); app copy, never user data */
+      f.notice ? `<div class="pb-card2" style="display:flex;gap:9px;align-items:flex-start;padding:12px 14px;margin-bottom:16px;font-size:12.5px;line-height:1.55;color:var(--muted)">
+        ${icon("info", 15, 'style="flex-shrink:0;margin-top:1px;color:var(--steel)"')}<span>${f.notice}</span></div>` : ""}
     ${field(T("acct.username"),
       `<input class="pb-input" data-bind="loginName" value="${esc(f.username)}" placeholder="${esc(T("acct.usernamePh"))}" autocapitalize="none" autocorrect="off" autocomplete="username" spellcheck="false" maxlength="24" data-autofocus>`)}
     ${field(T("acct.password"),
@@ -6707,6 +6828,7 @@ function renderNoProfiles() {
     <button data-action="acct-signout" ${ui.signingOut ? "disabled" : ""} class="pb-btn" style="width:100%;padding:12px 0;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3);opacity:${ui.signingOut ? 0.45 : 1}">
       ${icon("log-out", 15)} ${T(ui.signingOut ? "acct.signingOut" : "acct.signOut")}
     </button>
+    ${deleteAcctBtn()}
   </div>`;
 }
 
@@ -13381,18 +13503,95 @@ function notifyDone(t) {
     if (!window.Notification || Notification.permission !== "granted") return;
     if (document.visibilityState === "visible" && document.hasFocus()) return;
     const title = timerLabel(t) || T("timers.listTitle");
+    const tag = timerTag(t);
+    /* the push's own shape (see timer.js), because it is the same
+       notification: whichever of the two gets there first is the one that
+       stands, and a rest waits to be seen whichever that was */
     const opts = {
       body: T("timers.notifBody", { time: fmtClock(t.duration) }),
-      icon: "icon-192.png", badge: "icon-192.png", tag: "pbt-" + t.id, renotify: true,
-      data: { kind: "timer", url: "./" },
+      icon: "icon-192.png", badge: "icon-192.png", tag, renotify: true, requireInteraction: true,
+      data: { kind: "timer", ref: timerRef(t), url: "./" },
     };
     if ("serviceWorker" in navigator && navigator.serviceWorker.controller) {
-      navigator.serviceWorker.ready.then((reg) => reg.showNotification(title, opts)).catch(() => {});
+      /* A page coming back from the background fires a rest the server's
+         push already announced while the page was frozen. That one is
+         left standing rather than rung a second time over the top of it. */
+      navigator.serviceWorker.ready
+        .then((reg) => reg.getNotifications({ tag }).then((had) => (had.length ? null : reg.showNotification(title, opts))))
+        .catch(() => {});
       return;
     }
     const n = new Notification(title, opts);
+    timerPageNotifs.set(tag, n);
     n.onclick = () => { try { window.focus(); } catch { /* ignore */ } n.close(); };
   } catch { /* some browsers only allow notifications from a service worker */ }
+}
+
+/* ── A FINISHED REST STANDS IN THE SHADE EXACTLY AS LONG AS IN THE APP ──
+   A timer's notification is taken down the moment the rest is dealt with
+   in the app: Done, Reset, starting it again, editing it, deleting it, or
+   closing the banner. It used to stay. Nothing ever closed one, so Done
+   cleared the app while the shade, and the dot on the app's icon on the
+   home screen, went on saying a rest had just ended, until swiped away by
+   hand. Two things made that impossible to fix from the page alone: the
+   server's push was tagged with the SERVER's id for the rest, which the
+   page forgets the moment the rest runs out, and it rang every device on
+   the account, including ones that never knew the timer existed.
+
+   So a rest has ONE tag wherever it is announced from: "pbt-" + timerRef,
+   the profile it belongs to and the timer's own id (a timer is per
+   profile, and every profile is seeded with the same timer ids). The page
+   uses it for its own notification, and hands it to the server as `ref`
+   when it books the push (cloudTimerStart), which tags the push with it
+   and sends it only to this phone. Closing by tag closes both.
+
+   timerCloseNotifs is the direct half, called by each of those actions.
+   timerNotifsTidy is the net under it: every timer notification this
+   profile's timers can answer for is closed unless its timer is finished
+   right now. It runs when the app comes back, when it goes, at launch, and
+   when sw.js reports a push, because a push can still land AFTER the rest
+   was dealt with — the cancel that should have stopped it was slower than
+   the server's two-second grace — and it would otherwise stand, unasked,
+   over a timer that is already running again. Notifications it cannot
+   match are left alone: another profile's rest, and the Notifications
+   window's test timer, which is not a timer at all. */
+const timerPageNotifs = new Map();   // tag -> a Notification made without the service worker (first visit)
+const timerRef = (t) => (profiles.active || "none") + "_" + t.id;
+const timerTag = (t) => "pbt-" + timerRef(t);
+/* Due counts as finished: a page back from the background runs its
+   listeners in the order they were added, so this can ask before the
+   engine has swept the timer, and taking down the notification of a rest
+   that ran out a second ago is the one mistake this must not make. */
+const timerFinished = (t) => !!(t && (t.endsAt ? t.endsAt <= Date.now() : t.doneAt));
+
+function timerCloseNotifs(t) {
+  if (!t) return;
+  const tag = timerTag(t);
+  const page = timerPageNotifs.get(tag);
+  if (page) { try { page.close(); } catch { /* already gone */ } timerPageNotifs.delete(tag); }
+  try {
+    if (!("serviceWorker" in navigator)) return;
+    navigator.serviceWorker.ready
+      .then((reg) => reg.getNotifications({ tag }))
+      .then((list) => list.forEach((n) => n.close()))
+      .catch(() => {});
+  } catch { /* nothing to close */ }
+}
+
+function timerNotifsTidy() {
+  try {
+    if (!("serviceWorker" in navigator) || !profiles.active) return;
+    const timers = state.timers || [];
+    const ours = new Set(timers.map(timerRef));
+    const standing = new Set(timers.filter(timerFinished).map(timerRef));
+    navigator.serviceWorker.ready
+      .then((reg) => reg.getNotifications())
+      .then((list) => list.forEach((n) => {
+        const ref = (n.data || {}).kind === "timer" ? n.data.ref : null;
+        if (ref && ours.has(ref) && !standing.has(ref)) n.close();
+      }))
+      .catch(() => {});
+  } catch { /* nothing to close */ }
 }
 
 function fireTimer(t) {
@@ -13444,9 +13643,21 @@ function startTimerEngine() {
     paintTimers();
   }, 250);
 }
-/* Background tabs get throttled hard, so also sweep the instant we're back. */
-document.addEventListener("visibilitychange", () => { if (!document.hidden && sweepTimers()) render(); });
-window.addEventListener("focus", () => { if (sweepTimers()) render(); });
+/* Background tabs get throttled hard, so also sweep the instant we're back.
+   And tidy the shade both ways: coming back, and going, which is the moment
+   somebody is about to look at the app's icon on the home screen. */
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && sweepTimers()) render();
+  timerNotifsTidy();
+});
+window.addEventListener("focus", () => { if (sweepTimers()) render(); timerNotifsTidy(); });
+/* A timer push the page was alive to hear (see the push handler in sw.js):
+   it may be announcing a rest this page has already dealt with. */
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.addEventListener("message", (e) => {
+    if (e.data && e.data.type === "timer-push") timerNotifsTidy();
+  });
+}
 
 /* ── THE SAME COUNTDOWN, HELD BY THE SERVER ──────────────────────────
    Everything above this line runs in the page, and the page is the
@@ -13497,14 +13708,20 @@ async function cloudTimerStart(t, secs) {
      nothing: the server would not send it anyway, and a Durable Object
      alarm held for a push nobody wants is a request paid for nothing */
   if (!notifyKindOn("timer")) return;
+  /* which rest this is, taken now rather than after the awaits below, when
+     the profile it belongs to may no longer be the one on screen */
+  const ref = timerRef(t);
   try {
     if (C.pushBlockedReason() || !(await C.pushEnabled())) return;
     /* what the run was when we asked, so we can tell whether it is still
        the same one when the round trip comes back */
     const run = t.endsAt;
     const name = timerLabel(t) || T("timers.listTitle");
+    /* `ref` is what the push is tagged with, so it is the same
+       notification as notifyDone's and can be taken down the same way
+       (see timerCloseNotifs) */
     const res = await C.scheduleTimer({
-      inMs, label: name, title: name,
+      inMs, label: name, title: name, ref,
       body: T("timers.notifBody", { time: fmtClock(t.duration) }),
     });
     if (!res || !res.timerId) return;
@@ -13537,6 +13754,7 @@ function startTimer(t) {
   t.endsAt = Date.now() + Math.max(1, secs) * 1000;
   t.remaining = null; t.doneAt = null;
   if (ui.timerToast && ui.timerToast.id === t.id) ui.timerToast = null;
+  timerCloseNotifs(t);    // "time's up" from the last run is not true of this one
   writeNow(); render();
   /* after the render, because the page must not wait on the network to
      show a countdown the user has already started */
@@ -14267,7 +14485,60 @@ function renderAccountSheet() {
       ${icon("log-out", 15)} ${T(ui.signingOut ? "acct.signingOut" : "acct.signOut")}
     </button>
     <div style="font-size:11.5px;color:var(--faint);margin-top:10px;line-height:1.55">${T("acct.signOutHint")}</div>
+    ${deleteAcctBtn()}
   `, 124);
+}
+
+/* ── DELETING THE ACCOUNT ─────────────────────────────────────────────
+   The way out that does not come back. Deliberately quieter than Log out
+   (text, not a filled button) and under it, because the two sit on the
+   same sheet and one of them is forever: a thumb aiming for Log out must
+   not land here. On the no-profiles screen as well, because an account
+   with nothing in it is exactly the one somebody may want gone. A
+   function, not a const: renderNoProfiles, far above, calls it. */
+function deleteAcctBtn() {
+  return `<button data-action="acct-delete-open" class="pb-btn" style="width:100%;padding:11px 0;margin-top:14px;font-size:13px;background:transparent;color:var(--red);border:1px solid transparent">
+    ${icon("trash-2", 14)} ${T("acct.delete")}
+  </button>`;
+}
+
+/* It says what goes and what stays before it asks for anything, and it
+   asks for the PASSWORD, which the server checks (DELETE /v1/me): the
+   token on this phone is not enough, since a phone somebody forgot to log
+   out of is precisely the phone this must not be possible from. The
+   username is not put through T(): a name with two underscores in it would
+   come out in italics. */
+function renderDeleteAccount() {
+  const f = ui.deleteAcct;
+  const me = (signedInAs() || {}).username || "";
+  const ok = !!f.password && !f.busy;
+  return sheet(T("delacct.title"), "deleteAcct", `
+    <div class="pb-card2" style="padding:12px 14px;margin-bottom:14px">
+      <div class="pb-label">${T("acct.title")}</div>
+      <div class="pb-num" style="font-size:19px;font-weight:700;color:var(--red);line-height:1.2;word-break:break-all">${esc(me)}</div>
+    </div>
+    <div style="font-size:13.5px;font-weight:600;line-height:1.55;margin-bottom:10px">${T("delacct.lead")}</div>
+    <div style="font-size:12.5px;color:var(--muted);line-height:1.6;margin-bottom:8px">${T("delacct.goes")}</div>
+    <div style="font-size:12.5px;color:var(--muted);line-height:1.6;margin-bottom:8px">${T("delacct.others")}</div>
+    <div style="font-size:12px;color:var(--faint);line-height:1.55;margin-bottom:16px">${T("delacct.keep")}</div>
+    ${field(T("delacct.pass"),
+      `<input class="pb-input" type="password" data-bind="deleteAcctPass" value="${esc(f.password)}" autocapitalize="none" autocorrect="off" autocomplete="current-password" spellcheck="false">`)}
+    <div id="delAcctErr" style="font-size:12.5px;color:var(--red);margin:-4px 0 12px;line-height:1.5;display:${f.error ? "block" : "none"}">${f.error ? esc(f.error) : ""}</div>
+    <button id="delAcctBtn" data-action="acct-delete-go" ${ok ? "" : "disabled"} class="pb-btn" style="width:100%;padding:13px 0;font-size:15px;background:var(--red);color:#fff;border:1px solid var(--red);opacity:${ok ? 1 : 0.45}">
+      ${icon("trash-2", 16)} ${T(f.busy ? "delacct.working" : "delacct.go")}
+    </button>
+  `, 128);
+}
+
+/* Typing never renders (the caret would go with the field): the button and
+   the error line are patched in place, as the login form's are. */
+function updateDeleteForm() {
+  const f = ui.deleteAcct;
+  if (!f) return;
+  const btn = document.getElementById("delAcctBtn");
+  if (btn) { const ok = !!f.password && !f.busy; btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
+  const err = document.getElementById("delAcctErr");
+  if (err) { err.textContent = f.error || ""; err.style.display = f.error ? "block" : "none"; }
 }
 
 /* The other end of the same code. A joined profile is a NEW local profile,
@@ -15574,6 +15845,40 @@ const actions = {
     ui.signingOut = false;
     if (!confirm(n ? T("acct.confirmSignOutUnsynced", { n }) : T("acct.confirmSignOut"))) { render(); return; }
     leaveAccount();
+  },
+
+  /* ── DELETING THE ACCOUNT: THE SERVER FIRST, THEN THIS PHONE ─────────
+     Nothing on the phone is touched until the server has said the account
+     is gone, so every failure — a wrong password, no signal, a server
+     that could not finish (its delete is one transaction and leaves the
+     account whole) — leaves everything exactly as it was, still signed in,
+     to try again. An answer of `account_deleted` means another phone got
+     there first, and this one finishes the job the same way. */
+  "acct-delete-open": () => {
+    ui.deleteAcct = { password: "", busy: false, error: null };
+    render();
+  },
+  "acct-delete-go": async () => {
+    const f = ui.deleteAcct;
+    const C = window.ZenofitCloud;
+    const me = signedInAs();
+    if (!f || f.busy || !f.password || !C || !C.deleteAccount || !me) return;
+    if (!confirm(T("delacct.confirm"))) return;
+    ui.deleteAcct = { ...f, busy: true, error: null }; render();
+    try {
+      await C.deleteAccount(f.password);
+    } catch (e) {
+      if (e && e.code === "account_deleted") { accountErased(me.userId, "here"); return; }
+      /* another request heard `account_deleted` while this one was out,
+         and the account has already been taken off this phone */
+      if (!signedInAs()) return;
+      const wrong = e && e.code === "bad_password";
+      ui.deleteAcct = { ...ui.deleteAcct, busy: false, password: wrong ? "" : ui.deleteAcct.password,
+        error: T(wrong ? "delacct.errWrong" : e && e.status === 429 ? "acct.errTooMany" : "acct.errFailed") };
+      render();
+      return;
+    }
+    accountErased(me.userId, "here");
   },
 
   /* The no-profiles screen's one field. Made, opened, and sent up to the
@@ -17223,7 +17528,7 @@ const actions = {
     /* that restart stops the countdown, so the server's copy of the OLD
        length goes back too — otherwise editing 90s to 120s leaves a push
        booked for a rest that no longer exists */
-    if (existing) cloudTimerCancel(existing);
+    if (existing) { cloudTimerCancel(existing); timerCloseNotifs(existing); }
     const row = existing
       ? { ...existing, cloudId: null, name, key: keepKey, duration, pinned: !!form.t.pinned, ...alert, endsAt: null, remaining: null, doneAt: null }
       : { id: form.t.id, name, duration, pinned: !!form.t.pinned, ...alert, endsAt: null, remaining: null, doneAt: null, createdAt: Date.now() };
@@ -17237,7 +17542,9 @@ const actions = {
     /* before it leaves state, while there is still something holding the
        handle: a deleted timer that still pushes is a notification with
        nothing behind it to tap */
-    cloudTimerCancel((state.timers || []).find((x) => x.id === id));
+    const gone = (state.timers || []).find((x) => x.id === id);
+    cloudTimerCancel(gone);
+    timerCloseNotifs(gone);
     ui.timerForm = null;
     if (ui.timerToast && ui.timerToast.id === id) ui.timerToast = null;
     patch({ timers: (state.timers || []).filter((x) => x.id !== id) });
@@ -17259,6 +17566,7 @@ const actions = {
     if (!t) return;
     t.endsAt = null; t.remaining = null; t.doneAt = null;
     cloudTimerCancel(t);
+    timerCloseNotifs(t);     // Done is Done on the lock screen too
     if (ui.timerToast && ui.timerToast.id === t.id) ui.timerToast = null;
     writeNow(); render();
   },
@@ -17296,7 +17604,7 @@ const actions = {
   "toast-dismiss": () => {
     const id = ui.timerToast && ui.timerToast.id;
     const t = (state.timers || []).find((x) => x.id === id);
-    if (t) { t.doneAt = null; t.remaining = null; }
+    if (t) { t.doneAt = null; t.remaining = null; timerCloseNotifs(t); }
     ui.timerToast = null;
     writeNow(); render();
   },
@@ -17451,6 +17759,9 @@ const READ_OK = new Set([
   "profiles-reorder",
   "open-sync", "sync-copy-code",
   "open-account", "acct-signout", "login-go", "login-create", "login-cancel", "first-profile-create",
+  /* the account is not the training on screen, and a read-only profile
+     being open must not stand between somebody and deleting their account */
+  "acct-delete-open", "acct-delete-go",
   "stor-unlock-go",
   "live-retry", "refresh-now",
   "open-join", "join-go",
@@ -17687,6 +17998,10 @@ function handleBind(el) {
   } else if (bind === "unlockPass") {
     ui.storUnlock = { ...ui.storUnlock, password: v, error: null };
     updateUnlockForm();
+  } else if (bind === "deleteAcctPass") {
+    if (!ui.deleteAcct) return;
+    ui.deleteAcct = { ...ui.deleteAcct, password: v, error: null };
+    updateDeleteForm();
   } else if (bind === "firstProfileName") {
     ui.firstProfileName = v;
   } else if (bind === "joinCode") {
@@ -17925,6 +18240,7 @@ applyViewport();        // size the frame to this device before it is first draw
 sweepTimers();          // anything that ran out while the app was closed
 render();
 startTimerEngine();
+timerNotifsTidy();      // and nothing left in the shade that the timers above no longer say
 
 /* ── and the sync engine ──────────────────────────────────────────────
    After the first paint, never before it: the app has to be on screen in

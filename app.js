@@ -2492,6 +2492,8 @@ function closeEverything() {
   /* "send in a chat" names a lift or a preset of the profile being left,
      and a shared card's "add to my library" is about to mean another one */
   ui.shareTo = null; ui.chatView = null; ui.chatAttach = null;
+  /* and a picture of the profile being left is a picture of nothing here */
+  picClose();
 }
 
 function switchProfile(id) {
@@ -5982,6 +5984,7 @@ const ui = {
   chatView: null,       // {threadId, messageId, done?} a shared thing, open in full
   chatImage: null,      // {threadId, messageId} a photo, full screen
   shareTo: null,        // {kinds, kind, ref, busy?, sent?, failed?} "send in a chat" from elsewhere
+  pic: null,            // the share-a-picture window: what it is about and how it looks (see picOpen)
   /* Whether the open conversation is pinned to its newest message. True
      until somebody scrolls up to read history, which is the one time a
      new message must NOT yank the screen back down. */
@@ -6574,6 +6577,10 @@ function render() {
      somewhere else in the app while you were looking at this screen */
   const timersRunning = (state.timers || []).some((t) => t.endsAt || t.doneAt) || swRunning();
   const unread = chatSignedIn() ? chatUnread() : 0;
+  /* and today's workout, while it is not finished, puts a RING on the log:
+     hollow, as the calendar draws a lift still to do, because it is not
+     something that happened but something still owed (todayUnfinished) */
+  const owesToday = !!todayUnfinished();
   html += `<div style="position:absolute;bottom:0;left:0;right:0;background:var(--nav-bg);backdrop-filter:blur(10px);border-top:1px solid var(--border-soft);display:flex;padding:8px 2px calc(14px + var(--pb-sab));z-index:25">`;
   for (const [id, ic, label] of NAV) {
     const active = tab === id;
@@ -6581,6 +6588,8 @@ function render() {
        waiting" is a different decision from "one". */
     const dot = id === "timer" && timersRunning
       ? `<span style="position:absolute;top:1px;right:50%;margin-right:-14px;width:7px;height:7px;border-radius:4px;background:var(--gold)"></span>`
+      : id === "log" && owesToday
+      ? `<span data-unfinished-ring style="position:absolute;top:1px;right:50%;margin-right:-15px;width:8px;height:8px;border-radius:4px;border:2px solid var(--gold);box-sizing:border-box"></span>`
       : id === "chat" ? chatBadgeHTML(unread) : "";
     html += `<button data-action="nav" data-id="${id}" style="position:relative;flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;gap:3px;color:${active ? "var(--gold)" : "var(--faint)"};padding:4px 0">
       ${dot}${icon(ic, 21, `stroke-width="${active ? 2.4 : 2}"`)}
@@ -6631,6 +6640,8 @@ function render() {
   /* sending something from where it lives: above whatever it lives in */
   if (ui.shareTo) html += renderShareTo();
   /* opened from Settings or from the chat tab, so above both */
+  /* a picture of a day or a lift, opened from either: above both */
+  if (ui.pic) html += renderPicStudio();
   if (ui.notifyWin) html += renderNotifyWindow();
 
   html += `</div></div>`;
@@ -6999,9 +7010,13 @@ function renderDeloadBanner(status) {
 
    Tomorrow gets one quiet line and no card. Knowing it is coming is
    useful; a second call-to-action for a day you cannot do yet is not. */
-function renderTodayPlan(log) {
+function renderTodayPlan(log, unfinished = null) {
   const today = todayStr();
   const plan = planOn(state.plans, today);
+  /* the rest of a plan this day already started is what the unfinished
+     card above is about, with the lifts already logged beside it; a second
+     card offering the same lifts again would be two doors to one room */
+  if (plan && unfinished && !unfinished.parked && plan.startedOn === today) return "";
   const next = plansSorted(state.plans).find((p) => p.date > today);
   const trained = log.some((e) => e.date === today);
 
@@ -7041,6 +7056,7 @@ function renderTodayPlan(log) {
 
 function renderHome(settings, currentWeek, unit) {
   const deloadBanner = renderDeloadBanner(deloadStatus(state.deloads));
+  const unfinished = todayUnfinished();
 
   return `<div class="" style="padding:calc(18px + var(--pb-sat)) 16px 0">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
@@ -7069,7 +7085,8 @@ function renderHome(settings, currentWeek, unit) {
       ${icon("plus", 20, 'stroke-width="2.6"')} ${T("home.start")}
     </button>
 
-    ${renderTodayPlan(state.log)}
+    ${renderUnfinishedCard(unfinished)}
+    ${renderTodayPlan(state.log, unfinished)}
 
     ${deloadBanner ? `<div style="margin-top:12px">${deloadBanner}</div>` : ""}
 
@@ -7107,6 +7124,37 @@ function renderHome(settings, currentWeek, unit) {
     </div>
 
     <div style="height:8px"></div>
+  </div>`;
+}
+
+/* Today's workout, when it is not finished (todayUnfinished): right under
+   the button that starts one, because opening the app mid-session is
+   exactly when "is that done?" gets asked, and the answer used to be three
+   taps away in the Log tab. Continue is whichever door the day really has:
+   a parked day is picked back up as it was left, a saved one is reopened
+   with what it still owes dealt back in (edit-day). */
+function renderUnfinishedCard(u) {
+  if (!u) return "";
+  const go = u.parked
+    ? `data-action="resume-draft" data-id="${esc(u.parked.id)}"`
+    : `data-action="edit-day" data-date="${esc(u.date)}"`;
+  return `<div class="pb-card" style="margin-top:12px;overflow:hidden;border:1px dashed rgba(233,185,73,.6);background:rgba(233,185,73,.06)">
+    <div style="padding:12px 14px 11px">
+      <div style="display:flex;align-items:center;gap:8px">
+        ${icon("hourglass", 15, 'style="color:var(--gold);flex-shrink:0"')}
+        <div class="pb-label" style="flex:1;min-width:0;color:var(--gold)">${T(u.parked ? "left.homeParked" : "left.homeSaved")}</div>
+        ${u.total ? chip(T("left.ofLogged", { n: u.done, total: u.total }), u.done ? "var(--gold)" : "") : ""}
+      </div>
+      ${u.left.length
+        ? `<div style="font-size:12.5px;color:var(--muted);margin-top:7px;line-height:1.45;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+            <span style="color:var(--text);font-weight:600">${T("left.stillToLog")}:</span> ${leftoverNames(u.left, 3)}
+          </div>`
+        : ""}
+      ${u.parked ? `<div style="font-size:11.5px;color:var(--faint);margin-top:4px;line-height:1.45">${T("left.notSaved")}</div>` : ""}
+    </div>
+    <button ${go} style="width:100%;padding:12px;border-top:1px solid rgba(233,185,73,.3);color:var(--gold);font-weight:700;font-size:14px;display:flex;align-items:center;justify-content:center;gap:7px">
+      ${icon("play", 15)} ${T("left.continue")}
+    </button>
   </div>`;
 }
 
@@ -7179,6 +7227,9 @@ function renderHistory(log, library, badges, settings, unit) {
     const sets = entries.filter((e) => e.kind !== "cardio").reduce((a, e) => a + (+e.sets || 0), 0);
     const mins = entries.filter((e) => e.kind === "cardio").reduce((a, e) => a + (+e.minutes || 0), 0);
     const dayRes = dayPlanResult(entries);
+    /* lifts the day still owes: see dayLeftovers */
+    const left = dayLeftovers(date, entries);
+    const canPic = entries.some(entryHasData);
     /* lifts done back to back read that way months later too */
     const daySupers = superMarks(entries);
     const rows = entries.map((e, ei) => {
@@ -7215,15 +7266,38 @@ function renderHistory(log, library, badges, settings, unit) {
       </div>`;
     }).join("");
 
-    return `<div class="pb-card" data-day="${date}" style="margin-bottom:12px;overflow:hidden">
-      <button data-action="edit-day" data-date="${date}" title="${T("log.editDay")}" style="width:100%;display:flex;align-items:center;gap:8px;padding:11px 14px;border-bottom:1px solid var(--border-soft);color:var(--text);text-align:left">
-        <div class="pb-num" style="font-weight:700;font-size:16.5px;flex:1">${fmtDate(date)}</div>
-        ${dayRes ? chip(T("plan.hitOf", { n: dayRes.hit, total: dayRes.total }), dayRes.hit >= dayRes.total ? "var(--green)" : "var(--steel)") : ""}
-        ${wk ? chip(T("common.week", { n: wk }), "var(--gold)") : ""}
-        ${sets > 0 ? chip(sets + " " + T("unit.sets")) : ""}
-        ${mins > 0 ? chip(mins + " " + T("unit.min"), "#a07ec2") : ""}
-        ${icon("pencil", 14, 'style="color:var(--faint);flex-shrink:0;margin-left:2px"')}
-      </button>
+    /* The lifts it is still waiting on that are not rows of the day: the
+       rest of a plan it started and the ones it was saved without. A row
+       unticked back to nothing is already drawn below as "planned, not
+       done", so the chip counts it and this line does not repeat it. Tapping
+       it opens the day with them dealt back in, which is the same door the
+       header is, said as what it is for. */
+    const leftLine = left.unseen.length
+      ? `<button data-action="edit-day" data-date="${date}" style="width:100%;display:flex;align-items:center;gap:9px;padding:10px 14px;text-align:left;color:var(--text);background:rgba(233,185,73,.05)">
+          ${icon("hourglass", 14, 'style="color:var(--gold);flex-shrink:0"')}
+          <div style="flex:1;min-width:0">
+            <div style="font-size:12.5px;font-weight:600;color:var(--gold)">${T("left.stillToLog")}</div>
+            <div style="font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${leftoverNames(left.unseen, 4)}</div>
+          </div>
+          <span style="font-size:12px;font-weight:600;color:var(--gold);flex-shrink:0">${T("left.finish")}</span>
+          ${icon("chevron-right", 14, 'style="color:var(--gold);flex-shrink:0"')}
+        </button>`
+      : "";
+
+    return `<div class="pb-card" data-day="${date}" style="margin-bottom:12px;overflow:hidden${left.count ? ";border-color:rgba(233,185,73,.45)" : ""}">
+      <div style="display:flex;align-items:stretch;border-bottom:1px solid var(--border-soft)">
+        <button data-action="edit-day" data-date="${date}" title="${T("log.editDay")}" style="flex:1;min-width:0;display:flex;align-items:center;gap:8px;padding:11px ${canPic ? 4 : 14}px 11px 14px;color:var(--text);text-align:left;flex-wrap:wrap">
+          <div class="pb-num" style="font-weight:700;font-size:16.5px;flex:1 0 auto;white-space:nowrap">${fmtDate(date)}</div>
+          ${left.count ? chip(`${icon("hourglass", 11)} ${T("left.chip", { n: left.count })}`, "var(--gold)", "gap:4px") : ""}
+          ${dayRes ? chip(T("plan.hitOf", { n: dayRes.hit, total: dayRes.total }), dayRes.hit >= dayRes.total ? "var(--green)" : "var(--steel)") : ""}
+          ${wk ? chip(T("common.week", { n: wk }), "var(--gold)") : ""}
+          ${sets > 0 ? chip(sets + " " + T("unit.sets")) : ""}
+          ${mins > 0 ? chip(mins + " " + T("unit.min"), "#a07ec2") : ""}
+          ${icon("pencil", 14, 'style="color:var(--faint);flex-shrink:0;margin-left:2px"')}
+        </button>
+        ${/* a day with something in it can be shared as a picture (picOpen) */
+          canPic ? `<button data-action="pic-open" data-mode="day" data-ref="${esc(date)}" title="${T("pic.shareDay")}" aria-label="${T("pic.shareDay")}" style="flex-shrink:0;padding:0 14px 0 10px;color:var(--faint)">${icon("share", 16)}</button>` : ""}
+      </div>
       ${/* the day's own note, under the day's own heading and above the
             lifts it is about. It carries the header's own action rather
             than sitting inert under it, because the note is the part of a
@@ -7235,6 +7309,7 @@ function renderHistory(log, library, badges, settings, unit) {
             </button>`
           : ""}
       ${rows}
+      ${leftLine}
     </div>`;
   }).join("");
 }
@@ -7261,7 +7336,7 @@ function dayMarks(log, library) {
   return out;
 }
 
-function renderCalendar(log, library, marks, planned, range, legend) {
+function renderCalendar(log, library, marks, planned, range, legend, unfinished = {}) {
   const month = ui.calMonth || monthOf(todayStr());
   const today = todayStr();
   const picking = ui.deloadPick;
@@ -7287,6 +7362,8 @@ function renderCalendar(log, library, marks, planned, range, legend) {
     const pickStart = picking && picking.start === c.iso;
     const pickAfter = picking && picking.start && c.iso > picking.start;
     const isSel = !picking && sel === c.iso;
+    /* a workout on this day is not finished (dayLeftovers), or is parked */
+    const owes = !!unfinished[c.iso];
 
     /* the tint stack, quietest first */
     const bg = pickStart ? "rgba(233,185,73,.30)"
@@ -7302,6 +7379,7 @@ function renderCalendar(log, library, marks, planned, range, legend) {
 
     return `<button data-action="cal-day" data-d="${c.iso}"
       style="position:relative;aspect-ratio:1;border-radius:9px;background:${bg};border:${border};display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:0;opacity:${c.inMonth ? 1 : 0.35};${pickAfter ? "outline:1px solid rgba(233,185,73,.25);outline-offset:-1px;" : ""}">
+      ${owes ? `<span aria-hidden="true" style="position:absolute;top:3px;right:3px;width:6px;height:6px;border-radius:3px;border:1.5px solid var(--gold);box-sizing:border-box"></span>` : ""}
       <span class="pb-num" style="font-size:13px;font-weight:${isToday ? 700 : 600};color:${isToday ? "var(--gold)" : inWeek || dl || isSel ? "var(--text)" : "var(--muted)"};line-height:1">${c.day}</span>
       <span style="display:flex;gap:2px;height:5px;align-items:center">
         ${groups.map((g) => `<span style="width:4px;height:4px;border-radius:2px;background:${colorFor(g)}"></span>`).join("")}
@@ -7345,6 +7423,7 @@ function renderCalendar(log, library, marks, planned, range, legend) {
       <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:10px;height:10px;border-radius:3px;background:rgba(233,185,73,.13);border:1px dashed rgba(233,185,73,.5)"></span>${T("vol.legendDeload")}</span>
       <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:4px;height:4px;border-radius:2px;background:var(--muted)"></span>${T("vol.legendTrained")}</span>
       <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:6px;height:6px;border-radius:3px;border:1.5px solid var(--muted);box-sizing:border-box"></span>${T("vol.legendPlanned")}</span>
+      ${Object.keys(unfinished).length ? `<span style="display:inline-flex;align-items:center;gap:5px"><span style="width:6px;height:6px;border-radius:3px;border:1.5px solid var(--gold);box-sizing:border-box"></span>${T("left.legend")}</span>` : ""}
     </div>
   </div>`;
 }
@@ -7472,18 +7551,40 @@ function renderDayCard(log, library, settings) {
     ? `<div style="padding:0 14px 11px">${dayNoteBlock(day, { size: 12.5, color: "var(--muted)", top: 0 })}</div>`
     : "";
 
+  /* what the day still owes (dayLeftovers), minus the rest of a plan that
+     is drawn in full just below with its own "N left" */
+  const left = logged.length ? dayLeftovers(day, logged) : { count: 0, unseen: [] };
+  const owed = left.count
+    ? [...(state.plans || []).filter((p) => p.startedOn === day && !(plan && p.id === plan.id)).flatMap((p) => p.entries || []),
+       ...unloggedOn(day)]
+    : [];
+  const finishHere = owed.length > 0 || (left.notDone || []).length > 0;
+
   /* what actually happened, if anything did */
   const trained = logged.length ? `<div style="padding:0 14px 12px">
-      <div class="pb-label" style="margin-bottom:7px">${T("plan.trained")}${result ? ` · <span style="color:var(--gold)">${T("plan.hitOf", { n: result.hit, total: result.total })}</span>` : ""}</div>
+      <div style="display:flex;align-items:center;gap:7px;margin-bottom:7px">
+        <div class="pb-label" style="flex:1;min-width:0">${T("plan.trained")}${result ? ` · <span style="color:var(--gold)">${T("plan.hitOf", { n: result.hit, total: result.total })}</span>` : ""}</div>
+        ${left.count ? chip(`${icon("hourglass", 11)} ${T("left.chip", { n: left.count })}`, "var(--gold)", "gap:4px") : ""}
+      </div>
       <div style="display:flex;flex-direction:column;gap:5px">
         ${logged.map((e) => `<div style="display:flex;align-items:baseline;gap:8px;font-size:13px">
           <span style="width:8px;height:8px;border-radius:4px;background:${colorFor(groupOfEntry(e, library))};flex-shrink:0;align-self:center"></span>
           <span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)">${esc(exLabel(e.exercise))}</span>
-          <span class="pb-num" style="font-size:12px;color:var(--muted);white-space:nowrap;flex-shrink:0">${entrySummary(e, unitOf(e))}</span>
+          ${/* a not-done row has no numbers to summarise: see entryOnRecord */
+            entryHasData(e)
+              ? `<span class="pb-num" style="font-size:12px;color:var(--muted);white-space:nowrap;flex-shrink:0">${entrySummary(e, unitOf(e))}</span>`
+              : `<span style="font-size:11.5px;color:var(--gold);white-space:nowrap;flex-shrink:0">${T("entry.notDone")}</span>`}
+        </div>`).join("")}
+        ${owed.map((e) => `<div style="display:flex;align-items:baseline;gap:8px;font-size:13px">
+          <span style="width:8px;height:8px;border-radius:4px;border:1.5px solid ${colorFor(groupOfEntry(e, library))};box-sizing:border-box;flex-shrink:0;align-self:center"></span>
+          <span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--muted)">${esc(exLabel(e.exercise))}</span>
+          <span style="font-size:11.5px;color:var(--gold);white-space:nowrap;flex-shrink:0">${T("left.waiting")}</span>
         </div>`).join("")}
       </div>
-      <button data-action="edit-day" data-date="${day}" class="pb-btn pb-ghost" style="width:100%;padding:10px 0;font-size:13px;margin-top:11px">
-        ${icon("pencil", 14)} ${T("plan.openDay")}
+      ${/* the big door only when what is owed is up here; the rest of a plan
+            drawn just below already has its own Start */""}
+      <button data-action="edit-day" data-date="${day}" class="pb-btn ${finishHere ? "pb-gold" : "pb-ghost"}" style="width:100%;padding:10px 0;font-size:13px;margin-top:11px">
+        ${finishHere ? `${icon("hourglass", 14)} ${T("left.finishDay")}` : `${icon("pencil", 14)} ${T("plan.openDay")}`}
       </button>
     </div>` : "";
 
@@ -7612,7 +7713,7 @@ function renderCalendarTab(log, library, settings, currentWeek) {
 
   return `<div class="">
     ${renderCalendar(log, library, dayMarks(log, library), planMarks(state.plans), range,
-      rolling ? T("vol.legendWindow") : T("vol.legendWeek", { n: week }))}
+      rolling ? T("vol.legendWindow") : T("vol.legendWeek", { n: week }), leftoverDays())}
     ${renderDayCard(log, library, settings)}
     ${renderPlanList(log)}
     ${renderDeloadPlanner()}
@@ -7860,7 +7961,10 @@ function renderProgress(log, library, goals, badges, settings, unit) {
     </div>
     <div class="pb-card" id="progLifts" style="margin-bottom:20px;overflow:hidden">${goalRows}</div>
 
-    ${sectionTitle(T("prog.graph"), `<span style="font-size:11px;color:var(--faint)">${metricLabel(selRow?.kind || DEFAULT_KIND, unit)}</span>`)}
+    ${sectionTitle(T("prog.graph"), `<span style="display:flex;align-items:center;gap:10px">
+      <span style="font-size:11px;color:var(--faint)">${metricLabel(selRow?.kind || DEFAULT_KIND, unit)}</span>
+      ${sel && series.length ? `<button data-action="pic-open" data-mode="progress" data-ref="${esc(sel)}" class="pb-btn pb-ghost" style="padding:5px 10px;font-size:11.5px">${icon("share", 13)} ${T("pic.short")}</button>` : ""}
+    </span>`)}
     <div class="pb-card" style="padding:14px 8px 8px;margin-bottom:12px">
       <div style="padding:0 8px 10px">
         <select class="pb-input" data-bind="progressSel" style="font-weight:600">
@@ -10410,11 +10514,15 @@ function renderLibraryList(library) {
           `data-group="${esc(g)}"`)).join("")}
       </div>
     </div>`;
+    /* indented only under a base that is actually in the list: a search for
+       "neutral" shows the variation on its own, so it wears its full name */
+    const here = new Set(rows.map((x) => x.id));
+    const nested = (ex) => !!(ex.variantOf && here.has(ex.variantOf));
     return `<div style="margin-bottom:16px">
     ${sectionTitle(`<span style="color:${colorFor(g)}">${esc(groupLabel(g))}</span>`)}
     <div class="pb-card" style="overflow:hidden">
-      ${nestVariations(rows).map((ex, i, arr) => `<button data-action="open-exercise-window" data-name="${esc(ex.name)}" style="width:100%;display:flex;align-items:center;gap:10px;padding:11px 14px 11px ${ex.variantOf ? 30 : 14}px;text-align:left;color:var(--text);border-bottom:${i < arr.length - 1 ? "1px solid var(--border-soft)" : "none"}">
-        ${ex.variantOf ? icon("corner-down-right", 13, 'style="color:var(--faint);flex-shrink:0;margin-right:-2px"') : ""}
+      ${nestVariations(rows).map((ex, i, arr) => `<button data-action="open-exercise-window" data-name="${esc(ex.name)}" style="width:100%;display:flex;align-items:center;gap:10px;padding:11px 14px 11px ${nested(ex) ? 30 : 14}px;text-align:left;color:var(--text);border-bottom:${i < arr.length - 1 ? "1px solid var(--border-soft)" : "none"}">
+        ${nested(ex) ? icon("corner-down-right", 13, 'style="color:var(--faint);flex-shrink:0;margin-right:-2px"') : ""}
         ${ex.image
           ? `<img src="${esc(ex.image)}" alt="" style="width:38px;height:38px;border-radius:8px;object-fit:cover;flex-shrink:0;border:1px solid var(--border)">`
           : photoComing(ex)
@@ -10427,7 +10535,7 @@ function renderLibraryList(library) {
           ? `<span title="${esc(T("ex.photoAway"))}" style="width:38px;height:38px;border-radius:8px;flex-shrink:0;border:1.5px dashed var(--border);display:flex;align-items:center;justify-content:center;color:var(--faint)">${icon("image-off", 15)}</span>`
           : ""}
         <div style="flex:1;min-width:0">
-          <div style="font-weight:600;font-size:14px">${ex.variantOf ? esc(ex.variantName || ex.name) : esc(exLabelOf(ex))}${newFlag(ex)}</div>
+          <div style="font-weight:600;font-size:14px">${nested(ex) ? esc(ex.variantName || ex.name) : esc(exLabelOf(ex))}${newFlag(ex)}</div>
           <div style="font-size:11.5px;color:var(--faint)">${esc(exFieldOf(ex, "equipment"))}</div>
         </div>
         ${ex.video ? icon("youtube", 15, 'style="color:var(--red);flex-shrink:0"') : ""}
@@ -11327,7 +11435,10 @@ function exWindowProgress(ex, hist) {
 
   const bUnit = unitOf(best);   // the plate stack it was actually logged on
   return `
-    ${sectionTitle(T("ex.progressTitle"), `<span style="font-size:11px;color:var(--faint)">${label}</span>`)}
+    ${sectionTitle(T("ex.progressTitle"), `<span style="display:flex;align-items:center;gap:10px">
+      <span style="font-size:11px;color:var(--faint)">${label}</span>
+      ${ex.missing ? "" : `<button data-action="pic-open" data-mode="progress" data-ref="${esc(ex.name)}" class="pb-btn pb-ghost" style="padding:5px 10px;font-size:11.5px">${icon("share", 13)} ${T("pic.short")}</button>`}
+    </span>`)}
 
     <div class="pb-card" style="padding:14px 15px;margin-bottom:12px;border-color:rgba(233,185,73,.45);background:rgba(233,185,73,.06)">
       <div style="display:flex;align-items:flex-end;gap:12px">
@@ -11860,6 +11971,1356 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
 }
 
 
+/* ═══════════════════════ WHAT YOU DID, AS A PICTURE ═══════════════════════
+   The Strava lesson: people want to show what they did, and a picture of
+   it that carries the app's name is how the app travels. So anything the
+   log can say about you can be turned into an image made for a story or a
+   post, and handed to the phone's own share sheet, where Instagram,
+   Snapchat and a group chat are one tap away.
+
+   SIX THINGS IT CAN BE ABOUT, because "what I am proud of" is not one
+   shape: a WORKOUT (one logged day), a lift's PROGRESS (the line from the
+   first session to now), its 1RM (one number, big), ONE SET (the one you
+   want to show, picked from everything you ever logged on that lift),
+   RECORDS (several lifts' bests on one card, with their total) and a
+   MONTH (the days you trained, drawn as a calendar). How it LOOKS is
+   yours too: story, post or square; seven backgrounds, among them your
+   own photo and a transparent sticker to lay over one in the story
+   editor; the accent colour; left or centred; where the words sit; a
+   headline of your own; and what is on it, down to the weights, the
+   date, your name and the record marks.
+
+   WHAT IT SAYS IS ONLY WHAT THE LOG SAYS. The same numbers the app shows,
+   read the same ways (exerciseHistory, computeBadges, bestSet, est1RM),
+   and nothing the app does not know: no calories, no "intensity score",
+   no guess at how long it took. The one figure added is weight moved —
+   reps × weight over every set, in your unit — which is arithmetic on
+   what you logged, not an opinion about it. A total is a sum of est.
+   1RMs and says "est." on it, because that is what it is.
+
+   IT NEVER LEAVES THE PHONE BY ITSELF. The picture is drawn here, on a
+   canvas, and goes only where the share sheet sends it; a background
+   photo is read into memory and forgotten with the window. How you like
+   your cards (format, background, colour, layout, the switches) is
+   remembered on this DEVICE under zenofit:pic, the way the theme is: it
+   is a taste, not training, so it is in no profile, backup or sync.
+
+   Nothing here writes `state`, so every pic-* action is on READ_OK:
+   making a picture of a log is looking at it.                          */
+
+const PIC_SIZES = { story: [1080, 1920], post: [1080, 1350], square: [1080, 1080] };
+const PIC_MODES = ["day", "progress", "max", "set", "records", "month"];
+const PIC_THEMES = ["midnight", "black", "light", "gold", "vivid", "photo", "clear"];
+const PIC_ACCENTS = ["gold", "group", "green", "blue", "red", "purple", "white"];
+const PIC_ACCENT_HEX = { gold: "#e9b949", green: "#6aa465", blue: "#5d8bcc", red: "#d05a50", purple: "#a07ec2", white: "#ffffff" };
+/* the same accents deepened to read on paper, the way --gold is in the
+   light theme */
+const PIC_ACCENT_DEEP = { gold: "#a9761a", green: "#3f7a37", blue: "#2f63b0", red: "#b5352c", purple: "#7a56a8", white: "#16171a" };
+const PIC_RANGES = { all: 0, "1y": 365, "6m": 183, "3m": 92, "1m": 31 };
+const PIC_RECORDS_MAX = 5;
+const PIC_KEY = "zenofit:pic";
+/* every remembered choice, and the only values each may take: the key is
+   the device's, but a value that is not one of these is not used */
+const PIC_ONE_OF = {
+  format: Object.keys(PIC_SIZES), theme: PIC_THEMES, accent: PIC_ACCENTS,
+  align: ["left", "center"], pos: ["top", "middle", "bottom"], brand: ["full", "minimal"],
+  detail: ["best", "all", "names"], value: ["max", "set"], range: Object.keys(PIC_RANGES),
+};
+const PIC_SWITCHES = ["weights", "dates", "name", "prs", "chart", "tiles", "total", "setLine", "e1rm"];
+const PIC_DEFAULTS = {
+  format: "story", theme: "midnight", accent: "gold", align: "left", pos: "top", brand: "full",
+  detail: "best", value: "max", range: "all", dim: 45,
+  weights: true, dates: true, name: false, prs: true, chart: true, tiles: true, total: true, setLine: true, e1rm: true,
+};
+
+function picPrefs() {
+  let raw = null;
+  try { raw = JSON.parse(localStorage.getItem(PIC_KEY) || "null"); } catch { raw = null; }
+  const p = { ...PIC_DEFAULTS };
+  if (raw && typeof raw === "object") {
+    for (const [k, allowed] of Object.entries(PIC_ONE_OF)) if (allowed.includes(raw[k])) p[k] = raw[k];
+    for (const k of PIC_SWITCHES) if (typeof raw[k] === "boolean") p[k] = raw[k];
+    if (Number.isFinite(+raw.dim)) p.dim = Math.max(0, Math.min(80, Math.round(+raw.dim)));
+  }
+  return p;
+}
+function picKeepPrefs() {
+  const s = ui.pic;
+  if (!s) return;
+  const out = { dim: s.dim };
+  for (const k of [...Object.keys(PIC_ONE_OF), ...PIC_SWITCHES]) out[k] = s[k];
+  try { localStorage.setItem(PIC_KEY, JSON.stringify(out)); } catch { /* a taste, not a record */ }
+}
+
+/* Text for a canvas. T() carries its own markup (*bold*, _italic_), and a
+   <template>'s content is inert, so nothing parsed here is ever loaded or
+   run. Never hand T() a lift name as a variable on the way here: the
+   emphasis pass would eat an underscore out of it. */
+function plainOf(html) {
+  const t = document.createElement("template");
+  t.innerHTML = String(html ?? "");
+  return (t.content.textContent || "").replace(/\s+/g, " ").trim();
+}
+const TP = (k, v) => plainOf(T(k, v));
+const TNP = (k, n) => plainOf(TN(k, n));
+
+/* a set, in plain words: numbers and a unit, never anything typed */
+function picSetText(s, kind, unit) {
+  if (kind === "bodyweight") return TP("unit.nReps", { n: +s.reps });
+  if (kind === "hold") return TP("unit.nSecs", { n: +s.secs });
+  return `${+s.reps} × ${picKg(s.weight)} ${unit}`.trim();
+}
+const picNum = (n) => trimNum(+n || 0);
+/* a weight off the log, at the precision a plate tree can make (see
+   weightAs): 106.25 is not 106.3 */
+const picKg = (n) => trimNum(+n || 0, 2);
+/* "Est. 1RM (kg)" is right in a column header and wrong under a number
+   that already says kg */
+const picBareLabel = (k) => plainOf(metricLabel(k, state.settings.units)).replace(/\s*\([^)]*\)\s*$/, "");
+const picBig = (n) => (n >= 100000 ? trimNum(n / 1000, 0) + "k"
+  : n >= 10000 ? trimNum(n / 1000, 1) + "k"
+  : Math.round(n).toLocaleString(localeTag()));
+
+/* ── WHAT THERE IS TO SHOW ──────────────────────────────────────────── */
+
+/* every lift with anything logged on it, most recently trained first */
+function picLifts() {
+  const last = {};
+  for (const e of state.log || []) {
+    if (!entryHasData(e)) continue;
+    if (!last[e.exercise] || e.date > last[e.exercise]) last[e.exercise] = e.date;
+  }
+  return Object.keys(last).sort((a, b) => (last[a] < last[b] ? 1 : last[a] > last[b] ? -1 : exLabel(a).localeCompare(exLabel(b))));
+}
+const picDays = () => [...new Set((state.log || []).filter(entryHasData).map((e) => e.date))].sort().reverse();
+const picMonths = () => [...new Set(picDays().map(monthOf))];
+
+/* Squat, bench and deadlift if you do them, because that sum is the total
+   people actually quote; then whatever strength lifts you train most. */
+function picDefaultRecords() {
+  const lifts = new Set(picLifts());
+  const out = [];
+  for (const id of ["default-26", "default-0", "default-12"]) {
+    const ex = (state.library || []).find((x) => x.id === id);
+    if (ex && lifts.has(ex.name)) out.push(ex.name);
+  }
+  const n = {};
+  for (const e of state.log || []) if (entryHasData(e) && kindOf(e) === "strength") n[e.exercise] = (n[e.exercise] || 0) + 1;
+  for (const name of Object.keys(n).sort((a, b) => n[b] - n[a])) {
+    if (out.length >= 3) break;
+    if (!out.includes(name)) out.push(name);
+  }
+  return out;
+}
+
+function picDayData(date, s) {
+  const unit = state.settings.units;
+  const badges = computeBadges(state.log);
+  const entries = (state.log || []).filter((e) => e.date === date && entryHasData(e)).sort((a, b) => a.createdAt - b.createdAt);
+  if (!entries.length) return null;
+  const groups = [];
+  let sets = 0, minutes = 0, moved = 0, prs = 0;
+  const rows = entries.map((e) => {
+    const k = kindOf(e);
+    const g = groupOfEntry(e, state.library);
+    if (g && g !== UNCATEGORIZED && !groups.includes(g)) groups.push(g);
+    const pr = (badges[e.id] || {}).badge === "pr";
+    if (pr) prs++;
+    const color = colorFor(g);
+    if (k === "cardio") {
+      minutes += +e.minutes || 0;
+      return { name: exLabel(e.exercise), color, pr, lines: [TP("sug.cardioSet", { min: picNum(e.minutes), rpe: picNum(e.intensity) })] };
+    }
+    const list = filledSets(e);
+    sets += list.length;
+    if (k === "strength") for (const st of list) moved += (+st.reps || 0) * weightAs(st.weight, unitOf(e), unit);
+    const showNums = s.weights || k !== "strength";
+    const count = TNP("set", list.length);
+    let lines;
+    if (s.detail === "names") lines = [];
+    else if (s.detail === "all" && showNums) lines = [list.map((st) => picSetText(st, k, "")).join("  ·  ").replace(/ +$/, "") + (k === "strength" ? " " + unitOf(e) : "")];
+    else {
+      const b = bestSet(list, k);
+      lines = [showNums && b ? `${count}  ·  ${picSetText(b, k, unitOf(e))}` : count];
+    }
+    return { name: exLabel(e.exercise), color, pr, lines };
+  });
+  return { kind: "day", date, groups: groups.map((g) => plainOf(groupLabel(g))), rows, sets, minutes,
+           moved: Math.round(moved), prs, unit, exercises: entries.length, color: colorFor(groups[0]) };
+}
+
+function picProgressData(name, range) {
+  const hist = exerciseHistory(name, state.log || []);
+  if (!hist || !hist.best || !hist.chart.length) return null;
+  let pts = hist.chart;
+  const days = PIC_RANGES[range] || 0;
+  if (days) {
+    const from = addDays(todayStr(), -days);
+    pts = pts.filter((p) => p.e.date >= from);
+  }
+  if (!pts.length) return { empty: true, why: TP("pic.noneInRange") };
+  const first = pts[0], last = pts[pts.length - 1];
+  const top = pts.reduce((a, p) => (p.y > a.y ? p : a), pts[0]);
+  return {
+    kind: "progress", lift: exLabel(name), liftKind: hist.kind, unit: hist.unit,
+    metric: picBareLabel(hist.kind),
+    now: top.y, nowDate: top.e.date, first: first.y, firstDate: first.e.date, lastDate: last.e.date,
+    sessions: new Set(pts.map((p) => p.e.date)).size,
+    prs: pts.filter((p) => p.badge === "pr").length,
+    series: chatThin(pts.map((p) => [p.e.date, p.y, p.badge === "pr"]), 90),
+    color: colorFor(muscleOf(name, state.library || [])),
+  };
+}
+
+function picMaxData(name) {
+  const hist = exerciseHistory(name, state.log || []);
+  if (!hist || !hist.best) return null;
+  const e = hist.best, k = hist.kind;
+  const b = k === "cardio" ? null : bestSet(filledSets(e), k);
+  const single = k === "strength" && b && +b.reps === 1;
+  return {
+    kind: "max", lift: exLabel(name), liftKind: k, unit: hist.unit, value: e.m, date: e.date,
+    label: k === "strength" ? TP(single ? "pic.oneRm" : "pic.estOneRm") : picBareLabel(k),
+    set: b ? picSetText(b, k, unitOf(e)) : k === "cardio" ? TP("sug.cardioSet", { min: picNum(e.minutes), rpe: picNum(e.intensity) }) : "",
+    single,
+    color: colorFor(muscleOf(name, state.library || [])),
+  };
+}
+
+/* Every set ever logged on a lift, in the kind it is read in today, with
+   whether it was a record when it was lifted (beat everything before it,
+   on the same per-set score the set list grades with) and which one is
+   the best of all. A first-ever set is not a record: there was nothing to
+   beat. Cardio has no sets and offers none. */
+function picSetChoices(name) {
+  const hist = exerciseHistory(name, state.log || []);
+  if (!hist || hist.cardio) return [];
+  const k = hist.kind;
+  const out = [];
+  let run = null;
+  for (const e of hist.series) {
+    const u = unitOf(e);
+    filledSets(e).forEach((st, i) => {
+      const score = k === "strength" ? metricFor(+st.weight, +st.reps, u) : setScore(st, k);
+      if (score == null) return;
+      const pr = run != null && score > run;
+      run = run == null ? score : Math.max(run, score);
+      out.push({ key: e.id + ":" + i, date: e.date, at: e.createdAt || 0, i, reps: +st.reps || 0, weight: +st.weight || 0,
+                 secs: +st.secs || 0, rpe: st.rpe, unit: u, kind: k, score, pr, top: false });
+    });
+  }
+  let best = null;
+  for (const c of out) if (!best || c.score > best.score) best = c;
+  if (best) best.top = true;
+  return out;
+}
+const picSetSorted = (list, sort) => [...list].sort(sort === "recent"
+  ? (a, b) => (a.date !== b.date ? (a.date < b.date ? 1 : -1) : a.at !== b.at ? b.at - a.at : b.i - a.i)
+  : (a, b) => (b.score - a.score) || (a.date < b.date ? 1 : -1));
+
+function picSetData(name, key) {
+  const list = picSetChoices(name);
+  if (!list.length) return null;
+  const c = list.find((x) => x.key === key) || list.find((x) => x.top) || list[0];
+  return {
+    kind: "set", lift: exLabel(name), liftKind: c.kind, set: c,
+    e1rm: c.kind === "strength" ? est1RM(c.weight, c.reps) : null,
+    color: colorFor(muscleOf(name, state.library || [])),
+  };
+}
+
+function picRecordsData(names) {
+  const unit = state.settings.units;
+  const rows = [];
+  for (const n of names || []) {
+    const hist = exerciseHistory(n, state.log || []);
+    if (!hist || !hist.best) continue;
+    const e = hist.best, k = hist.kind;
+    const b = k === "cardio" ? null : bestSet(filledSets(e), k);
+    rows.push({ lift: exLabel(n), liftKind: k, m: e.m, unit: hist.unit, date: e.date,
+                set: b ? picSetText(b, k, unitOf(e)) : "", color: colorFor(muscleOf(n, state.library || [])) });
+  }
+  if (!rows.length) return null;
+  const strong = rows.filter((r) => r.liftKind === "strength");
+  return { kind: "records", rows, unit, total: strong.length >= 2 ? Math.round(strong.reduce((a, r) => a + r.m, 0) * 10) / 10 : null,
+           totalOf: strong.length, color: rows[0].color };
+}
+
+function picMonthData(month) {
+  const unit = state.settings.units;
+  const badges = computeBadges(state.log);
+  const entries = (state.log || []).filter((e) => monthOf(e.date) === month && entryHasData(e));
+  if (!entries.length) return null;
+  const byDay = {};
+  let sets = 0, minutes = 0, moved = 0, prs = 0;
+  for (const e of entries) {
+    const k = kindOf(e);
+    const g = groupOfEntry(e, state.library);
+    const d = (byDay[e.date] = byDay[e.date] || {});
+    if ((badges[e.id] || {}).badge === "pr") prs++;
+    if (k === "cardio") { minutes += +e.minutes || 0; d[g] = (d[g] || 0) + 1; continue; }
+    const list = filledSets(e);
+    sets += list.length;
+    d[g] = (d[g] || 0) + list.length;
+    if (k === "strength") for (const st of list) moved += (+st.reps || 0) * weightAs(st.weight, unitOf(e), unit);
+  }
+  /* each trained day wears the colour of what it was mostly about */
+  const days = {};
+  for (const [date, gs] of Object.entries(byDay)) {
+    const top = Object.keys(gs).sort((a, b) => gs[b] - gs[a])[0];
+    days[date] = colorFor(top);
+  }
+  return { kind: "month", month, days, sessions: Object.keys(byDay).length, sets, minutes,
+           moved: Math.round(moved), prs, unit, exercises: entries.length, color: "#e9b949" };
+}
+
+function picData(s) {
+  switch (s.mode) {
+    case "day": return picDayData(s.date, s);
+    case "progress": return picProgressData(s.lift, s.range);
+    case "max": return picMaxData(s.lift);
+    case "set": return picSetData(s.lift, s.setKey);
+    case "records": return picRecordsData(s.lifts);
+    case "month": return picMonthData(s.month);
+    default: return null;
+  }
+}
+
+/* ── COLOUR ─────────────────────────────────────────────────────────── */
+
+function picRgb(hex) {
+  let h = String(hex || "").replace("#", "");
+  if (h.length === 3 || h.length === 4) h = h.slice(0, 3).split("").map((c) => c + c).join("");
+  h = h.slice(0, 6);
+  if (!/^[0-9a-f]{6}$/i.test(h)) return [233, 185, 73];
+  return [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16));
+}
+const picHex = (rgb) => "#" + rgb.map((v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0")).join("");
+/* towards black (f < 0) or white (f > 0) */
+const picShade = (hex, f) => picHex(picRgb(hex).map((v) => (f < 0 ? v * (1 + f) : v + (255 - v) * f)));
+const picRgba = (hex, a) => `rgba(${picRgb(hex).join(",")},${a})`;
+function picLum(hex) {
+  const [r, g, b] = picRgb(hex).map((v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); });
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/* ink, the quieter inks, the accent and the tile fill, for one look */
+function picPalette(s, groupHex) {
+  const base = s.accent === "group" ? (cleanColor(groupHex) || PIC_ACCENT_HEX.gold) : (PIC_ACCENT_HEX[s.accent] || PIC_ACCENT_HEX.gold);
+  if (s.theme === "light") {
+    const a = s.accent === "group" ? (picLum(base) > 0.35 ? picShade(base, -0.42) : base) : PIC_ACCENT_DEEP[s.accent] || PIC_ACCENT_DEEP.gold;
+    return { ink: "#16171a", muted: "#4f545b", faint: "#80858d", accent: a, tile: "rgba(0,0,0,.055)", rule: "rgba(0,0,0,.12)", onAccent: "#ffffff" };
+  }
+  if (s.theme === "gold")
+    return { ink: "#1a1507", muted: "rgba(26,21,7,.76)", faint: "rgba(26,21,7,.55)", accent: "#1a1507", tile: "rgba(26,21,7,.09)", rule: "rgba(26,21,7,.18)", onAccent: "#f2cf6e" };
+  if (s.theme === "vivid") {
+    const light = picLum(base) > 0.45;
+    const ink = light ? "#141518" : "#ffffff";
+    return { base, ink, muted: light ? "rgba(20,21,24,.74)" : "rgba(255,255,255,.84)", faint: light ? "rgba(20,21,24,.52)" : "rgba(255,255,255,.62)",
+             accent: ink, tile: light ? "rgba(0,0,0,.09)" : "rgba(255,255,255,.15)", rule: light ? "rgba(0,0,0,.16)" : "rgba(255,255,255,.24)", onAccent: base };
+  }
+  const over = s.theme === "photo" || s.theme === "clear";
+  return { ink: "#f4f5f7", muted: over ? "#e3e5e9" : "#c3c7ce", faint: over ? "#c9ccd2" : "#8e939b", accent: base,
+           tile: over ? "rgba(0,0,0,.36)" : "rgba(255,255,255,.07)", rule: over ? "rgba(255,255,255,.3)" : "rgba(255,255,255,.12)",
+           onAccent: picLum(base) > 0.45 ? "#141518" : "#ffffff" };
+}
+
+/* ── DRAWING ────────────────────────────────────────────────────────── */
+
+const PIC_FC = "'Barlow Condensed', 'Arial Narrow', sans-serif";
+const PIC_FB = "'Barlow', system-ui, sans-serif";
+
+function picFonts() {
+  if (!document.fonts || !document.fonts.load) return Promise.resolve();
+  return Promise.all([
+    document.fonts.load(`700 80px ${PIC_FC}`), document.fonts.load(`600 80px ${PIC_FC}`),
+    document.fonts.load(`700 40px ${PIC_FB}`), document.fonts.load(`600 40px ${PIC_FB}`), document.fonts.load(`500 32px ${PIC_FB}`),
+  ]).catch(() => {});
+}
+let picLogoImg;
+function picLogo() {
+  if (picLogoImg !== undefined) return Promise.resolve(picLogoImg);
+  return new Promise((ok) => {
+    const i = new Image();
+    i.onload = () => { picLogoImg = i; ok(i); };
+    i.onerror = () => { picLogoImg = null; ok(null); };
+    i.src = "logoC.png";
+  });
+}
+let picPhotoCache = { src: null, img: null };
+function picPhotoImage(src) {
+  if (!src) return Promise.resolve(null);
+  if (picPhotoCache.src === src) return Promise.resolve(picPhotoCache.img);
+  return new Promise((ok) => {
+    const i = new Image();
+    i.onload = () => { picPhotoCache = { src, img: i }; ok(i); };
+    i.onerror = () => ok(null);
+    i.src = src;
+  });
+}
+
+function picRound(x, X, Y, w, h, r) {
+  x.beginPath();
+  if (x.roundRect) { x.roundRect(X, Y, w, h, r); return; }
+  r = Math.min(r, w / 2, h / 2);
+  x.moveTo(X + r, Y); x.arcTo(X + w, Y, X + w, Y + h, r); x.arcTo(X + w, Y + h, X, Y + h, r);
+  x.arcTo(X, Y + h, X, Y, r); x.arcTo(X, Y, X + w, Y, r); x.closePath();
+}
+
+/* Words that fit: wrapped onto at most `lines` lines, and anything that
+   still does not fit (the rest of the text, or one word wider than the
+   card) ends in an ellipsis rather than running off the edge. */
+function picFit(x, text, width, lines) {
+  const words = String(text).split(/\s+/).filter(Boolean);
+  const out = [];
+  let cur = "";
+  for (const w of words) {
+    const t = cur ? cur + " " + w : w;
+    if (!cur || x.measureText(t).width <= width) cur = t;
+    else { out.push(cur); cur = w; }
+  }
+  if (cur) out.push(cur);
+  if (!out.length) return [""];
+  const cut = out.length > lines;
+  if (cut) out.length = lines;
+  return out.map((l, i) => {
+    if (!(x.measureText(l).width > width || (cut && i === out.length - 1))) return l;
+    while (l.length > 1 && x.measureText(l + "…").width > width) l = l.slice(0, -1);
+    return l.replace(/\s+$/, "") + "…";
+  });
+}
+
+/* A picture that may be drawn and shown: a data URL of one of the three
+   kinds the app itself makes (readImageScaled, the photo store). Anything
+   else would either taint the canvas, so it could not be saved, or put
+   somebody else's string inside a style attribute. */
+const picSafeSrc = (v) =>
+  typeof v === "string" && /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(v) ? v : null;
+
+/* the letter-spaced caps over a title, where the canvas can space them */
+function picKicker(x, text, X, y, G, P) {
+  x.font = `700 ${Math.round(32 * G.k)}px ${PIC_FB}`;
+  x.fillStyle = P.accent;
+  if ("letterSpacing" in x) x.letterSpacing = `${Math.round(4 * G.k)}px`;
+  x.fillText(picFit(x, String(text).toUpperCase(), G.cw, 1)[0] || "", X, y);
+  if ("letterSpacing" in x) x.letterSpacing = "0px";
+}
+
+/* one row of tiles: [big, small, highlight?] */
+function picTiles(x, tiles, y, G, P) {
+  const n = tiles.length;
+  if (!n) return y;
+  const gap = Math.round(20 * G.k);
+  const tw = (G.cw - gap * (n - 1)) / n, th = Math.round(176 * G.k);
+  tiles.forEach(([big, small, hot], i) => {
+    const tx = G.M + i * (tw + gap);
+    x.fillStyle = P.tile; picRound(x, tx, y, tw, th, Math.round(28 * G.k)); x.fill();
+    const cx = G.center ? tx + tw / 2 : tx + Math.round(30 * G.k);
+    x.textAlign = G.center ? "center" : "left";
+    x.fillStyle = hot ? P.accent : P.ink;
+    x.font = `700 ${Math.round(84 * G.k)}px ${PIC_FC}`;
+    x.fillText(picFit(x, big, tw - 40 * G.k, 1)[0], cx, y + Math.round(98 * G.k));
+    x.fillStyle = P.muted;
+    x.font = `600 ${Math.round(26 * G.k)}px ${PIC_FB}`;
+    x.fillText(picFit(x, String(small).toUpperCase(), tw - 40 * G.k, 1)[0], cx, y + Math.round(146 * G.k));
+  });
+  x.textAlign = G.align;
+  return y + th;
+}
+
+function picTitle(x, text, y, G, P, size = 96, lines = 2) {
+  x.fillStyle = P.ink;
+  x.font = `700 ${Math.round(size * G.k)}px ${PIC_FC}`;
+  for (const l of picFit(x, text, G.cw, lines)) { y += Math.round(size * G.k); x.fillText(l, G.ax, y); }
+  return y;
+}
+
+/* a pill, e.g. "PR": measured first, then drawn from its left edge */
+function picPillW(x, text, G) {
+  x.font = `700 ${Math.round(30 * G.k)}px ${PIC_FC}`;
+  return x.measureText(text).width + Math.round(40 * G.k);
+}
+function picPill(x, text, left, top, G, P) {
+  const w = picPillW(x, text, G), h = Math.round(48 * G.k);
+  x.fillStyle = picRgba(P.accent, 0.2);
+  picRound(x, left, top, w, h, h / 2); x.fill();
+  x.fillStyle = P.accent; x.textAlign = "center";
+  x.fillText(text, left + w / 2, top + h * 0.7);
+  x.textAlign = G.align;
+  return w;
+}
+
+/* Where a one-number block starts. On a card that is the content's to
+   fill, the block sits in the middle of the room under the title rather
+   than leaving the bottom half of a story empty; anywhere else (a photo,
+   a sticker, or words placed in the middle or at the foot) it stays at
+   its natural place and the whole card is positioned instead.
+   `above` is the clear space the block already has over its first line. */
+function picCentre(y, natural, above, G) {
+  if (!G.expand) return y;
+  return y + Math.max(0, (G.room - y - natural - above) / 2);
+}
+
+/* the first three of these that say something, no figure twice */
+function picPickTiles(cands) {
+  const out = [];
+  for (const c of cands) if (c && out.length < 3) out.push(c);
+  return out;
+}
+
+const PIC_DRAW = {
+  day(x, d, s, P, G) {
+    let y = Math.round(34 * G.k);
+    picKicker(x, s.headline || (s.dates ? fmtDate(d.date, { weekday: "long", day: "numeric", month: "long", year: "numeric" }) : TP("pic.workout")), G.ax, y, G, P);
+    y = picTitle(x, d.groups.length ? d.groups.join(" · ") : TP("pic.workout"), y + Math.round(4 * G.k), G, P);
+    if (s.tiles) {
+      y += Math.round(56 * G.k);
+      y = picTiles(x, picPickTiles([
+        [String(d.sets || d.exercises), d.sets ? TP("pic.sets") : TP("pic.exercises")],
+        s.weights && d.moved ? [picBig(d.moved), TP("pic.moved", { unit: d.unit })] : null,
+        s.prs && d.prs ? [String(d.prs), TNP("pic.prN", d.prs), true] : null,
+        d.minutes ? [String(d.minutes), TP("pic.minutes")] : null,
+        d.sets ? [String(d.exercises), TP("pic.exercises")] : null,
+      ]), y, G, P);
+    }
+    y += Math.round(54 * G.k);
+    /* The lifts: as many as fit, spread over the room there is when the
+       card is theirs to fill, at their natural size when the words sit
+       over a picture, and "+ n more" for the rest. */
+    const lineH = Math.round(40 * G.k);
+    const lineN = s.detail === "names" ? 0 : s.detail === "all" ? 2 : 1;
+    const rowBase = Math.round(64 * G.k) + lineN * lineH + (G.center ? Math.round(12 * G.k) : 0);
+    const moreH = Math.round(56 * G.k);
+    const room = G.room - y;
+    let fit = Math.floor(room / rowBase);
+    if (fit < d.rows.length) fit = Math.max(1, Math.floor((room - moreH) / rowBase));
+    const shown = d.rows.slice(0, Math.min(fit, d.rows.length));
+    const rest = d.rows.length - shown.length;
+    const spare = G.expand ? room - shown.length * rowBase - (rest ? moreH : 0) : 0;
+    const grow = shown.length ? Math.max(0, Math.min(Math.round(44 * G.k), spare / shown.length)) : 0;
+    for (const r of shown) {
+      const pr = r.pr && s.prs;
+      const pw = pr ? picPillW(x, "PR", G) + Math.round(16 * G.k) : 0;
+      const nameX = G.center ? G.ax : G.M + Math.round(34 * G.k);
+      const width = G.center ? G.cw - pw * 2 : G.cw - Math.round(34 * G.k) - pw;
+      if (!G.center) {
+        x.fillStyle = r.color;
+        picRound(x, G.M, y + Math.round(8 * G.k), Math.round(10 * G.k), Math.round(42 * G.k) + lineN * lineH, Math.round(5 * G.k)); x.fill();
+      }
+      x.fillStyle = P.ink; x.font = `600 ${Math.round(40 * G.k)}px ${PIC_FB}`;
+      let ty = y + Math.round(42 * G.k);
+      const nm = picFit(x, r.name, width, 1)[0];
+      const nw = Math.min(width, x.measureText(nm).width);
+      x.fillText(nm, nameX, ty);
+      if (pr) picPill(x, "PR", G.center ? G.ax + nw / 2 + Math.round(16 * G.k) : G.M + G.cw - pw + Math.round(16 * G.k), ty - Math.round(37 * G.k), G, P);
+      if (G.center) {
+        /* centred, the group colour is a short bar under the name instead */
+        x.fillStyle = r.color; picRound(x, G.ax - nw / 2, ty + Math.round(10 * G.k), nw, Math.round(5 * G.k), 3); x.fill();
+        ty += Math.round(12 * G.k);
+      }
+      if (lineN && r.lines.length) {
+        x.fillStyle = P.muted; x.font = `500 ${Math.round(31 * G.k)}px ${PIC_FB}`;
+        for (const l of picFit(x, r.lines[0], G.center ? G.cw : width, lineN)) { ty += lineH; x.fillText(l, nameX, ty); }
+      }
+      y += rowBase + grow;
+    }
+    const shownN = shown.length;
+    if (shownN < d.rows.length) {
+      x.fillStyle = P.faint; x.font = `600 ${Math.round(30 * G.k)}px ${PIC_FB}`;
+      x.fillText(TNP("pic.moreN", d.rows.length - shownN), G.center ? G.ax : G.M + Math.round(34 * G.k), y + Math.round(30 * G.k));
+      y += moreH;
+    }
+    return y;
+  },
+
+  progress(x, d, s, P, G) {
+    let y = Math.round(34 * G.k);
+    picKicker(x, s.headline || TP("pic.progress"), G.ax, y, G, P);
+    y = picTitle(x, d.lift, y + Math.round(4 * G.k), G, P);
+    const gain = d.now - d.first;
+    const strength = d.liftKind === "strength";
+    const hide = strength && !s.weights;
+    const pct = d.first > 0 ? Math.round((gain / d.first) * 100) : null;
+    const big = hide ? (pct != null ? (pct >= 0 ? "+" : "") + pct + "%" : "—") : picNum(d.now);
+    y += Math.round((G.story ? 200 : 170) * G.k);
+    x.fillStyle = P.accent; x.font = `700 ${Math.round(190 * G.k)}px ${PIC_FC}`;
+    const bw = x.measureText(big).width;
+    const unitTxt = hide ? "" : d.unit;
+    x.font = `600 ${Math.round(52 * G.k)}px ${PIC_FC}`;
+    const uw = unitTxt ? x.measureText(unitTxt).width + Math.round(16 * G.k) : 0;
+    const bx = G.center ? G.ax - (bw + uw) / 2 : G.M - 6;
+    x.textAlign = "left";
+    x.font = `700 ${Math.round(190 * G.k)}px ${PIC_FC}`; x.fillStyle = P.accent; x.fillText(big, bx, y);
+    if (unitTxt) { x.font = `600 ${Math.round(52 * G.k)}px ${PIC_FC}`; x.fillStyle = P.muted; x.fillText(unitTxt, bx + bw + Math.round(16 * G.k), y); }
+    x.textAlign = G.align;
+    y += Math.round(54 * G.k);
+    x.fillStyle = P.muted; x.font = `600 ${Math.round(30 * G.k)}px ${PIC_FB}`;
+    x.fillText((hide ? TP("pic.sinceStart") : d.metric).toUpperCase(), G.ax, y);
+    y += Math.round(62 * G.k);
+    x.fillStyle = P.ink; x.font = `600 ${Math.round(34 * G.k)}px ${PIC_FB}`;
+    const since = gain > 0
+      ? hide
+        ? (s.dates ? TP("pic.upSincePct", { date: fmtShort(d.firstDate) }) : TNP("pic.sessionsN", d.sessions))
+        : s.dates ? TP("pic.upSince", { n: picNum(gain), unit: d.unit, date: fmtShort(d.firstDate) }) : TP("pic.up", { n: picNum(gain), unit: d.unit })
+      : TNP("pic.sessionsN", d.sessions);
+    x.fillText(picFit(x, since, G.cw, 1)[0], G.ax, y);
+    if (s.chart && d.series.length >= 2) {
+      const foot = (s.dates ? Math.round(60 * G.k) : 0) + (s.prs && d.prs ? Math.round(80 * G.k) : 0);
+      const natural = Math.round((G.story ? 520 : G.square ? 230 : 330) * G.k);
+      const cy = y + Math.round(56 * G.k);
+      const ch = Math.max(Math.round(160 * G.k), G.expand ? G.room - cy - foot - Math.round(10 * G.k) : natural);
+      const cw = G.cw;
+      const vals = d.series.map((p) => p[1]);
+      const lo = Math.min(...vals), hi = Math.max(...vals), span = hi - lo || 1;
+      const px = (i) => G.M + (i / (d.series.length - 1)) * cw;
+      /* every session the same is a level line through the middle, not a
+         line along the floor that reads as nothing */
+      const py = (v) => hi === lo ? cy + ch * 0.55 : cy + ch - Math.round(16 * G.k) - ((v - lo) / span) * (ch - Math.round(50 * G.k));
+      const fill = x.createLinearGradient(0, cy, 0, cy + ch);
+      const ac = P.accent.startsWith("#") ? P.accent : "#e9b949";
+      fill.addColorStop(0, picRgba(ac, 0.3)); fill.addColorStop(1, picRgba(ac, 0));
+      x.beginPath(); x.moveTo(px(0), cy + ch);
+      d.series.forEach((p, i) => x.lineTo(px(i), py(p[1])));
+      x.lineTo(px(d.series.length - 1), cy + ch); x.closePath(); x.fillStyle = fill; x.fill();
+      x.beginPath(); d.series.forEach((p, i) => (i ? x.lineTo(px(i), py(p[1])) : x.moveTo(px(i), py(p[1]))));
+      x.strokeStyle = P.accent; x.lineWidth = Math.max(4, Math.round(7 * G.k)); x.lineJoin = "round"; x.lineCap = "round"; x.stroke();
+      if (s.prs) d.series.forEach((p, i) => { if (p[2]) { x.beginPath(); x.arc(px(i), py(p[1]), Math.round(11 * G.k), 0, Math.PI * 2); x.fillStyle = P.accent; x.fill(); } });
+      y = cy + ch;
+      if (s.dates) {
+        x.fillStyle = P.faint; x.font = `600 ${Math.round(28 * G.k)}px ${PIC_FB}`;
+        x.textAlign = "left"; x.fillText(fmtShort(d.firstDate), G.M, y + Math.round(44 * G.k));
+        x.textAlign = "right"; x.fillText(fmtShort(d.lastDate), G.M + G.cw, y + Math.round(44 * G.k));
+        x.textAlign = G.align;
+        y += Math.round(60 * G.k);
+      }
+    }
+    if (s.prs && d.prs) {
+      y += Math.round(64 * G.k);
+      x.fillStyle = P.accent; x.font = `700 ${Math.round(34 * G.k)}px ${PIC_FB}`;
+      x.fillText(TNP("pic.prsN", d.prs), G.ax, y);
+      y += Math.round(16 * G.k);
+    }
+    return y;
+  },
+
+  max(x, d, s, P, G) {
+    let y = Math.round(34 * G.k);
+    picKicker(x, s.headline || d.label, G.ax, y, G, P);
+    y = picTitle(x, d.lift, y + Math.round(4 * G.k), G, P);
+    /* the set behind an ESTIMATE, or the session behind a cardio score: for
+       reps or seconds the number already is the set */
+    const showSet = s.setLine && d.set && ((d.liftKind === "strength" && !d.single) || d.liftKind === "cardio");
+    const base = Math.round((G.story ? 290 : G.square ? 220 : 250) * G.k);
+    y = picCentre(y, base + (showSet ? Math.round(78 * G.k) : 0) + (s.dates ? Math.round(58 * G.k) : 0), Math.round(90 * G.k), G) + base;
+    const big = picNum(d.value);
+    let size = 280;
+    x.font = `700 ${Math.round(size * G.k)}px ${PIC_FC}`;
+    let bw = x.measureText(big).width;
+    x.font = `600 ${Math.round(80 * G.k)}px ${PIC_FC}`;
+    const uw = x.measureText(d.unit).width + Math.round(18 * G.k);
+    /* a long number gets smaller rather than leaving the card */
+    if (bw + uw > G.cw) { size = Math.floor(size * (G.cw - uw) / bw); x.font = `700 ${Math.round(size * G.k)}px ${PIC_FC}`; bw = x.measureText(big).width; }
+    const bx = G.center ? G.ax - (bw + uw) / 2 : G.M - 8;
+    x.textAlign = "left";
+    x.font = `700 ${Math.round(size * G.k)}px ${PIC_FC}`; x.fillStyle = P.accent; x.fillText(big, bx, y);
+    x.font = `600 ${Math.round(80 * G.k)}px ${PIC_FC}`; x.fillStyle = P.muted; x.fillText(d.unit, bx + bw + Math.round(18 * G.k), y);
+    x.textAlign = G.align;
+    if (showSet) {
+      y += Math.round(78 * G.k);
+      x.fillStyle = P.ink; x.font = `600 ${Math.round(40 * G.k)}px ${PIC_FB}`;
+      x.fillText(picFit(x, TP("pic.fromSet", { set: d.set }), G.cw, 1)[0], G.ax, y);
+    }
+    if (s.dates) {
+      y += Math.round(58 * G.k);
+      x.fillStyle = P.faint; x.font = `600 ${Math.round(32 * G.k)}px ${PIC_FB}`;
+      x.fillText(fmtDate(d.date, { day: "numeric", month: "long", year: "numeric" }), G.ax, y);
+    }
+    return y + Math.round(20 * G.k);
+  },
+
+  set(x, d, s, P, G) {
+    const c = d.set;
+    let y = Math.round(34 * G.k);
+    const flag = c.top ? TP("pic.bestEver") : c.pr ? TP("pic.prSet") : "";
+    picKicker(x, s.headline || (s.prs && flag) || (s.dates ? fmtDate(c.date, { weekday: "long", day: "numeric", month: "long", year: "numeric" }) : TP("pic.topSet")), G.ax, y, G, P);
+    y = picTitle(x, d.lift, y + Math.round(4 * G.k), G, P);
+    const base = Math.round((G.story ? 270 : G.square ? 210 : 240) * G.k);
+    const subsN = ((s.e1rm && d.e1rm != null && c.reps > 1) || c.rpe ? 1 : 0);
+    const dated = s.dates && (s.headline || (s.prs && flag));
+    y = picCentre(y, base + subsN * Math.round(76 * G.k) + (dated ? Math.round(58 * G.k) : 0), Math.round(105 * G.k), G) + base;
+    /* "140 kg × 5" in two weights of type: the load, then the reps */
+    const parts = c.kind === "strength"
+      ? [[picKg(c.weight), P.accent, 230], [" " + c.unit, P.muted, 72], ["  × " + c.reps, P.ink, 150]]
+      : c.kind === "bodyweight"
+      ? [[String(c.reps), P.accent, 230], [" " + TP("unit.reps"), P.muted, 72]]
+      : [[String(c.secs), P.accent, 230], [" " + TP("unit.secs"), P.muted, 72]];
+    const widths = parts.map(([t, , sz]) => { x.font = `700 ${Math.round(sz * G.k)}px ${PIC_FC}`; return x.measureText(t).width; });
+    let total = widths.reduce((a, w) => a + w, 0);
+    const scale = total > G.cw ? G.cw / total : 1;
+    total *= scale;
+    let px = G.center ? G.ax - total / 2 : G.M - 6;
+    x.textAlign = "left";
+    parts.forEach(([t, col, sz], i) => {
+      x.font = `${i === 1 ? 600 : 700} ${Math.round(sz * G.k * scale)}px ${PIC_FC}`;
+      x.fillStyle = col; x.fillText(t, px, y);
+      px += widths[i] * scale;
+    });
+    x.textAlign = G.align;
+    const subs = [];
+    if (s.e1rm && d.e1rm != null && c.reps > 1) subs.push(TP("pic.e1rmOf", { n: picNum(d.e1rm), unit: c.unit }));
+    if (c.rpe) subs.push("RPE " + picNum(c.rpe));
+    if (subs.length) {
+      y += Math.round(76 * G.k);
+      x.fillStyle = P.ink; x.font = `600 ${Math.round(40 * G.k)}px ${PIC_FB}`;
+      x.fillText(picFit(x, subs.join("  ·  "), G.cw, 1)[0], G.ax, y);
+    }
+    if (s.dates && (s.headline || (s.prs && flag))) {
+      y += Math.round(58 * G.k);
+      x.fillStyle = P.faint; x.font = `600 ${Math.round(32 * G.k)}px ${PIC_FB}`;
+      x.fillText(fmtDate(c.date, { day: "numeric", month: "long", year: "numeric" }), G.ax, y);
+    }
+    return y + Math.round(20 * G.k);
+  },
+
+  records(x, d, s, P, G) {
+    let y = Math.round(34 * G.k);
+    picKicker(x, s.headline || TP("pic.records"), G.ax, y, G, P);
+    y = picTitle(x, TP("pic.recordsTitle"), y + Math.round(4 * G.k), G, P);
+    y += Math.round(50 * G.k);
+    const showTotal = s.total && s.value === "max" && d.total != null;
+    const rowH = Math.round((G.center ? 190 : 150) * G.k);
+    const totalH = showTotal ? Math.round(200 * G.k) : 0;
+    const fit = Math.max(1, Math.floor((G.room - y - totalH) / rowH));
+    const rows = d.rows.slice(0, fit);
+    const grow = G.expand ? Math.min(Math.round(50 * G.k), Math.max(0, (G.room - y - totalH - rows.length * rowH) / Math.max(1, rows.length))) : 0;
+    for (const r of rows) {
+      const h = rowH + grow;
+      x.fillStyle = r.color;
+      if (!G.center) { picRound(x, G.M, y + Math.round(18 * G.k), Math.round(10 * G.k), h - Math.round(46 * G.k), Math.round(5 * G.k)); x.fill(); }
+      const val = s.value === "set" && r.set ? r.set : `${picNum(r.m)} ${r.unit}`;
+      if (G.center) {
+        x.fillStyle = P.ink; x.font = `600 ${Math.round(38 * G.k)}px ${PIC_FB}`;
+        x.fillText(picFit(x, r.lift, G.cw, 1)[0], G.ax, y + Math.round(46 * G.k));
+        x.fillStyle = P.accent; x.font = `700 ${Math.round(88 * G.k)}px ${PIC_FC}`;
+        x.fillText(picFit(x, val, G.cw, 1)[0], G.ax, y + Math.round(132 * G.k));
+        if (s.dates) { x.fillStyle = P.faint; x.font = `600 ${Math.round(26 * G.k)}px ${PIC_FB}`; x.fillText(fmtShort(r.date), G.ax, y + Math.round(170 * G.k)); }
+      } else {
+        x.font = `700 ${Math.round(78 * G.k)}px ${PIC_FC}`;
+        const vw = Math.min(G.cw * 0.55, x.measureText(val).width);
+        const nx = G.M + Math.round(34 * G.k);
+        x.fillStyle = P.ink; x.font = `600 ${Math.round(38 * G.k)}px ${PIC_FB}`;
+        x.fillText(picFit(x, r.lift, G.cw - Math.round(34 * G.k) - vw - Math.round(24 * G.k), 1)[0], nx, y + Math.round(62 * G.k));
+        if (s.dates) { x.fillStyle = P.faint; x.font = `600 ${Math.round(27 * G.k)}px ${PIC_FB}`; x.fillText(fmtDate(r.date, { day: "numeric", month: "short", year: "numeric" }), nx, y + Math.round(104 * G.k)); }
+        x.textAlign = "right"; x.fillStyle = P.accent; x.font = `700 ${Math.round(78 * G.k)}px ${PIC_FC}`;
+        x.fillText(picFit(x, val, G.cw * 0.55, 1)[0], G.M + G.cw, y + Math.round(90 * G.k));
+        x.textAlign = G.align;
+      }
+      y += h;
+    }
+    if (showTotal) {
+      y += Math.round(26 * G.k);
+      x.fillStyle = P.rule; x.fillRect(G.M, y, G.cw, Math.max(2, Math.round(3 * G.k)));
+      y += Math.round(72 * G.k);
+      x.fillStyle = P.muted; x.font = `700 ${Math.round(32 * G.k)}px ${PIC_FB}`;
+      if (G.center) {
+        x.fillText(TP("pic.total").toUpperCase(), G.ax, y);
+        y += Math.round(100 * G.k);
+        x.fillStyle = P.accent; x.font = `700 ${Math.round(110 * G.k)}px ${PIC_FC}`;
+        x.fillText(`${picNum(d.total)} ${d.unit}`, G.ax, y);
+      } else {
+        x.fillText(TP("pic.total").toUpperCase(), G.M, y + Math.round(10 * G.k));
+        x.textAlign = "right"; x.fillStyle = P.accent; x.font = `700 ${Math.round(110 * G.k)}px ${PIC_FC}`;
+        x.fillText(`${picNum(d.total)} ${d.unit}`, G.M + G.cw, y + Math.round(26 * G.k));
+        x.textAlign = G.align;
+        y += Math.round(26 * G.k);
+      }
+    }
+    return y + Math.round(20 * G.k);
+  },
+
+  month(x, d, s, P, G) {
+    let y = Math.round(34 * G.k);
+    const [yy, mm] = d.month.split("-").map(Number);
+    const label = new Date(yy, mm - 1, 1).toLocaleDateString(localeTag(), { month: "long", year: "numeric" });
+    picKicker(x, s.headline || label, G.ax, y, G, P);
+    y = picTitle(x, TNP("pic.sessionsN", d.sessions), y + Math.round(4 * G.k), G, P, 110, 1);
+    if (s.tiles) {
+      y += Math.round(54 * G.k);
+      y = picTiles(x, picPickTiles([
+        d.sets ? [String(d.sets), TP("pic.sets")] : null,
+        s.weights && d.moved ? [picBig(d.moved), TP("pic.moved", { unit: d.unit })] : null,
+        s.prs && d.prs ? [String(d.prs), TNP("pic.prN", d.prs), true] : null,
+        d.minutes ? [String(d.minutes), TP("pic.minutes")] : null,
+        [String(d.exercises), TP("pic.exercises")],
+      ]), y, G, P);
+    }
+    y += Math.round(58 * G.k);
+    /* the month, Monday first, as the calendar tab draws it */
+    const cells = monthGrid(d.month);
+    const rows = cells.slice(35).some((c) => c.inMonth) ? 6 : 5;
+    const gap = Math.round(14 * G.k);
+    const heads = Math.round(50 * G.k);
+    let cell = (G.cw - gap * 6) / 7;
+    const natural = heads + rows * cell + (rows - 1) * gap;
+    const roomLeft = G.room - y - Math.round(10 * G.k);
+    if (natural > roomLeft) cell = Math.max(24, (roomLeft - heads - (rows - 1) * gap) / rows);
+    const gw = cell * 7 + gap * 6;
+    const gx = G.center ? G.ax - gw / 2 : G.M;
+    x.textAlign = "center"; x.fillStyle = P.faint; x.font = `700 ${Math.round(26 * G.k)}px ${PIC_FB}`;
+    for (let i = 0; i < 7; i++) {
+      const w = new Date(2024, 0, 1 + i).toLocaleDateString(localeTag(), { weekday: "narrow" });
+      x.fillText(w.toUpperCase(), gx + i * (cell + gap) + cell / 2, y + Math.round(30 * G.k));
+    }
+    y += heads;
+    for (let r = 0; r < rows; r++)
+      for (let c = 0; c < 7; c++) {
+        const cl = cells[r * 7 + c];
+        if (!cl.inMonth) continue;
+        const cx = gx + c * (cell + gap), cy = y + r * (cell + gap);
+        const hit = d.days[cl.iso];
+        if (hit) {
+          x.fillStyle = s.accent === "group" ? hit : P.accent;
+          picRound(x, cx, cy, cell, cell, Math.round(cell * 0.24)); x.fill();
+          x.fillStyle = s.accent === "group" ? (picLum(hit) > 0.45 ? "#141518" : "#ffffff") : P.onAccent;
+        } else {
+          x.fillStyle = P.tile; picRound(x, cx, cy, cell, cell, Math.round(cell * 0.24)); x.fill();
+          x.fillStyle = P.faint;
+        }
+        x.font = `700 ${Math.round(cell * 0.38)}px ${PIC_FC}`;
+        x.fillText(String(cl.day), cx + cell / 2, cy + cell * 0.63);
+      }
+    x.textAlign = G.align;
+    y += rows * cell + (rows - 1) * gap;
+    return y + Math.round(16 * G.k);
+  },
+};
+
+/* Where everything goes on a card of this shape. The middle band is the
+   content's; a story keeps clear of the top and bottom, where Instagram
+   and Snapchat put their own bars over whatever is there. */
+function picGeom(s, W, H) {
+  const story = s.format === "story", square = s.format === "square";
+  const k = story ? 1 : square ? 0.8 : 0.9;
+  const M = Math.round((square ? 70 : 84));
+  const full = s.brand === "full";
+  const top = full ? (story ? 330 : square ? 180 : 220) : (story ? 250 : square ? 80 : 100);
+  const bottom = full ? (story ? 300 : square ? 130 : 160) : (story ? 290 : square ? 120 : 140);
+  const center = s.align === "center";
+  return {
+    W, H, M, k, story, square, top, room: H - top - bottom, cw: W - M * 2,
+    center, align: center ? "center" : "left", ax: center ? W / 2 : M,
+    expand: s.pos === "top" && s.theme !== "photo" && s.theme !== "clear",
+  };
+}
+
+function picPaintBg(x, s, P, G, photo) {
+  const { W, H } = G;
+  const t = s.theme;
+  if (t === "clear") return;
+  if (t === "photo" && photo) {
+    const r = Math.max(W / photo.width, H / photo.height);
+    const w = photo.width * r, h = photo.height * r;
+    x.drawImage(photo, (W - w) / 2, (H - h) / 2, w, h);
+    x.fillStyle = `rgba(0,0,0,${s.dim / 100})`; x.fillRect(0, 0, W, H);
+    /* and a deeper band behind where the words sit */
+    const band = x.createLinearGradient(0, 0, 0, H);
+    const a = Math.min(0.6, 0.2 + s.dim / 200);
+    if (s.pos === "top") { band.addColorStop(0, `rgba(0,0,0,${a})`); band.addColorStop(0.55, "rgba(0,0,0,0)"); }
+    else if (s.pos === "bottom") { band.addColorStop(0.45, "rgba(0,0,0,0)"); band.addColorStop(1, `rgba(0,0,0,${a})`); }
+    else { band.addColorStop(0.2, "rgba(0,0,0,0)"); band.addColorStop(0.5, `rgba(0,0,0,${a * 0.7})`); band.addColorStop(0.8, "rgba(0,0,0,0)"); }
+    x.fillStyle = band; x.fillRect(0, 0, W, H);
+    return;
+  }
+  const glow = (hex, a, cx = 0.92, cy = 0.06, r = 0.9) => {
+    const g = x.createRadialGradient(W * cx, H * cy, 10, W * cx, H * cy, W * r);
+    g.addColorStop(0, picRgba(hex, a)); g.addColorStop(1, picRgba(hex, 0));
+    x.fillStyle = g; x.fillRect(0, 0, W, H);
+  };
+  const lin = (a, b, diag) => {
+    const g = diag ? x.createLinearGradient(0, 0, W, H) : x.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, a); g.addColorStop(1, b);
+    x.fillStyle = g; x.fillRect(0, 0, W, H);
+  };
+  if (t === "black") { x.fillStyle = "#000"; x.fillRect(0, 0, W, H); return; }
+  if (t === "light") { lin("#f8f6f1", "#e6e2d8"); glow(P.accent, 0.12); return; }
+  if (t === "gold") { lin("#f6d67e", "#c18823", true); glow("#ffffff", 0.28, 0.1, 0.04, 0.8); return; }
+  if (t === "vivid") { lin(picShade(P.base, 0.12), picShade(P.base, -0.45), true); glow("#ffffff", 0.18, 0.12, 0.05, 0.8); return; }
+  /* midnight, and photo before a photo is chosen */
+  lin("#26272c", "#101113");
+  glow(P.accent.startsWith("#") ? P.accent : "#e9b949", 0.3);
+}
+
+/* the name on the card: the profile's own name, else the account's */
+function picWho() {
+  const n = String(state.settings.name || "").trim();
+  if (n) return n;
+  const a = signedInAs();
+  return a ? "@" + a.username : "";
+}
+const appBaseUrl = () => location.origin + location.pathname.replace(/[^/]*$/, "");
+
+function picBrand(x, s, P, G, logo) {
+  const { W, H, M, k } = G;
+  const who = s.name ? picWho() : "";
+  if (s.brand === "full") {
+    const y = G.story ? 170 : G.square ? 70 : 84;
+    const L = Math.round(84 * k);
+    if (logo) { x.save(); picRound(x, M, y, L, L, Math.round(20 * k)); x.clip(); x.drawImage(logo, M, y, L, L); x.restore(); }
+    x.textAlign = "left"; x.fillStyle = P.ink; x.font = `700 ${Math.round(46 * k)}px ${PIC_FC}`;
+    x.fillText("ZENOFIT", M + (logo ? L + Math.round(22 * k) : 0), y + L * 0.66);
+    if (who) {
+      x.textAlign = "right"; x.fillStyle = P.muted; x.font = `600 ${Math.round(32 * k)}px ${PIC_FB}`;
+      x.fillText(picFit(x, who, W - M * 2 - Math.round(330 * k), 1)[0], W - M, y + L * 0.64);
+    }
+    /* the signature, which is the point */
+    const ly = H - (G.story ? 250 : G.square ? 108 : 132);
+    x.fillStyle = P.rule; x.fillRect(M, ly, W - M * 2, 2);
+    const ty = ly + Math.round(66 * k);
+    x.textAlign = "left"; x.fillStyle = P.muted; x.font = `600 ${Math.round(30 * k)}px ${PIC_FB}`;
+    x.fillText(TP("pic.tracked"), M, ty);
+    x.textAlign = "right"; x.fillStyle = P.accent; x.font = `700 ${Math.round(30 * k)}px ${PIC_FB}`;
+    x.fillText(appBaseUrl().replace(/^https?:\/\//, "").replace(/\/$/, ""), W - M, ty);
+    x.textAlign = "left";
+    return;
+  }
+  /* minimal: one small mark at the foot, and the name opposite it */
+  const L = Math.round(52 * k);
+  const by = H - (G.story ? 250 : G.square ? 92 : 112);
+  x.font = `700 ${Math.round(34 * k)}px ${PIC_FC}`;
+  const tw = x.measureText("ZENOFIT").width;
+  const markW = (logo ? L + Math.round(14 * k) : 0) + tw;
+  const mx = G.center ? (W - markW) / 2 : W - M - markW;
+  if (logo) { x.save(); picRound(x, mx, by, L, L, Math.round(13 * k)); x.clip(); x.drawImage(logo, mx, by, L, L); x.restore(); }
+  x.textAlign = "left"; x.fillStyle = P.ink; x.globalAlpha = 0.92;
+  x.fillText("ZENOFIT", mx + (logo ? L + Math.round(14 * k) : 0), by + L * 0.7);
+  x.globalAlpha = 1;
+  if (who) {
+    x.fillStyle = P.muted; x.font = `600 ${Math.round(30 * k)}px ${PIC_FB}`;
+    if (G.center) { x.textAlign = "center"; x.fillText(picFit(x, who, W - M * 2, 1)[0], W / 2, by - Math.round(26 * k)); }
+    else { x.textAlign = "left"; x.fillText(picFit(x, who, W - M * 2 - markW - Math.round(30 * k), 1)[0], M, by + L * 0.66); }
+    x.textAlign = "left";
+  }
+}
+
+async function picDraw(s, d) {
+  const [W, H] = PIC_SIZES[s.format] || PIC_SIZES.story;
+  await picFonts();
+  const logo = await picLogo();
+  const photo = s.theme === "photo" ? await picPhotoImage(picSafeSrc(s.photo)) : null;
+  const c = document.createElement("canvas");
+  c.width = W; c.height = H;
+  const x = c.getContext("2d");
+  const G = picGeom(s, W, H);
+  const P = picPalette(s, d.color);
+  picPaintBg(x, s, P, G, photo);
+  /* The content is drawn on a layer of its own and then placed: that is
+     what lets the same words sit at the top, the middle or the foot, and
+     lets a card over a photo cast one soft shadow under all of it. */
+  const layer = document.createElement("canvas");
+  layer.width = W; layer.height = G.room;
+  const lx = layer.getContext("2d");
+  lx.textBaseline = "alphabetic"; lx.textAlign = G.align;
+  const used = Math.max(1, Math.min(G.room, Math.ceil(PIC_DRAW[d.kind](lx, d, s, P, G))));
+  const top = s.pos === "middle" ? G.top + (G.room - used) / 2 : s.pos === "bottom" ? G.top + G.room - used : G.top;
+  if (s.theme === "photo" || s.theme === "clear") {
+    x.save();
+    x.shadowColor = "rgba(0,0,0,.55)"; x.shadowBlur = 24; x.shadowOffsetY = 3;
+    x.drawImage(layer, 0, 0, W, used, 0, Math.round(top), W, used);
+    x.restore();
+    x.save(); x.shadowColor = "rgba(0,0,0,.5)"; x.shadowBlur = 18;
+    picBrand(x, s, P, G, logo);
+    x.restore();
+  } else {
+    x.drawImage(layer, 0, 0, W, used, 0, Math.round(top), W, used);
+    picBrand(x, s, P, G, logo);
+  }
+  return c;
+}
+
+/* ── BUILDING IT ────────────────────────────────────────────────────────
+   The picture for what is on the screen, rebuilt as the choices change and
+   kept ready, because the share sheet has to be opened straight from the
+   tap with nothing awaited in between, or the browser refuses it (see
+   shareFile). Each build supersedes the one before it (picJob), and the
+   preview is patched in place, never by a render, so a slider or the
+   headline field keeps its finger and its caret. */
+let picBlob = null, picUrl = null, picJob = 0, picTimer = null;
+
+function picSoon(ms = 140) {
+  clearTimeout(picTimer);
+  picTimer = setTimeout(picBuild, ms);
+}
+
+async function picBuild() {
+  clearTimeout(picTimer);
+  const s = ui.pic;
+  if (!s) return;
+  const job = ++picJob;
+  s.busy = true;
+  picPaint();
+  let data = null;
+  try { data = picData(s); } catch (e) { console.error("pic data", e); }
+  if (!data || data.empty) {
+    if (job !== picJob || ui.pic !== s) return;
+    s.error = data && data.empty ? data.why : TP("pic.nothing");
+    picBlob = null;
+    if (picUrl) { URL.revokeObjectURL(picUrl); picUrl = null; }
+    s.busy = false;
+    picPaint();
+    return;
+  }
+  let blob = null;
+  try {
+    const canvas = await picDraw(s, data);
+    const type = s.theme === "photo" && picSafeSrc(s.photo) ? "image/jpeg" : "image/png";
+    blob = await new Promise((ok) => canvas.toBlob(ok, type, 0.92));
+  } catch (e) { console.error("pic draw", e); }
+  if (job !== picJob || ui.pic !== s) return;
+  if (picUrl) URL.revokeObjectURL(picUrl);
+  picBlob = blob;
+  picUrl = blob ? URL.createObjectURL(blob) : null;
+  s.error = blob ? null : TP("pic.failed");
+  s.alt = picAlt(s, data);
+  s.busy = false;
+  picPaint();
+}
+
+function picClose() {
+  ui.pic = null;
+  picJob++;
+  clearTimeout(picTimer);
+  if (picUrl) URL.revokeObjectURL(picUrl);
+  picUrl = null; picBlob = null;
+  picPhotoCache = { src: null, img: null };
+}
+
+/* what the picture says, for the share text and for a screen reader */
+function picAlt(s, d) {
+  if (!d) return "";
+  switch (d.kind) {
+    case "day": return TP("pic.altDay", { date: fmtDate(d.date, { weekday: "long", day: "numeric", month: "long" }), n: d.sets || d.exercises });
+    case "progress": return d.lift + " · " + TP("pic.progress");
+    case "max": return `${d.lift} · ${d.label} ${picNum(d.value)} ${d.unit}`;
+    case "set": return `${d.lift} · ${picSetText(d.set, d.set.kind, d.set.unit)}`;
+    case "records": return TP("pic.records") + " · " + d.rows.map((r) => r.lift).join(", ");
+    case "month": return TNP("pic.sessionsN", d.sessions);
+    default: return "";
+  }
+}
+
+const picFileName = (s) => {
+  const slug = s.mode === "day" ? s.date : s.mode === "month" ? s.month
+    : s.mode === "records" ? "records" : String(s.lift || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
+  return `zenofit-${s.mode}-${slug || "card"}.${picBlob && picBlob.type === "image/jpeg" ? "jpg" : "png"}`;
+};
+
+function picCanShare() {
+  try {
+    return !!(picBlob && navigator.share && navigator.canShare &&
+      navigator.canShare({ files: [new File([picBlob], "z.png", { type: picBlob.type })] }));
+  } catch { return false; }
+}
+
+function picDownload() {
+  if (!picBlob) return;
+  const url = URL.createObjectURL(picBlob);
+  const a = document.createElement("a");
+  a.href = url; a.download = picFileName(ui.pic || {}); a.style.display = "none";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+/* ── THE WINDOW ────────────────────────────────────────────────────── */
+
+/* The preview's height is a share of the FRAME, so a short phone keeps
+   room for the controls under it: 30% of the frame, never more than
+   290px, never less than 150. The frame height is the viewport engine's
+   own (--pb-vh over --pb-scale, see .pb-frame); nothing here measures. */
+const PIC_PREVIEW_H = "clamp(150px, calc(var(--pb-vh) / var(--pb-scale) * 0.3), 290px)";
+
+function picPreviewInner(s) {
+  const [W, H] = PIC_SIZES[s.format];
+  /* a transparent card is shown on a checkerboard, which is how every
+     editor says "nothing here" */
+  const board = s.theme === "clear"
+    ? "background-color:#9aa0a8;background-image:linear-gradient(45deg,#c2c6cc 25%,transparent 25%,transparent 75%,#c2c6cc 75%),linear-gradient(45deg,#c2c6cc 25%,transparent 25%,transparent 75%,#c2c6cc 75%);background-size:16px 16px;background-position:0 0,8px 8px"
+    : "background:var(--surface2)";
+  return `<div style="position:relative;height:${PIC_PREVIEW_H};aspect-ratio:${W} / ${H};border-radius:12px;overflow:hidden;${board};box-shadow:0 10px 28px rgba(0,0,0,.38);display:flex;align-items:center;justify-content:center">
+    ${s.error
+      ? `<span style="font-size:12.5px;color:var(--muted);padding:16px;text-align:center;line-height:1.5">${esc(s.error)}</span>`
+      : picUrl ? `<img src="${esc(picUrl)}" alt="${esc(s.alt || "")}" style="width:100%;height:100%;display:block">` : ""}
+    <span data-pic-spin style="position:absolute;top:8px;right:8px;display:${s.busy ? "flex" : "none"};color:#fff;background:rgba(0,0,0,.45);border-radius:10px;padding:4px">${icon("loader", 14, 'class="pb-spin"')}</span>
+  </div>`;
+}
+
+/* the preview and the two buttons, in place */
+function picPaint() {
+  const s = ui.pic;
+  if (!s) return;
+  const box = document.querySelector("[data-pic-preview]");
+  if (box) {
+    const img = box.querySelector("img");
+    /* swap the picture without rebuilding the box, so it never blinks */
+    if (img && picUrl && !s.error && box.dataset.format === s.format) {
+      img.src = picUrl; img.alt = s.alt || "";
+      const spin = box.querySelector("[data-pic-spin]");
+      if (spin) spin.style.display = s.busy ? "flex" : "none";
+    } else {
+      box.dataset.format = s.format;
+      box.innerHTML = picPreviewInner(s);
+      if (window.lucide) lucide.createIcons();
+    }
+  }
+  const ready = !!picBlob && !s.busy && !s.error;
+  document.querySelectorAll("[data-pic-out]").forEach((b) => { b.disabled = !ready; b.style.opacity = ready ? 1 : 0.5; });
+  const go = document.querySelector('[data-action="pic-share"]');
+  if (go) go.style.display = !picBlob || picCanShare() ? "" : "none";
+}
+
+/* a row of choices, one of which is on. `scroll` for a strip wider than
+   the screen, `small` for the two-word kind that sits beside a label */
+function picChoice(action, on, items, opts = {}) {
+  const pad = opts.scroll ? "8px 13px" : opts.small ? "5px 10px" : "9px 4px";
+  return `<div role="radiogroup"${opts.scroll ? ' class="pb-scroll"' : ""} style="display:${opts.small ? "inline-flex" : "flex"};gap:${opts.small ? 4 : 6}px;${opts.scroll ? "overflow-x:auto;padding:0 2px 2px;margin:0 -2px" : ""}">
+    ${items.map(([id, label, ic]) => `<button data-action="${action}" data-id="${esc(id)}" role="radio" aria-checked="${on === id}" class="pb-btn" style="flex:${opts.scroll || opts.small ? "0 0 auto" : "1"};padding:${pad};font-size:${opts.small ? 11.5 : 12.5}px;border-radius:10px;white-space:nowrap;background:${on === id ? "rgba(233,185,73,.14)" : "var(--surface2)"};color:${on === id ? "var(--gold)" : "var(--muted)"};border:1px solid ${on === id ? "rgba(233,185,73,.55)" : "var(--border-soft)"};gap:6px">${ic ? icon(ic, 14) : ""}${label}</button>`).join("")}
+  </div>`;
+}
+
+const picLabel = (text, right = "") =>
+  `<div style="display:flex;align-items:baseline;justify-content:space-between;margin:16px 2px 8px"><div class="pb-label">${text}</div>${right}</div>`;
+
+function picSwitch(key, label, hint = "") {
+  const s = ui.pic;
+  return `<button data-action="pic-toggle" data-id="${key}" role="switch" aria-checked="${!!s[key]}" style="width:100%;display:flex;align-items:center;gap:11px;padding:9px 2px;text-align:left;color:var(--text)">
+    <span style="flex:1;min-width:0">
+      <span style="display:block;font-weight:600;font-size:13.5px">${label}</span>
+      ${hint ? `<span style="display:block;font-size:11.5px;color:var(--faint);line-height:1.45;margin-top:2px">${hint}</span>` : ""}
+    </span>
+    ${switchPill(!!s[key])}
+  </button>`;
+}
+
+/* the swatch for one background: a small card painted the way the canvas
+   paints it, so the choice is seen rather than read */
+function picThemeSwatch(id) {
+  const s = ui.pic;
+  const on = s.theme === id;
+  const vivid = s.accent === "group" ? (cleanColor(picGroupHex()) || PIC_ACCENT_HEX.gold) : PIC_ACCENT_HEX[s.accent] || PIC_ACCENT_HEX.gold;
+  const photo = picSafeSrc(s.photo);
+  const bg = {
+    midnight: "linear-gradient(160deg,#3a3b42,#101113)",
+    black: "#000",
+    light: "linear-gradient(160deg,#faf8f3,#e2ddd1)",
+    gold: "linear-gradient(135deg,#f6d67e,#c18823)",
+    vivid: `linear-gradient(135deg,${picShade(vivid, 0.12)},${picShade(vivid, -0.45)})`,
+    /* single quotes on purpose: the attribute is double-quoted, and
+       picSafeSrc only ever lets a base64 data URL through */
+    photo: photo ? `center/cover no-repeat url('${photo}')` : "linear-gradient(160deg,#4b5563,#1f2937)",
+    clear: "repeating-conic-gradient(#c2c6cc 0% 25%, #9aa0a8 0% 50%) 50% / 12px 12px",
+  }[id];
+  const ink = id === "light" || id === "gold" ? "#16171a" : "#fff";
+  return `<button data-action="pic-theme" data-id="${id}" role="radio" aria-checked="${on}" aria-label="${T("pic.theme." + id)}" style="flex:0 0 auto;display:flex;flex-direction:column;align-items:center;gap:6px;color:${on ? "var(--gold)" : "var(--muted)"}">
+    <span style="width:52px;height:68px;border-radius:10px;background:${bg};border:2px solid ${on ? "var(--gold)" : "var(--border)"};display:flex;align-items:flex-end;padding:6px;box-sizing:border-box;color:${ink}">
+      ${id === "photo" ? icon("image", 15, 'style="margin:auto"') : `<span style="width:100%;height:5px;border-radius:3px;background:currentColor;opacity:.8"></span>`}
+    </span>
+    <span style="font-size:11px;font-weight:600">${T("pic.theme." + id)}</span>
+  </button>`;
+}
+/* the group colour of whatever the card is about, for the "group" swatch */
+function picGroupHex() {
+  const s = ui.pic;
+  if (!s) return null;
+  if (s.mode === "day") {
+    const e = (state.log || []).find((x) => x.date === s.date && entryHasData(x));
+    return e ? colorFor(groupOfEntry(e, state.library)) : null;
+  }
+  if (s.mode === "records" || s.mode === "month") return s.lifts && s.lifts[0] ? colorFor(muscleOf(s.lifts[0], state.library || [])) : null;
+  return s.lift ? colorFor(muscleOf(s.lift, state.library || [])) : null;
+}
+
+function picAccentRow() {
+  const s = ui.pic;
+  if (s.theme === "gold") return `<div style="font-size:11.5px;color:var(--faint);margin:0 2px">${T("pic.accentGold")}</div>`;
+  const g = picGroupHex() || PIC_ACCENT_HEX.gold;
+  return `<div role="radiogroup" style="display:flex;gap:10px;flex-wrap:wrap">${PIC_ACCENTS.map((id) => {
+    const on = s.accent === id;
+    const col = id === "group" ? g : PIC_ACCENT_HEX[id];
+    return `<button data-action="pic-accent" data-id="${id}" role="radio" aria-checked="${on}" title="${T("pic.accent." + id)}" aria-label="${T("pic.accent." + id)}" style="width:34px;height:34px;border-radius:17px;padding:3px;border:2px solid ${on ? "var(--text)" : "transparent"}">
+      <span style="display:block;width:100%;height:100%;border-radius:50%;background:${esc(cleanColor(col) || "#e9b949")};${id === "white" ? "border:1px solid var(--border)" : ""};${id === "group" ? "box-shadow:inset 0 0 0 3px rgba(0,0,0,.25)" : ""}"></span>
+    </button>`;
+  }).join("")}</div>`;
+}
+
+/* what the card is ABOUT: the pickers that change with the mode */
+function picSubject() {
+  const s = ui.pic;
+  const lifts = picLifts();
+  const liftSelect = (bind = "pic.lift") => `<select class="pb-input" data-bind="${bind}" aria-label="${T("pic.lift")}" style="font-weight:600">
+    ${lifts.map((n) => `<option value="${esc(n)}"${n === s.lift ? " selected" : ""}>${esc(exLabel(n))}</option>`).join("")}
+  </select>`;
+  if (s.mode === "day") {
+    const days = picDays().slice(0, 120);
+    if (s.date && !days.includes(s.date)) days.unshift(s.date);
+    return `${picLabel(T("pic.whichDay"))}
+      <select class="pb-input" data-bind="pic.date" aria-label="${T("pic.whichDay")}" style="font-weight:600">
+        ${days.map((d) => `<option value="${esc(d)}"${d === s.date ? " selected" : ""}>${esc(fmtDate(d, { weekday: "short", day: "numeric", month: "short", year: "numeric" }))}</option>`).join("")}
+      </select>
+      ${picLabel(T("pic.detail"))}
+      ${picChoice("pic-detail", s.detail, [["best", T("pic.detail.best")], ["all", T("pic.detail.all")], ["names", T("pic.detail.names")]])}`;
+  }
+  if (s.mode === "month") {
+    const months = picMonths();
+    return `${picLabel(T("pic.whichMonth"))}
+      <select class="pb-input" data-bind="pic.month" aria-label="${T("pic.whichMonth")}" style="font-weight:600">
+        ${months.map((m) => { const [y, mm] = m.split("-").map(Number); return `<option value="${esc(m)}"${m === s.month ? " selected" : ""}>${esc(new Date(y, mm - 1, 1).toLocaleDateString(localeTag(), { month: "long", year: "numeric" }))}</option>`; }).join("")}
+      </select>`;
+  }
+  if (s.mode === "records") {
+    const n = s.lifts.length;
+    return `${picLabel(T("pic.whichLifts"), `<span style="font-size:11px;color:var(--faint)">${T("pic.chosen", { n, max: PIC_RECORDS_MAX })}</span>`)}
+      <div style="display:flex;flex-wrap:wrap;gap:6px">${lifts.slice(0, 40).map((nm) => {
+        const on = s.lifts.includes(nm);
+        const full = !on && n >= PIC_RECORDS_MAX;
+        return `<button data-action="pic-lift-toggle" data-name="${esc(nm)}" role="checkbox" aria-checked="${on}" ${full ? "disabled" : ""} class="pb-chip" style="cursor:pointer;padding:7px 11px;font-size:12.5px;gap:6px;opacity:${full ? 0.4 : 1};color:${on ? "var(--gold)" : "var(--muted)"};border-color:${on ? "rgba(233,185,73,.55)" : "var(--border)"};background:${on ? "rgba(233,185,73,.12)" : "transparent"}">
+          <span style="width:7px;height:7px;border-radius:4px;background:${colorFor(muscleOf(nm, state.library || []))}"></span>${esc(exLabel(nm))}${on ? icon("check", 12) : ""}
+        </button>`;
+      }).join("")}</div>
+      ${picLabel(T("pic.value"))}
+      ${picChoice("pic-value", s.value, [["max", T("pic.value.max")], ["set", T("pic.value.set")]])}`;
+  }
+  let out = `${picLabel(T("pic.lift"))}${liftSelect()}`;
+  if (s.mode === "progress")
+    out += `${picLabel(T("pic.range"))}${picChoice("pic-range", s.range, Object.keys(PIC_RANGES).map((r) => [r, T("pic.range." + r)]))}`;
+  if (s.mode === "set") {
+    const all = picSetChoices(s.lift);
+    if (!all.length) return out + `<div style="font-size:12px;color:var(--faint);margin:10px 2px 0">${T("pic.noSets")}</div>`;
+    const list = picSetSorted(all, s.setSort).slice(0, 30);
+    const cur = (all.find((c) => c.key === s.setKey) || all.find((c) => c.top) || all[0]).key;
+    out += `${picLabel(T("pic.whichSet"), picChoice("pic-set-sort", s.setSort, [["best", T("pic.sort.best")], ["recent", T("pic.sort.recent")]], { small: true }))}
+      <div class="pb-card pb-scroll" style="max-height:236px;overflow-y:auto">${list.map((c, i) => `<button data-action="pic-set" data-id="${esc(c.key)}" role="radio" aria-checked="${c.key === cur}" style="width:100%;display:flex;align-items:center;gap:10px;padding:10px 13px;text-align:left;color:var(--text);${i ? "border-top:1px solid var(--border-soft);" : ""}background:${c.key === cur ? "rgba(233,185,73,.1)" : "transparent"}">
+        <span style="width:16px;flex-shrink:0;color:var(--gold)">${c.key === cur ? icon("check", 15) : ""}</span>
+        <span class="pb-num" style="font-weight:700;font-size:15.5px;flex:1;min-width:0">${esc(picSetText(c, c.kind, c.unit))}${c.rpe ? `<span style="font-size:11.5px;color:var(--faint);font-weight:600"> · RPE ${esc(picNum(c.rpe))}</span>` : ""}</span>
+        ${c.top ? chip(T("pic.bestTag"), "var(--gold)") : c.pr ? chip("PR", "var(--gold)") : ""}
+        <span style="font-size:12px;color:var(--faint);flex-shrink:0">${esc(fmtShort(c.date))}</span>
+      </button>`).join("")}</div>`;
+  }
+  return out;
+}
+
+/* the switches that mean something for this kind of card */
+function picDetails() {
+  const s = ui.pic;
+  const sw = [];
+  const strengthLift = () => { const k = readKind(s.lift); return !k || k === "strength"; };
+  if (s.mode === "day" || s.mode === "month" || (s.mode === "progress" && strengthLift()))
+    sw.push(picSwitch("weights", T("pic.sw.weights"), T("pic.sw.weightsHint")));
+  if (s.mode === "day" || s.mode === "month") sw.push(picSwitch("tiles", T("pic.sw.tiles")));
+  if (s.mode === "progress") sw.push(picSwitch("chart", T("pic.sw.chart")));
+  if (s.mode === "max" && ["strength", "cardio"].includes(readKind(s.lift) || DEFAULT_KIND)) sw.push(picSwitch("setLine", T("pic.sw.setLine")));
+  if (s.mode === "set") sw.push(picSwitch("e1rm", T("pic.sw.e1rm")));
+  if (s.mode === "records" && s.value === "max") sw.push(picSwitch("total", T("pic.sw.total"), T("pic.sw.totalHint")));
+  if (s.mode !== "month") sw.push(picSwitch("dates", T("pic.sw.date")));
+  if (s.mode !== "max" && s.mode !== "records") sw.push(picSwitch("prs", T("pic.sw.prs")));
+  /* the name goes beside the sentence, never into it: T() would read an
+     underscore in a username as the start of italics */
+  sw.push(picSwitch("name", T("pic.sw.name"), picWho() ? `${T("pic.sw.nameHint")} <b style="color:var(--muted)">${esc(picWho())}</b>` : T("pic.sw.nameNone")));
+  return sw.join("");
+}
+
+function renderPicStudio() {
+  const s = ui.pic;
+  const canShare = picCanShare();
+  const ready = !!picBlob && !s.busy && !s.error;
+  const modes = PIC_MODES.map((m) => [m, T("pic.mode." + m), { day: "clipboard-list", progress: "trending-up", max: "weight", set: "dumbbell", records: "trophy", month: "calendar-days" }[m]]);
+  const liftPhoto = s.mode !== "day" && s.mode !== "month" && s.mode !== "records"
+    ? picSafeSrc(((state.library || []).find((x) => x.name === s.lift) || {}).image) : null;
+  const overPhoto = s.theme === "photo" || s.theme === "clear";
+
+  return fullScreen(112, `
+    <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px;border-bottom:1px solid var(--border-soft)">
+      <button data-action="pic-close" aria-label="${T("pic.close")}" style="color:var(--muted);padding:4px">${icon("x", 21)}</button>
+      <div class="pb-num" style="font-size:19px;font-weight:700;flex:1">${T("pic.title")}</div>
+    </div>
+
+    <div data-pic-preview data-format="${s.format}" style="flex-shrink:0;display:flex;justify-content:center;padding:14px 16px 12px;border-bottom:1px solid var(--border-soft);background:var(--bg)">
+      ${picPreviewInner(s)}
+    </div>
+
+    <div class="pb-scroll" data-scrollkey="pic" style="flex:1;overflow-y:auto;padding:4px 16px calc(120px + var(--pb-sab))">
+      ${picLabel(T("pic.what"))}
+      ${picChoice("pic-mode", s.mode, modes, { scroll: true })}
+      ${picSubject()}
+
+      ${picLabel(T("pic.format"))}
+      ${picChoice("pic-format", s.format, [["story", T("pic.format.story")], ["post", T("pic.format.post")], ["square", T("pic.format.square")]])}
+
+      ${picLabel(T("pic.background"))}
+      <div role="radiogroup" class="pb-scroll" style="display:flex;gap:10px;overflow-x:auto;padding:2px 2px 4px">${PIC_THEMES.map(picThemeSwatch).join("")}</div>
+      ${s.theme === "photo" ? `<div style="display:flex;gap:8px;margin-top:10px">
+          <label class="pb-btn pb-ghost" style="flex:1;padding:10px 0;font-size:13px;cursor:pointer">
+            ${icon("image-plus", 15)} ${s.photo ? T("pic.photoChange") : T("pic.photoPick")}
+            <input type="file" accept="image/*" data-filebind="pic.photo" style="display:none">
+          </label>
+          ${liftPhoto && s.photo !== liftPhoto ? `<button data-action="pic-photo-lift" class="pb-btn pb-ghost" style="flex:1;padding:10px 0;font-size:13px">${icon("dumbbell", 15)} ${T("pic.photoLift")}</button>` : ""}
+        </div>
+        ${s.photo ? `<div style="display:flex;align-items:center;gap:10px;margin:12px 2px 0">
+          <span style="font-size:12.5px;color:var(--muted);flex-shrink:0">${T("pic.dim")}</span>
+          <input class="pb-range" type="range" min="0" max="80" step="5" value="${s.dim}" data-bind="pic.dim" aria-label="${T("pic.dim")}" style="flex:1;min-width:0">
+        </div>` : `<div style="font-size:11.5px;color:var(--faint);line-height:1.45;margin:8px 2px 0">${T("pic.photoHint")}</div>`}` : ""}
+      ${s.theme === "clear" ? `<div style="font-size:11.5px;color:var(--faint);line-height:1.45;margin:8px 2px 0">${T("pic.clearHint")}</div>` : ""}
+
+      ${picLabel(T("pic.accent"))}
+      ${picAccentRow()}
+
+      ${picLabel(T("pic.layout"))}
+      ${picChoice("pic-align", s.align, [["left", T("pic.align.left"), "align-left"], ["center", T("pic.align.center"), "align-center"]])}
+      <div style="height:8px"></div>
+      ${picChoice("pic-pos", s.pos, [["top", T("pic.pos.top")], ["middle", T("pic.pos.middle")], ["bottom", T("pic.pos.bottom")]])}
+      ${overPhoto ? "" : `<div style="font-size:11.5px;color:var(--faint);line-height:1.45;margin:8px 2px 0">${T("pic.posHint")}</div>`}
+
+      ${picLabel(T("pic.headline"))}
+      <input class="pb-input" data-bind="pic.headline" maxlength="40" value="${esc(s.headline)}" placeholder="${T("pic.headlinePlaceholder")}" aria-label="${T("pic.headline")}">
+
+      ${picLabel(T("pic.onIt"))}
+      <div class="pb-card" style="padding:4px 12px">${picDetails()}</div>
+
+      ${picLabel(T("pic.brand"))}
+      ${picChoice("pic-brand", s.brand, [["full", T("pic.brand.full")], ["minimal", T("pic.brand.minimal")]])}
+
+      <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:16px 2px 0">${T("pic.hint")}</div>
+    </div>
+
+    <div data-footer-for="pic" style="position:absolute;bottom:0;left:0;right:0;padding:12px 16px calc(18px + var(--pb-sab));background:linear-gradient(transparent, var(--bg) 30%);display:flex;gap:8px">
+      <button data-action="pic-save" data-pic-out class="pb-btn pb-ghost" ${ready ? "" : "disabled"} style="flex:1;padding:14px 0;font-size:14.5px;opacity:${ready ? 1 : 0.5}">${icon("download", 16)} ${T("pic.save")}</button>
+      <button data-action="pic-share" data-pic-out class="pb-btn pb-gold" ${ready ? "" : "disabled"} style="flex:1.4;padding:14px 0;font-size:15px;opacity:${ready ? 1 : 0.5};${!picBlob || canShare ? "" : "display:none"}">${icon("share-2", 16)} ${T("pic.share")}</button>
+    </div>
+  `, "pic");
+}
+
+/* Open on what was tapped: a day from its card in the log, a lift from
+   its window or the progress graph. Everything else is remembered. */
+function picOpen(mode, ref) {
+  const lifts = picLifts();
+  if (!lifts.length) return;
+  const days = picDays();
+  const p = picPrefs();
+  const date = mode === "day" && days.includes(ref) ? ref : days[0];
+  let lift = ref && lifts.includes(ref) ? ref : null;
+  if (!lift && mode === "day") {
+    const first = (state.log || []).filter((e) => e.date === date && entryHasData(e)).sort((a, b) => a.createdAt - b.createdAt)[0];
+    lift = first ? first.exercise : null;
+  }
+  ui.pic = {
+    ...p, mode: PIC_MODES.includes(mode) ? mode : "progress",
+    lift: lift || lifts[0], date, month: monthOf(date),
+    lifts: picDefaultRecords(), setKey: null, setSort: "best",
+    headline: "", photo: null, error: null, busy: true, alt: "",
+  };
+  render();
+  picBuild();
+}
+
+
 /* ── THE STORAGE CHECK SCREEN ─────────────────────────────────────────
    Settings -> Data -> Storage check. One screen, three questions answered
    in the order somebody standing in front of an empty app asks them: what
@@ -12067,21 +13528,38 @@ function renderPickerList(library) {
       <div style="font-size:11.5px;color:var(--faint);margin-top:10px">${T("pick.quickHint")}</div>
     </div>`;
   }
-  html += groups.filter((g) => match.some((x) => x.muscle === g)).map((g) => `<div style="margin-bottom:14px">
+  /* A family is listed the way the Library lists it: each variation straight
+     under its lift, indented behind the same arrow and called by its own
+     short name, because the lift above it already says what it is a way of
+     doing (nestVariations). It used to be a flat list, so "Lat Pulldown ·
+     Cable, neutral" turned up at the bottom of Back under its whole name, ten
+     rows from the pulldown it belongs to. A variation whose base is NOT in
+     the list (a search or a chip left it out) stays where it was and keeps
+     its full name, since an indented "Cable, neutral" with nothing above it
+     says nothing about what it is. */
+  html += groups.filter((g) => match.some((x) => x.muscle === g)).map((g) => {
+    const rows = match.filter((x) => x.muscle === g);
+    const here = new Set(rows.map((x) => x.id));
+    return `<div style="margin-bottom:14px">
     ${sectionTitle(`<span style="color:${colorFor(g)}">${esc(groupLabel(g))}</span>`)}
     <div class="pb-card" style="overflow:hidden">
-      ${match.filter((x) => x.muscle === g).map((ex, i, arr) => `<div style="display:flex;align-items:center;border-bottom:${i < arr.length - 1 ? "1px solid var(--border-soft)" : "none"}">
-        <button data-action="pick-exercise" data-id="${ex.id}" style="flex:1;min-width:0;display:flex;align-items:center;gap:10px;padding:12px 4px 12px 14px;text-align:left;color:var(--text)">
+      ${nestVariations(rows).map((ex, i, arr) => {
+        const nested = !!(ex.variantOf && here.has(ex.variantOf));
+        return `<div style="display:flex;align-items:center;border-bottom:${i < arr.length - 1 ? "1px solid var(--border-soft)" : "none"}">
+        <button data-action="pick-exercise" data-id="${ex.id}" style="flex:1;min-width:0;display:flex;align-items:center;gap:10px;padding:12px 4px 12px ${nested ? 30 : 14}px;text-align:left;color:var(--text)">
+          ${nested ? icon("corner-down-right", 13, 'style="color:var(--faint);flex-shrink:0;margin-right:-2px"') : ""}
           <div style="flex:1;min-width:0">
-            <div style="font-weight:600;font-size:14px">${esc(exLabelOf(ex))}</div>
+            <div style="font-weight:600;font-size:14px">${nested ? esc(ex.variantName || exLabelOf(ex)) : esc(exLabelOf(ex))}</div>
             <div style="font-size:11.5px;color:var(--faint)">${esc(exFieldOf(ex, "equipment"))}</div>
           </div>
           ${icon("plus", 16, 'style="color:var(--gold);flex-shrink:0"')}
         </button>
         <button data-action="open-exercise-window" data-name="${esc(ex.name)}" title="${T("log.exerciseDetails")}" style="flex-shrink:0;padding:12px 14px;color:var(--faint);align-self:stretch">${icon("info", 16)}</button>
-      </div>`).join("")}
+      </div>`;
+      }).join("")}
     </div>
-  </div>`).join("");
+  </div>`;
+  }).join("");
   return html;
 }
 
@@ -13463,11 +14941,15 @@ const volumeOf = (t) => {
    people are already used to */
 const SOUND_CEILING = 0.4;
 
+/* Returns what it scheduled, {nodes, end} on the audio clock, so a chime
+   started behind a hidden page can be called off if it never got out (see
+   dropHeldChime). Nothing else needs the answer. */
 function playSound(id, volume = DEFAULT_VOLUME) {
   unlockAudio();
   const notes = SOUND_LIB[id] || SOUND_LIB[DEFAULT_SOUND];
   const vol = Math.max(0, Math.min(1, volume));
-  if (!audioCtx || vol <= 0) return;          // muted is a real choice, honour it
+  if (!audioCtx || vol <= 0) return null;     // muted is a real choice, honour it
+  const out = { nodes: [], end: 0 };
   try {
     const t0 = audioCtx.currentTime + 0.02;
     for (const [at, f, dur, type, g, glide] of notes) {
@@ -13481,8 +14963,11 @@ function playSound(id, volume = DEFAULT_VOLUME) {
       gain.gain.exponentialRampToValueAtTime(0.0001, t0 + at + dur);
       osc.connect(gain); gain.connect(audioCtx.destination);
       osc.start(t0 + at); osc.stop(t0 + at + dur + 0.02);
+      out.nodes.push(osc);
+      out.end = Math.max(out.end, t0 + at + dur + 0.02);
     }
   } catch { /* ignore, a missing chime never blocks a workout */ }
+  return out;
 }
 
 /* The page's own notification for a timer that ran out while it was still
@@ -13594,15 +15079,73 @@ function timerNotifsTidy() {
   } catch { /* nothing to close */ }
 }
 
+/* ── A REST IS ANNOUNCED ONCE, BY WHOEVER WAS THERE WHEN IT RAN OUT ────
+   It used to ring twice. Lock the phone mid-rest, the page is frozen, the
+   server's push rings at the deadline — and then you open the app, the
+   page wakes, finds the rest overdue, and fireTimer buzzes and chimes all
+   over again at somebody who has just tapped the notification that told
+   them. Once outside, once inside, for the same rest.
+
+   So fireTimer asks where the app was at the deadline, not only whether
+   the deadline has passed, and there are three answers.
+
+   ON SCREEN AT THE DEADLINE: the page was there, so it is the alarm, as it
+   always was: buzz, chime, the shade if nobody is focused, and the server's
+   copy called off on the way past (PUSH_GRACE_MS is what makes that a race
+   the page wins).
+
+   COME BACK TO IT AFTERWARDS (visibleSince is later than the deadline, or
+   the app has just come into view and the visibility event has not even
+   landed yet): somebody is looking at the app right now, and the rest is
+   already over. If a push was booked it has spoken; if none was, there was
+   nothing outside to hear anyway and the person is now looking at the
+   banner. Either way a sound now is news to nobody, so it is SILENT: the
+   banner and the Done state say it, and the server's copy is still called
+   off, in case it is about to land on top of them. Launching the app after
+   the OS killed it is the same case, which is why visibleSince starts at
+   load.
+
+   STILL AWAY, AND LATE: a throttled background page that only got round to
+   it after the server's own deadline. Where a push was booked it is ringing
+   or has rung, so the page says nothing and, unlike above, leaves the push
+   alone: calling it off now could land a moment before it fires and leave
+   the rest announced by nobody. Where none was booked the page is the only
+   alarm there is, late or not, and goes off as it always did.
+
+   And a chime started while hidden that the audio never played (iOS
+   suspends the context in the background, and a suspended context plays
+   its queue the moment it resumes) is called off when the app comes back,
+   rather than going off in the hand of somebody who already knows. */
+let visibleSince = document.hidden ? null : Date.now();
+let heldChime = null;   // {nodes, end} of a chime started while hidden
+
+function dropHeldChime() {
+  const h = heldChime;
+  heldChime = null;
+  if (!h || !audioCtx || audioCtx.currentTime >= h.end) return;
+  for (const n of h.nodes) { try { n.stop(0); n.disconnect(); } catch { /* already done */ } }
+}
+
 function fireTimer(t) {
-  /* We got here, so the page was alive to do it: the server's copy has
-     nothing left to say and is handed back before it can say it. This is
-     what PUSH_GRACE_MS buys the time for. */
-  cloudTimerCancel(t);
+  const over = Date.now() - t.endsAt;
+  const hidden = document.hidden;
+  const cameBack = !hidden && !(visibleSince != null && visibleSince <= t.endsAt);
+  const pushHasIt = hidden && !!t.cloudId && over >= PUSH_GRACE_MS;
+  /* We got here first, so the server's copy has nothing left to say and is
+     handed back before it can say it — unless it is the one saying it. */
+  if (!pushHasIt) cloudTimerCancel(t);
   t.endsAt = null; t.remaining = null; t.doneAt = Date.now();
-  try { if (navigator.vibrate) navigator.vibrate([250, 120, 250, 120, 400]); } catch { /* ignore */ }
-  playSound(soundOf(t), volumeOf(t));
-  notifyDone(t);
+  if (!cameBack && !pushHasIt) {
+    if (!hidden) {
+      try { if (navigator.vibrate) navigator.vibrate([250, 120, 250, 120, 400]); } catch { /* ignore */ }
+      playSound(soundOf(t), volumeOf(t));
+    } else if (audioCtx && audioCtx.state === "running") {
+      /* only if the audio is really going: a suspended context would hold
+         these notes and play them on the way back in */
+      heldChime = playSound(soundOf(t), volumeOf(t));
+    }
+    notifyDone(t);
+  }
   ui.timerToast = { id: t.id, name: timerLabel(t) || T("timers.listTitle") };
 }
 
@@ -13647,6 +15190,9 @@ function startTimerEngine() {
    And tidy the shade both ways: coming back, and going, which is the moment
    somebody is about to look at the app's icon on the home screen. */
 document.addEventListener("visibilitychange", () => {
+  /* first, so the sweep below knows this is somebody coming back to it */
+  if (document.hidden) visibleSince = null;
+  else { visibleSince = Date.now(); dropHeldChime(); }
   if (!document.hidden && sweepTimers()) render();
   timerNotifsTidy();
 });
@@ -15405,6 +16951,86 @@ const unloggedWith = (date, entries, alsoDrop = null) => {
   const rest = (state.unlogged || []).filter((u) => u.date !== date && u.date !== alsoDrop);
   return entries.length ? [...rest, { date, entries: clone(entries), savedAt: Date.now() }] : rest;
 };
+
+/* ── AN UNFINISHED WORKOUT SAYS SO ────────────────────────────────────
+   Saving is not saying you are done (see prunePlans), and a saved day can
+   still be holding lifts with no numbers in them in three places: a row
+   unticked back to nothing (entry.notDone), the rest of a plan the day
+   started (startedOn), and the lifts it was saved without logging
+   (state.unlogged). Edit-day deals all three back into the sheet. What
+   nothing did was SAY so: the history drew the day as if it were over, so
+   a session saved after the first lift looked exactly like a finished one,
+   and the lifts still waiting were only found by opening the day.
+
+   So the day says it wherever a day is drawn: a chip on the history card
+   and the calendar's day card naming how many are still to log, the lifts
+   themselves listed under it, a mark on the month grid, and, for today, a
+   card on Home and a ring on the Log tab. One answer, read here, so those
+   can never disagree about what "unfinished" means.
+
+   It is a count of lifts and never a verdict. A planned lift you did three
+   of four sets on is not in it: it HAS numbers, the plan line on the row
+   already says 3/4, and an indicator nothing could ever clear would only
+   teach people to ignore it. Everything this counts has a way out — fill
+   it in, or bin it — which is the test for being on it at all.
+
+   NOTHING HERE IS COUNTED toward anything, exactly as before: this reads
+   the three stores and writes none of them. */
+/* `rows` is the day's rows of the log when the caller already has them
+   (the history groups the log by date anyway), so drawing a long history
+   is not one pass over the whole log per day */
+function dayLeftovers(date, rows) {
+  const day = rows || state.log.filter((e) => e.date === date);
+  const notDone = day.filter((e) => !entryHasData(e)).sort((a, b) => a.createdAt - b.createdAt);
+  const carried = (state.plans || [])
+    .filter((p) => p.startedOn === date)
+    .flatMap((p) => p.entries || []);
+  /* unloggedOn's own rule, against the rows in hand */
+  const u = (state.unlogged || []).find((x) => x.date === date);
+  const waiting = u ? stillOutstanding(u.entries || [], new Set(day.map((e) => e.exercise))) : [];
+  /* the ones not already drawn as a row of the day */
+  const unseen = [...carried, ...waiting];
+  return { notDone, unseen, count: notDone.length + unseen.length };
+}
+
+/* Today's workout, if it is not finished: a day parked half-built (not
+   saved at all, so nothing in it counts yet), or a saved day still holding
+   lifts with no numbers. Null when there is nothing to finish. */
+function todayUnfinished() {
+  const date = todayStr();
+  const parked = (state.dayDrafts || []).find((d) => d.date === date);
+  if (parked) {
+    const exs = parked.entries || [];
+    return { date, parked, done: exs.filter(entryHasData).length, total: exs.length,
+             left: exs.filter((e) => !entryHasData(e)) };
+  }
+  if (!state.log.some((e) => e.date === date)) return null;
+  const lo = dayLeftovers(date);
+  if (!lo.count) return null;
+  const done = state.log.filter((e) => e.date === date && entryHasData(e)).length;
+  return { date, parked: null, done, total: done + lo.count, left: [...lo.notDone, ...lo.unseen] };
+}
+
+/* date → true for every day a saved workout still owes lifts on, the
+   calendar's mark; the parked days get theirs from dayDrafts directly */
+function leftoverDays() {
+  const out = {};
+  for (const e of state.log) if (!entryHasData(e)) out[e.date] = true;
+  for (const p of state.plans || []) if (p.startedOn && (p.entries || []).length) out[p.startedOn] = true;
+  for (const u of state.unlogged || []) if (!out[u.date] && unloggedOn(u.date).length) out[u.date] = true;
+  /* a waiting row with no day under it is not a workout anybody can open */
+  const logged = new Set(state.log.map((e) => e.date));
+  for (const d of Object.keys(out)) if (!logged.has(d)) delete out[d];
+  for (const d of state.dayDrafts || []) out[d.date] = true;
+  return out;
+}
+
+/* "Calf Raise · Leg Curl · +2", the lifts still waiting, for one line */
+function leftoverNames(entries, max = 3) {
+  const names = [...new Set((entries || []).map((e) => exLabel(e.exercise)))];
+  const shown = names.slice(0, max).map(esc).join(" · ");
+  return names.length > max ? `${shown} · +${names.length - max}` : shown;
+}
 
 function commitWorkout(draft) {
   if (draft && draft.planning) return commitPlan(draft);
@@ -17609,6 +19235,76 @@ const actions = {
     writeNow(); render();
   },
   "toast-open": () => { ui.timerToast = null; ui.tab = "timer"; resetTransient(); render(); },
+  /* ── a picture of what you did (see picOpen) ──────────────────────── */
+  "pic-open": (el) => picOpen(el.dataset.mode, el.dataset.ref),
+  "pic-close": () => { picClose(); render(); },
+  "pic-mode": (el) => { const s = ui.pic; if (!s || !PIC_MODES.includes(el.dataset.id)) return; s.mode = el.dataset.id; s.error = null; render(); picBuild(); },
+  /* the choices that are a TASTE are remembered on the device; the ones
+     that say what this card is about are not */
+  ...Object.fromEntries([["pic-format", "format"], ["pic-accent", "accent"], ["pic-align", "align"], ["pic-pos", "pos"],
+    ["pic-brand", "brand"], ["pic-detail", "detail"], ["pic-value", "value"], ["pic-range", "range"]].map(([action, key]) =>
+    [action, (el) => {
+      const s = ui.pic;
+      if (!s || !PIC_ONE_OF[key].includes(el.dataset.id)) return;
+      s[key] = el.dataset.id;
+      picKeepPrefs(); render(); picBuild();
+    }])),
+  "pic-theme": (el) => {
+    const s = ui.pic;
+    if (!s || !PIC_THEMES.includes(el.dataset.id)) return;
+    s.theme = el.dataset.id;
+    /* a photo card with no photo yet starts on the lift's own, if it has one */
+    if (s.theme === "photo" && !picSafeSrc(s.photo)) {
+      const ex = (state.library || []).find((x) => x.name === s.lift);
+      const own = s.mode !== "day" && s.mode !== "month" && s.mode !== "records" && ex ? picSafeSrc(ex.image) : null;
+      if (own) s.photo = own;
+    }
+    /* words over a picture sit at the foot unless somebody said otherwise */
+    if ((s.theme === "photo" || s.theme === "clear") && s.pos === "top") s.pos = "bottom";
+    picKeepPrefs(); render(); picBuild();
+  },
+  "pic-toggle": (el) => {
+    const s = ui.pic, k = el.dataset.id;
+    if (!s || !PIC_SWITCHES.includes(k)) return;
+    s[k] = !s[k];
+    picKeepPrefs(); render(); picBuild();
+  },
+  "pic-set-sort": (el) => { const s = ui.pic; if (!s || !["best", "recent"].includes(el.dataset.id)) return; s.setSort = el.dataset.id; render(); },
+  "pic-set": (el) => { const s = ui.pic; if (!s) return; s.setKey = el.dataset.id; render(); picBuild(); },
+  "pic-lift-toggle": (el) => {
+    const s = ui.pic, n = el.dataset.name;
+    if (!s || !picLifts().includes(n)) return;
+    if (s.lifts.includes(n)) s.lifts = s.lifts.filter((x) => x !== n);
+    else if (s.lifts.length < PIC_RECORDS_MAX) s.lifts = [...s.lifts, n];
+    render(); picBuild();
+  },
+  "pic-photo-lift": () => {
+    const s = ui.pic;
+    const ex = s && (state.library || []).find((x) => x.name === s.lift);
+    const own = ex ? picSafeSrc(ex.image) : null;
+    if (!own) return;
+    s.photo = own; s.theme = "photo";
+    render(); picBuild();
+  },
+  "pic-save": () => picDownload(),
+  /* Nothing awaited before navigator.share: the browser only opens its
+     sheet from inside the tap (see shareFile), which is why the picture is
+     kept built rather than made here. A dismissed sheet is an answer;
+     anything else falls back to the download. */
+  "pic-share": () => {
+    const s = ui.pic;
+    if (!s || !picBlob || s.busy) return;
+    if (!picCanShare()) { picDownload(); return; }
+    const file = new File([picBlob], picFileName(s), { type: picBlob.type });
+    let p;
+    try { p = navigator.share({ files: [file], text: (s.alt ? s.alt + " · " : "") + appBaseUrl() }); }
+    catch (e) { console.error("share failed", e); picDownload(); return; }
+    if (p && p.catch) p.catch((e) => {
+      if (e && (e.name === "AbortError" || e.name === "NotAllowedError")) return;
+      console.error("share failed", e);
+      picDownload();
+    });
+  },
   /* Scrapping a lift that is waiting to be logged. No confirm: it holds no
      numbers, so there is nothing to lose and nothing to undo, which is exactly
      the rule the entry form's own bin follows for a draft entry (this is the
@@ -17774,6 +19470,11 @@ const READ_OK = new Set([
   /* dismiss-new is NOT here: it writes the library row, which is training,
      and on somebody else's profile the next pull would simply put it back */
   "export-data", "share-data", "toast-dismiss", "toast-open",
+  /* a picture of the log is a way of looking at it, and nothing in it is
+     written to `state` (the remembered look is the device's) */
+  "pic-open", "pic-close", "pic-mode", "pic-format", "pic-accent", "pic-align", "pic-pos", "pic-brand",
+  "pic-detail", "pic-value", "pic-range", "pic-theme", "pic-toggle", "pic-set-sort", "pic-set",
+  "pic-lift-toggle", "pic-photo-lift", "pic-save", "pic-share",
   "timer-start", "timer-pause", "timer-reset", "timer-sound-test", "timer-add", "timer-edit",
   "timer-save", "timer-delete", "timer-pin", "timer-form-pin", "timer-reorder", "timer-preset",
   "timer-sound",
@@ -17858,6 +19559,17 @@ function handleBind(el) {
       const btn = document.getElementById("attachSaveBtn");
       if (btn) { const ok = !!v.trim(); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
     }
+  } else if (bind.startsWith("pic.")) {
+    /* the picture window's fields. The ones that change what the card is
+       about re-render the window; the headline and the dim slider only
+       rebuild the picture, so the caret and the finger stay where they are */
+    const s = ui.pic;
+    if (!s) return;
+    if (bind === "pic.headline") { s.headline = String(v).slice(0, 40); picSoon(260); }
+    else if (bind === "pic.dim") { s.dim = Math.max(0, Math.min(80, Math.round(+v || 0))); picKeepPrefs(); picSoon(60); }
+    else if (bind === "pic.lift" && picLifts().includes(v)) { s.lift = v; s.setKey = null; render(); picBuild(); }
+    else if (bind === "pic.date" && picDays().includes(v)) { s.date = v; render(); picBuild(); }
+    else if (bind === "pic.month" && picMonths().includes(v)) { s.month = v; render(); picBuild(); }
   } else if (bind === "chatFind") {
     /* Lower-cased as it is typed, for the reason `acctName` gives: it is
        compared as `username_lc` anyway, and a name that reads back
@@ -18155,7 +19867,7 @@ document.addEventListener("change", (e) => {
      chose, the only honest way to pick one */
   if (e.target.matches("input[type=range]")) {
     handleBind(e.target);
-    if (ui.timerForm) playSound(soundOf(ui.timerForm.t), volumeOf(ui.timerForm.t));
+    if (ui.timerForm && e.target.dataset.bind === "timer.volume") playSound(soundOf(ui.timerForm.t), volumeOf(ui.timerForm.t));
     return;
   }
   if (e.target.matches("select, input[type=date], input[type=color]")) handleBind(e.target);
@@ -18181,6 +19893,17 @@ function handleFile(el) {
     ui.chatAttach = null;
     render();
     readImageScaled(file, (dataUrl, dim) => chatSendPhoto(threadId, dataUrl, dim), { max: 1280 });
+  } else if (el.dataset.filebind === "pic.photo" && ui.pic) {
+    /* read into memory and nowhere else: it is somebody's own photo, and it
+       goes only where they send the picture */
+    const s = ui.pic;
+    readImageScaled(file, (dataUrl) => {
+      if (ui.pic !== s) return;
+      if (!picSafeSrc(dataUrl)) { s.error = T("pic.photoBad"); render(); return; }
+      s.photo = dataUrl; s.theme = "photo";
+      if (s.pos === "top") s.pos = "bottom";
+      picKeepPrefs(); render(); picBuild();
+    }, { max: 1600, quality: 0.86 });
   } else if (el.dataset.filebind === "backup") {
     const r = new FileReader();
     r.onload = () => importBackup(String(r.result || ""));

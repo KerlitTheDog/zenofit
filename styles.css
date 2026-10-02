@@ -331,3 +331,14 @@ input[type="date"].pb-input::-webkit-date-and-time-value{
     font-size:18px; font-weight:600; letter-spacing:.01em; line-height:1.4;
   }
 }
+
+/* ── WHERE THE KEYBOARD IS ─────────────────────────────────────────────
+   A visible ring on whatever has keyboard focus, and only keyboard focus
+   (:focus-visible), so a tap never leaves a ring behind but somebody
+   tabbing through with a keyboard, a switch or a screen reader can always
+   see where they are. */
+button:focus-visible, label:has(> input[type="file"]:focus-visible), [role="switch"]:focus-visible, [role="tab"]:focus-visible,
+a:focus-visible, select:focus-visible, .pb-chip:focus-visible{
+  outline:2px solid var(--gold); outline-offset:2px; border-radius:10px;
+}
+.pb-input:focus-visible{ outline:none; }

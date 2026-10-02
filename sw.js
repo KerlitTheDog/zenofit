@@ -8,7 +8,7 @@
    Scope note: this file must stay in the repo root. A service worker can only
    control pages at or below its own URL, and the app lives at /zenofit/.       */
 
-const VERSION = "zenofit-v33";
+const VERSION = "zenofit-v34";
 /* Fetched photos, keyed by id (see the PHOTOS block in app.js). Not part of
    the shell and not versioned with it: a photo's id IS its content, so a
    new build has nothing to invalidate, and clearing it on every deploy
@@ -95,8 +95,14 @@ self.addEventListener("fetch", (e) => {
   if (url.origin !== self.location.origin) return;
   const shell = SHELL_URLS.has(url.href);
 
+  /* The app opened by a link with something on it (a friend's invite,
+     `?invite=…`) is still the app: the page is the same file whatever the
+     query says, so a navigation is answered from the cached shell with the
+     query ignored. Without this an invite opened with no signal was a dead
+     page. */
+  const nav = req.mode === "navigate";
   const work = caches.open(VERSION).then((cache) =>
-    cache.match(req).then((hit) => {
+    cache.match(req, nav ? { ignoreSearch: true } : undefined).then((hit) => {
       /* cloned now: the hit itself is handed to the page and read there */
       const served = hit && shell ? hit.clone() : null;
       /* A shell file is asked for with `no-cache`, which is a conditional
@@ -108,8 +114,11 @@ self.addEventListener("fetch", (e) => {
         .then(async (res) => {
           if (res && res.ok) {
             if (served && !(await sameBytes(served, res.clone()))) tellWindows({ type: "shell-updated" });
-            try { await cache.put(req, res.clone()); }
-            catch { /* no copy kept this time; the response is still good */ }
+            /* a page with a query on it is the same page: not kept twice */
+            if (!(nav && url.search)) {
+              try { await cache.put(req, res.clone()); }
+              catch { /* no copy kept this time; the response is still good */ }
+            }
           }
           return res;
         })

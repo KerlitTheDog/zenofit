@@ -346,6 +346,44 @@ later = [x["updatedAt"] for x in b.get("items", []) if x["itemId"] == "later"]
 check("a later push is stamped after all of it", later and later[0] > first_max, (later, first_max))
 call("DELETE", "/v1/profiles/" + P5, token=owner)
 
+print("\n== a trainer's glance (GET /v1/profiles/activity) ==")
+# For every profile shared WITH the caller: the last day anything was
+# logged, and on how many days since `since`. Dates only, only for a live
+# grant, and a lined-up row with nothing in it is not a session.
+P6 = call("POST", "/v1/profiles", token=owner, body={"name": "Coached"})[1]["profileId"]
+s, rs6 = call("POST", "/v1/profiles/%s/seeds" % P6, token=owner, body={"level": "read"})
+coach, _ = device("coach")
+call("POST", "/v1/join", token=coach, body={"seed": rs6["seed"]})
+call("POST", "/v1/profiles/%s/items" % P6, token=owner, body={"items": [
+    item("log", "a1", {"date": "2026-03-02", "exercise": "Squat", "sets": 3, "reps": 5, "weight": 100}),
+    item("log", "a2", {"date": "2026-03-05", "exercise": "Bench", "sets": 2, "reps": 8, "weight": 60}),
+    item("log", "a3", {"date": "2026-03-05", "exercise": "Row", "sets": 3, "reps": 10, "weight": 50}),
+    item("log", "a4", {"date": "2026-03-06", "exercise": "Bike", "minutes": 20, "intensity": 6}),
+    # lined up and never done: not a session
+    item("log", "a5", {"date": "2026-03-09", "exercise": "Curl", "sets": "", "reps": "", "weight": ""}),
+    # logged and then deleted: not a session either
+    item("log", "a6", {"date": "2026-03-10", "exercise": "Press", "sets": 3, "reps": 5, "weight": 40}),
+]})
+call("POST", "/v1/profiles/%s/items" % P6, token=owner, body={"items": [{"collection": "log", "itemId": "a6", "deleted": True}]})
+s, b = call("GET", "/v1/profiles/activity?since=2026-03-04", token=coach)
+row = next((a for a in b.get("activity", []) if a.get("profileId") == P6), None)
+check("activity answers for a profile shared with you", s == 200 and row is not None, (s, b))
+check("its last day is the last day something was done", row and row.get("lastDay") == "2026-03-06", row)
+check("and it counts the distinct days since `since`", row and row.get("days") == 2, row)
+check("`since` is echoed", b.get("since") == "2026-03-04", b)
+s, b = call("GET", "/v1/profiles/activity?since=2026-03-04", token=outsider)
+check("nobody outside the share hears about it", s == 200 and not any(a.get("profileId") == P6 for a in b.get("activity", [])), (s, b))
+s, b = call("GET", "/v1/profiles/activity", token=owner)
+check("the owner's own profile is not 'shared with you'", s == 200 and not any(a.get("profileId") == P6 for a in b.get("activity", [])), (s, b))
+s, b = call("GET", "/v1/profiles/activity?since=nonsense';--", token=coach)
+check("a malformed `since` falls back to a week ago", s == 200 and len(b.get("since", "")) == 10 and b["since"] != "nonsense", (s, b))
+s, b = call("GET", "/v1/profiles/activity", token=None)
+check("it needs an account", s == 401, (s, b))
+call("DELETE", "/v1/profiles/%s/grants/me" % P6, token=coach)
+s, b = call("GET", "/v1/profiles/activity?since=2026-03-04", token=coach)
+check("leaving the share takes it off the list", s == 200 and not any(a.get("profileId") == P6 for a in b.get("activity", [])), (s, b))
+call("DELETE", "/v1/profiles/" + P6, token=owner)
+
 call("DELETE", "/v1/profiles/" + PID, token=owner)
 call("DELETE", "/v1/profiles/" + P2, token=owner)
 

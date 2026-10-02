@@ -664,6 +664,11 @@
   const blockUser    = (userId) => call("POST", "/v1/chats/blocks", { userId });
   const unblockUser  = (userId) => call("DELETE", "/v1/chats/blocks/" + userId);
 
+  /* When each profile shared WITH you was last trained, and on how many of
+     the last seven days — a trainer's glance over the people they coach,
+     without opening each one (GET /v1/profiles/activity). */
+  const sharedActivity = (since) => call("GET", "/v1/profiles/activity?since=" + encodeURIComponent(since || ""));
+
   window.ZenofitCloud = {
     API,
     ensureDevice, hasDevice,
@@ -679,6 +684,7 @@
     listGrants, revokeGrant, setGrantLevel, leaveProfile,
     searchUsers, listChats, openChat, fetchMessages, sendMessage, unsendMessage, uploadChatPhoto, discardChatPhoto,
     markChatRead, muteChat, leaveChat, listBlocks, blockUser, unblockUser,
+    sharedActivity,
     _call: call,
   };
 })();

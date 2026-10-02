@@ -63,14 +63,23 @@ const emphasize = (s) => String(s)
 
 /* The one function the app calls. Missing keys fall back to English, then
    to the key itself, so a half-finished translation degrades quietly
-   instead of blanking the screen. */
+   instead of blanking the screen.
+
+   The emphasis is read off the TEMPLATE, before anything is put into it.
+   The other way round read the values as markup too: a username may hold
+   underscores, so "kerlit_the_dog invited you" came out as kerlit<i>the</i>dog,
+   and a name with two asterisks in it grew a <b style="…"> whose quotes
+   end any attribute it is printed inside. What a person typed is text;
+   only what a translator wrote is markup. (No placeholder has an
+   underscore in its name, which is what keeps this order safe.) */
 function T(key, vars) {
   const lang = resolveLang(typeof state !== "undefined" && state && state.settings && state.settings.lang);
   let s = (UI[lang] && UI[lang][key]);
   if (s == null) s = UI.en[key];
   if (s == null) return key;
+  s = emphasize(s);
   if (vars) for (const k in vars) s = s.split("{" + k + "}").join(vars[k]);
-  return emphasize(s);
+  return s;
 }
 
 /* Plural picking: English-style (one / other) for en+sv, Slavic
@@ -1494,6 +1503,41 @@ UI.en = {
   "profile.importBad": "That file is not a Zenofit backup, or it is damaged. Nothing was changed.",
   "profile.importOk": "Restored: {what}.",
   "profile.confirmReset": "Reset ALL data, workouts, library changes, goals, measurements and settings? This cannot be undone.",
+
+  /* ── the week at a glance, the spreadsheet, coaching at a glance,
+     invites, a shared picture, and what a screen reader hears ── */
+  "a11y.back": "Back",
+  "a11y.close": "Close",
+  "a11y.next": "Next",
+  "a11y.prev": "Previous",
+  "a11y.settings": "Settings",
+  "a11y.clearSearch": "Clear search",
+  "a11y.tabs": "Sections",
+  "a11y.timerRunning": "a timer is running",
+  "a11y.unreadN.one": "{n} unread message",
+  "a11y.unreadN.other": "{n} unread messages",
+  "link.invited": "*{name}* invited you to train together on Zenofit. Log in or create an account and your conversation opens.",
+  "invite.button": "Invite a friend",
+  "invite.hint": "Sends a link. Once they're in, your conversation opens on its own.",
+  "invite.text": "Train with me on Zenofit",
+  "invite.copied": "Link copied",
+  "week.thisWeek": "This week",
+  "week.last7": "Last 7 days",
+  "week.trained": "trained",
+  "week.planned": "planned",
+  "week.sessionsN.one": "{n} session",
+  "week.sessionsN.other": "{n} sessions",
+  "week.streakN.one": "{n} week in a row",
+  "week.streakN.other": "{n} weeks in a row",
+  "csv.export": "Spreadsheet (CSV)",
+  "csv.hint": "Every set as a row, for Excel, Google Sheets or your coach. For reading only: restoring always uses the backup file.",
+  "coach.last": "Trained {d}",
+  "coach.today": "Trained today",
+  "coach.never": "Nothing logged yet",
+  "coach.daysN.one": "{n} day this week",
+  "coach.daysN.other": "{n} days this week",
+  "acc.share.title": "What goes on a picture I share?",
+  "acc.share.body": "Only what is in your log: the lifts, sets, best sets, records, est. 1RMs and weight moved (reps × weight, in your unit), for the day, lift, set, month or records you chose. Switch off *Weights* to share without any kilos, and *Dates* or *Your name* to leave those off too. A total is the est. 1RMs added up, and says so.<br><br>The picture is drawn on your phone and nothing is uploaded: it only goes where you send it. A photo you put behind it stays on your phone as well. How you set the picture up is remembered on this phone, not in your profile.",
 };
 
 /* ═══════════════════════════ УКРАЇНСЬКА ════════════════════════════════ */
@@ -2711,6 +2755,45 @@ UI.uk = {
   "profile.importBad": "Це не резервна копія Zenofit або файл пошкоджено. Нічого не змінено.",
   "profile.importOk": "Відновлено: {what}.",
   "profile.confirmReset": "Скинути ВСІ дані (тренування, зміни в бібліотеці, цілі, заміри й налаштування)? Це не можна скасувати.",
+
+  /* ── the week at a glance, the spreadsheet, coaching at a glance,
+     invites, a shared picture, and what a screen reader hears ── */
+  "a11y.back": "Назад",
+  "a11y.close": "Закрити",
+  "a11y.next": "Далі",
+  "a11y.prev": "Назад",
+  "a11y.settings": "Налаштування",
+  "a11y.clearSearch": "Очистити пошук",
+  "a11y.tabs": "Розділи",
+  "a11y.timerRunning": "таймер працює",
+  "a11y.unreadN.one": "{n} непрочитане повідомлення",
+  "a11y.unreadN.few": "{n} непрочитані повідомлення",
+  "a11y.unreadN.many": "{n} непрочитаних повідомлень",
+  "link.invited": "*{name}* запрошує вас тренуватися разом у Zenofit. Увійдіть або створіть обліковий запис, і ваша розмова відкриється.",
+  "invite.button": "Запросити друга",
+  "invite.hint": "Надсилає посилання. Щойно друг зареєструється, ваша розмова відкриється сама.",
+  "invite.text": "Тренуйся зі мною в Zenofit",
+  "invite.copied": "Посилання скопійовано",
+  "week.thisWeek": "Цей тиждень",
+  "week.last7": "Останні 7 днів",
+  "week.trained": "тренування",
+  "week.planned": "заплановано",
+  "week.sessionsN.one": "{n} тренування",
+  "week.sessionsN.few": "{n} тренування",
+  "week.sessionsN.many": "{n} тренувань",
+  "week.streakN.one": "{n} тиждень поспіль",
+  "week.streakN.few": "{n} тижні поспіль",
+  "week.streakN.many": "{n} тижнів поспіль",
+  "csv.export": "Таблиця (CSV)",
+  "csv.hint": "Кожен підхід окремим рядком, для Excel, Google Таблиць або вашого тренера. Лише для читання: відновлення завжди використовує файл резервної копії.",
+  "coach.last": "Тренування {d}",
+  "coach.today": "Тренування сьогодні",
+  "coach.never": "Ще нічого не записано",
+  "coach.daysN.one": "{n} день цього тижня",
+  "coach.daysN.few": "{n} дні цього тижня",
+  "coach.daysN.many": "{n} днів цього тижня",
+  "acc.share.title": "Що потрапляє на зображення, яким я ділюся?",
+  "acc.share.body": "Лише те, що є у вашому журналі: вправи, підходи, найкращі підходи, рекорди, оціночні 1ПМ і піднята вага (повторення × вага, у ваших одиницях) за обраний день, вправу, підхід, місяць чи рекорди. Вимкніть *Ваги*, щоб поділитися без жодних кілограмів, а *Дати* чи *Ваше ім'я* — щоб прибрати і їх. Сума — це оціночні 1ПМ разом, і так і підписана.<br><br>Зображення малюється на вашому телефоні, нічого не завантажується: воно потрапляє лише туди, куди ви його надішлете. Фото, яке ви підставите тлом, теж лишається на телефоні. Ваші налаштування зображення запам'ятовуються на цьому телефоні, а не в профілі.",
 };
 
 /* ═══════════════════════════ SVENSKA ═══════════════════════════════════ */
@@ -3914,6 +3997,41 @@ UI.sv = {
   "profile.importBad": "Filen är ingen Zenofit-säkerhetskopia, eller så är den skadad. Inget ändrades.",
   "profile.importOk": "Återställt: {what}.",
   "profile.confirmReset": "Nollställa ALL data, pass, biblioteksändringar, mål, mått och inställningar? Det går inte att ångra.",
+
+  /* ── the week at a glance, the spreadsheet, coaching at a glance,
+     invites, a shared picture, and what a screen reader hears ── */
+  "a11y.back": "Tillbaka",
+  "a11y.close": "Stäng",
+  "a11y.next": "Nästa",
+  "a11y.prev": "Föregående",
+  "a11y.settings": "Inställningar",
+  "a11y.clearSearch": "Rensa sökningen",
+  "a11y.tabs": "Avsnitt",
+  "a11y.timerRunning": "en timer är igång",
+  "a11y.unreadN.one": "{n} oläst meddelande",
+  "a11y.unreadN.other": "{n} olästa meddelanden",
+  "link.invited": "*{name}* har bjudit in dig att träna tillsammans på Zenofit. Logga in eller skapa ett konto så öppnas er konversation.",
+  "invite.button": "Bjud in en vän",
+  "invite.hint": "Skickar en länk. När de är inne öppnas er konversation av sig själv.",
+  "invite.text": "Träna med mig på Zenofit",
+  "invite.copied": "Länken kopierad",
+  "week.thisWeek": "Den här veckan",
+  "week.last7": "Senaste 7 dagarna",
+  "week.trained": "tränat",
+  "week.planned": "planerat",
+  "week.sessionsN.one": "{n} pass",
+  "week.sessionsN.other": "{n} pass",
+  "week.streakN.one": "{n} vecka i rad",
+  "week.streakN.other": "{n} veckor i rad",
+  "csv.export": "Kalkylblad (CSV)",
+  "csv.hint": "Varje set som en rad, för Excel, Google Kalkylark eller din tränare. Bara för att läsa: en återställning använder alltid backupfilen.",
+  "coach.last": "Tränade {d}",
+  "coach.today": "Tränade i dag",
+  "coach.never": "Inget loggat än",
+  "coach.daysN.one": "{n} dag den här veckan",
+  "coach.daysN.other": "{n} dagar den här veckan",
+  "acc.share.title": "Vad hamnar på en bild jag delar?",
+  "acc.share.body": "Bara det som står i din logg: övningarna, seten, bästa seten, rekorden, uppskattade 1RM och vikt lyft (reps × vikt, i din enhet), för den dag, övning, set, månad eller de rekord du valde. Stäng av *Vikter* för att dela utan några kilo, och *Datum* eller *Ditt namn* för att lämna bort dem också. En total är de uppskattade 1RM:en ihopräknade, och står som det.<br><br>Bilden ritas i din telefon och inget laddas upp: den hamnar bara där du skickar den. Ett foto du lägger bakom den stannar också på telefonen. Hur du ställer in bilden sparas på den här telefonen, inte i din profil.",
 };
 
 /* ═══════════════ STRENGTH-STANDARDS LIFT NAMES ════════════════════════

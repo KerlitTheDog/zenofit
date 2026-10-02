@@ -6050,8 +6050,12 @@ const NUM = 'type="text" inputmode="decimal" autocomplete="off" data-num';
 /* the stored form of a typed number: 82,5 → 82.5 */
 const decimalize = (v) => String(v ?? "").replace(/,/g, ".");
 
+/* aria-hidden rides onto the <svg> lucide draws (it copies the element's
+   attributes across): an icon is decoration to a screen reader, and the
+   control around it carries the words — its text, its title, or the
+   label a11yPass gives it. */
 const icon = (name, size = 16, extra = "") =>
-  `<i data-lucide="${name}" width="${size}" height="${size}" ${extra}></i>`;
+  `<i data-lucide="${name}" width="${size}" height="${size}" aria-hidden="true" ${extra}></i>`;
 
 const chip = (children, color, style = "") =>
   `<span class="pb-chip" style="color:${color || "var(--muted)"};border-color:${(color || "var(--border)")}55;background:${(color || "#000")}14;${style}">${children}</span>`;
@@ -6473,6 +6477,9 @@ function render() {
   app.querySelectorAll("[data-overlay]").forEach((el) => { oldOverlayEls[el.dataset.overlay] = el; });
   const prevTab = _lastTab;
   const prevOverlayKeys = _lastOverlayKeys;
+  /* which control had the keyboard, so the frame about to replace it can
+     hand it back (a11yPass) */
+  const focusBack = a11yFocusKey(document.activeElement);
 
   /* No account, or an account with no profile open: there is no training
      to draw, so there is no app to draw, only the screen that gets you one.
@@ -6530,14 +6537,14 @@ function render() {
   }
 
   /* content */
-  html += `<div class="pb-scroll" data-scrollkey="main-${tab}" style="flex:1;min-height:0;overflow-y:auto;padding-bottom:var(--pb-content-pb)">`;
+  html += `<main class="pb-scroll" data-scrollkey="main-${tab}" style="flex:1;min-height:0;overflow-y:auto;padding-bottom:var(--pb-content-pb)">`;
   if (tab === "home") html += renderHome(settings, currentWeek, unit);
   if (tab === "log") html += renderLog(log, library, badges, settings, unit, currentWeek);
   if (tab === "progress") html += renderProgress(log, library, goals, badges, settings, unit);
   if (tab === "library") html += renderLibrary(library);
   if (tab === "timer") html += renderTimers();
   if (tab === "chat") html += renderChat();
-  html += `</div>`;
+  html += `</main>`;
 
   /* "time's up" banner, floating above the nav on whatever tab you're on, so a
      rest timer finishing while you're logging a set still gets your attention */
@@ -6581,7 +6588,7 @@ function render() {
      hollow, as the calendar draws a lift still to do, because it is not
      something that happened but something still owed (todayUnfinished) */
   const owesToday = !!todayUnfinished();
-  html += `<div style="position:absolute;bottom:0;left:0;right:0;background:var(--nav-bg);backdrop-filter:blur(10px);border-top:1px solid var(--border-soft);display:flex;padding:8px 2px calc(14px + var(--pb-sab));z-index:25">`;
+  html += `<nav aria-label="${T("a11y.tabs")}" style="position:absolute;bottom:0;left:0;right:0;background:var(--nav-bg);backdrop-filter:blur(10px);border-top:1px solid var(--border-soft);display:flex;padding:8px 2px calc(14px + var(--pb-sab));z-index:25">`;
   for (const [id, ic, label] of NAV) {
     const active = tab === id;
     /* A count, not a dot, where there is a number worth knowing: "three
@@ -6591,12 +6598,13 @@ function render() {
       : id === "log" && owesToday
       ? `<span data-unfinished-ring style="position:absolute;top:1px;right:50%;margin-right:-15px;width:8px;height:8px;border-radius:4px;border:2px solid var(--gold);box-sizing:border-box"></span>`
       : id === "chat" ? chatBadgeHTML(unread) : "";
-    html += `<button data-action="nav" data-id="${id}" style="position:relative;flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;gap:3px;color:${active ? "var(--gold)" : "var(--faint)"};padding:4px 0">
+    const navLabel = id === "chat" && unread ? `${label}, ${plainText(TN("a11y.unreadN", unread))}` : id === "timer" && timersRunning ? `${label}, ${plainText(T("a11y.timerRunning"))}` : "";
+    html += `<button data-action="nav" data-id="${id}" ${active ? 'aria-current="page"' : ""} ${navLabel ? `aria-label="${esc(navLabel)}"` : ""} style="position:relative;flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;gap:3px;color:${active ? "var(--gold)" : "var(--faint)"};padding:4px 0">
       ${dot}${icon(ic, 21, `stroke-width="${active ? 2.4 : 2}"`)}
       <span style="font-size:9.5px;font-weight:700;letter-spacing:.02em">${label}</span>
     </button>`;
   }
-  html += `</div>`;
+  html += `</nav>`;
 
   /* overlays */
   if (ui.workoutSheet) html += renderWorkoutSheet(ui.workoutSheet, library, log, settings, unit);
@@ -6643,6 +6651,7 @@ function render() {
   /* a picture of a day or a lift, opened from either: above both */
   if (ui.pic) html += renderPicStudio();
   if (ui.notifyWin) html += renderNotifyWindow();
+  if (ui.appToast) html += renderAppToast();
 
   html += `</div></div>`;
   app.innerHTML = html;
@@ -6692,10 +6701,113 @@ function render() {
   /* focus the live content, never an element inside a fading transition layer */
   const af = [...app.querySelectorAll("[data-autofocus]")].find((e) => !e.closest(".pb-trans"));
   if (af) af.focus();
+  a11yPass([...curOverlayKeys].filter((k) => !prevOverlayKeys.has(k)), !!af, focusBack);
 
+  /* a link that opened the app, now that there is an account and a profile
+     to act for (see captureLink) */
+  if (linkWaiting) { linkWaiting = false; setTimeout(linkRun, 60); }
   paintTimers();   // put the freshly mounted rings/digits at the right position
   startStopwatchEngine();   // …and pick the stopwatch back up if this frame drew one
   persist();       // every frame is a save point, see snapshotDrafts()
+}
+
+/* ── WHAT A SCREEN READER HEARS, AND WHERE A KEYBOARD CAN GO ───────────
+   Run after every render, over the frame it just built. Four things, each
+   the kind that is easy to get right once here and easy to forget at one
+   of three hundred call sites:
+
+   - A button that is only an icon gets a name, from A11Y_ACTION, when its
+     own markup gave it neither text nor a title. Adding the aria-label at
+     the call site is still the better fix; this is the net under it.
+   - Every overlay (sheet() and fullScreen()) is a modal dialog, named by
+     its own heading.
+   - Only the TOP overlay can be reached: everything under it is `inert`,
+     so VoiceOver and a keyboard cannot wander into the screen behind a
+     sheet — which a sighted person cannot touch either, since the sheet's
+     backdrop covers it. A live announcement (role=status) is left alone.
+   - A window that has just opened takes focus, on its first control, when
+     nothing in it asked for the caret: a screen reader starts reading the
+     new window instead of the last thing tapped. Buttons only, never a
+     field, so no phone keyboard springs up.
+   And the page's language follows the app's, so a screen reader reads
+   Svenska in a Swedish voice. */
+const A11Y_ACTION = {
+  "open-profile": "a11y.settings", "fab": "home.start", "new-workout": "home.start",
+  "cal-prev": "a11y.prev", "cal-next": "a11y.next", "vol-prev": "a11y.prev", "vol-next": "a11y.next",
+  "chat-find-clear": "a11y.clearSearch", "delete-entry-form": "common.delete",
+  "overlay-close": "a11y.close", "exwin-close": "a11y.close", "close-profile": "a11y.close", "close-body": "a11y.close",
+  "close-entry": "a11y.back", "close-profiles": "a11y.back", "close-picker": "a11y.back", "close-worksheet": "a11y.back",
+  "chat-close": "a11y.back", "notify-close": "a11y.back", "close-storage": "a11y.back", "chat-view-close": "a11y.close",
+  "chat-image-close": "a11y.close", "chart-exit-full": "a11y.close", "toast-dismiss": "a11y.close",
+};
+/* A frame is a new DOM, so the control that had the keyboard is gone with
+   the old one and focus falls to <body>: a screen reader starts again from
+   the top of the page after every data refresh, and a keyboard user after
+   every tap. The control is found again in the new frame by what it DOES
+   (its action and the ids it carries, inside the same window) and given
+   focus back. Buttons and switches only: a text field is never re-focused
+   here, since that is the phone keyboard springing up. */
+const FOCUS_DATA = ["action", "id", "r", "m", "u", "name", "date", "target", "c", "seg"];
+function a11yFocusKey(el) {
+  if (!el || el === document.body || !el.closest || !el.closest("#app") || !el.dataset || !el.dataset.action) return null;
+  if (!el.matches("button, [role=switch], [role=tab], [role=radio], [role=checkbox]")) return null;
+  const ov = el.closest("[data-overlay]");
+  if (!(window.CSS && CSS.escape)) return null;
+  return { ov: ov ? ov.dataset.overlay : "", sel: FOCUS_DATA.filter((k) => el.dataset[k] != null).map((k) => `[data-${k}="${CSS.escape(el.dataset[k])}"]`).join("") };
+}
+function a11yPass(opened, hadFocus, focusBack) {
+  const root = app.querySelector(".pb-root");
+  if (!root) return;
+  const lang = resolveLang(state.settings && state.settings.lang);
+  if (document.documentElement.lang !== lang) document.documentElement.lang = lang;
+  root.querySelectorAll("button:not([aria-label])").forEach((b) => {
+    if (b.title || b.textContent.trim()) return;
+    const k = A11Y_ACTION[b.dataset.action];
+    if (k) b.setAttribute("aria-label", plainText(T(k)));
+  });
+  /* A field's words sit in a div above it (field()), which the eye reads as
+     its label and a screen reader does not: it hears "edit text". The
+     field is named after them, unless it already has a name of its own. */
+  root.querySelectorAll("input:not([type=hidden]):not([type=file]):not([aria-label]), select:not([aria-label]), textarea:not([aria-label])").forEach((c) => {
+    if (c.labels && c.labels.length) return;
+    let el = c, name = "";
+    for (let i = 0; i < 3 && el && !name; i++) {
+      el = el.parentElement;
+      const lab = el && el.firstElementChild;
+      if (lab && lab !== c && lab.classList.contains("pb-label") && !lab.contains(c)) name = lab.textContent.trim();
+    }
+    if (!name) name = (c.getAttribute("placeholder") || "").trim();
+    if (name) c.setAttribute("aria-label", name.slice(0, 80));
+  });
+  const layers = [...root.children].filter((el) => el.hasAttribute("data-layer") && !el.classList.contains("pb-trans"));
+  let top = null, topZ = -Infinity;
+  for (const el of layers) {
+    el.setAttribute("role", "dialog");
+    el.setAttribute("aria-modal", "true");
+    if (!el.hasAttribute("aria-label")) {
+      /* named by its heading; a window whose heading IS a search field
+         (the exercise picker) by that field */
+      const t = el.querySelector(".pb-num");
+      const f = el.querySelector("input[aria-label], input[placeholder]");
+      const name = (t && t.textContent.trim()) || (f && (f.getAttribute("aria-label") || f.getAttribute("placeholder")) || "").trim();
+      if (name) el.setAttribute("aria-label", name.slice(0, 80));
+    }
+    const z = parseInt(el.style.zIndex, 10) || 0;
+    if (z >= topZ) { topZ = z; top = el; }
+  }
+  for (const el of root.children) {
+    if (el.classList.contains("pb-trans")) continue;
+    const z = parseInt(el.style.zIndex, 10) || 0;
+    el.inert = !!top && el !== top && z < topZ && el.getAttribute("role") !== "status" && !el.querySelector("[role=status]");
+  }
+  if (top && !hadFocus && opened.includes(top.dataset.overlay || "")) {
+    const first = top.querySelector("button:not([disabled]), [role=switch]");
+    if (first) try { first.focus({ preventScroll: true }); } catch { /* nothing to focus */ }
+  } else if (focusBack && (!document.activeElement || document.activeElement === document.body)) {
+    const scope = focusBack.ov ? root.querySelector(`[data-overlay="${focusBack.ov}"]`) : root;
+    const again = scope && focusBack.sel && scope.querySelector(focusBack.sel);
+    if (again && !again.disabled && !again.closest("[inert]")) try { again.focus({ preventScroll: true }); } catch { /* gone */ }
+  }
 }
 
 /* ────────────────────────── THE GATE ──────────────────────────────── */
@@ -6764,6 +6876,13 @@ function renderLoginGate() {
           when it was deleted (accountErased); app copy, never user data */
       f.notice ? `<div class="pb-card2" style="display:flex;gap:9px;align-items:flex-start;padding:12px 14px;margin-bottom:16px;font-size:12.5px;line-height:1.55;color:var(--muted)">
         ${icon("info", 15, 'style="flex-shrink:0;margin-top:1px;color:var(--steel)"')}<span>${f.notice}</span></div>` : ""}
+    ${(() => {
+      /* opened by a friend's invite link (see BRING A FRIEND) */
+      const l = pendingLink();
+      if (!l || !l.invite) return "";
+      return `<div class="pb-card2" style="display:flex;gap:9px;align-items:flex-start;padding:12px 14px;margin-bottom:16px;font-size:12.5px;line-height:1.55;color:var(--muted)">
+        ${icon("user-plus", 15, 'style="flex-shrink:0;margin-top:1px;color:var(--gold)"')}<span>${T("link.invited", { name: esc(pStr(l.invite, 24)) })}</span></div>`;
+    })()}
     ${field(T("acct.username"),
       `<input class="pb-input" data-bind="loginName" value="${esc(f.username)}" placeholder="${esc(T("acct.usernamePh"))}" autocapitalize="none" autocorrect="off" autocomplete="username" spellcheck="false" maxlength="24" data-autofocus>`)}
     ${field(T("acct.password"),
@@ -7081,6 +7200,8 @@ function renderHome(settings, currentWeek, unit) {
       ${rollingWeeks() ? T("home.rollingLine") : T("home.weekLine", { n: currentWeek })}
     </div>
 
+    ${renderWeekStrip()}
+
     <button data-action="new-workout" class="pb-btn pb-gold" style="width:100%;padding:16px 0;font-size:16.5px;border-radius:14px">
       ${icon("plus", 20, 'stroke-width="2.6"')} ${T("home.start")}
     </button>
@@ -7118,6 +7239,9 @@ function renderHome(settings, currentWeek, unit) {
             copy. It sits directly above "where your data lives", which is
             the entry it qualifies. */""}
       ${accordion("chat", T("acc.chat.title"), icon("message-circle", 16, 'style="color:var(--gold)"'), T("acc.chat.body"))}
+      ${/* what a shared picture carries, and that it is made on the phone and
+            uploaded nowhere, is a question tapping cannot answer */""}
+      ${accordion("share", T("acc.share.title"), icon("share", 16, 'style="color:var(--steel)"'), T("acc.share.body"))}
       ${accordion("cardio", T("acc.cardio.title"), icon("timer", 16, 'style="color:#a07ec2"'), T("acc.cardio.body"))}
       ${accordion("units", T("acc.units.title"), icon("ruler", 16, 'style="color:var(--steel)"'), T("acc.units.body"))}
       ${accordion("data", T("acc.data.title"), icon("settings", 16, 'style="color:var(--muted)"'), T("acc.data.body"))}
@@ -8907,10 +9031,14 @@ function chatBodyHTML() {
     </button>`;
   }).join("");
 
+  /* the friend who is not on the app yet: a link that opens a
+     conversation with you once they are (see BRING A FRIEND) */
+  const invite = `<button data-action="invite-share" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:13.5px;margin-top:${threads.length ? 4 : 10}px">${icon("user-plus", 15)} ${T("invite.button")}</button>
+    <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:8px 2px 0">${T("invite.hint")}</div>`;
   return `${chatNotifyDoor()}${threads.length ? rows : `<div class="pb-card" style="padding:26px 20px;text-align:center;color:var(--muted);font-size:13px;line-height:1.6">
       ${icon("message-circle", 26, 'style="margin:0 auto 10px;display:block;color:var(--faint)"')}
       ${T("chat.empty")}
-    </div>`}`;
+    </div>`}${invite}`;
 }
 
 /* The count on the nav's chat icon. A function of its own because it is
@@ -10438,6 +10566,262 @@ function chatImport(m, asCopy, opts = {}) {
     return date;
   }
   return null;
+}
+
+/* ── A LINK THAT OPENED THE APP ────────────────────────────────────────
+   A friend's invite: the app is opened on its own address with
+   `?invite=` (a username) on it. It is taken off the address straight away
+   (so a reload or a bookmark does not do it twice) and kept for this tab
+   until there is somebody signed in with a profile open to act for — on a
+   phone that has never seen the app, that is after the login screen, which
+   says why it is there. */
+const LINK_KEY = "zenofit:link";
+let linkWaiting = false;
+(function captureLink() {
+  try {
+    const u = new URL(location.href);
+    const invite = u.searchParams.get("invite");
+    if (!invite) { linkWaiting = !!sessionStorage.getItem(LINK_KEY); return; }
+    sessionStorage.setItem(LINK_KEY, JSON.stringify({ invite: invite.slice(0, 40) }));
+    u.searchParams.delete("invite");
+    history.replaceState(null, "", u.pathname + u.search + u.hash);
+    linkWaiting = true;
+  } catch { /* no address to read */ }
+})();
+function pendingLink() {
+  try { const v = JSON.parse(sessionStorage.getItem(LINK_KEY) || "null"); return v && typeof v === "object" ? v : null; }
+  catch { return null; }
+}
+function linkRun() {
+  const l = pendingLink();
+  try { sessionStorage.removeItem(LINK_KEY); } catch { /* spent either way */ }
+  if (l && l.invite) inviteRun(l.invite);
+}
+
+/* ── BRING A FRIEND ────────────────────────────────────────────────────
+   The link is the app's own address with your username on it. Opened by
+   somebody who has never seen the app, it lands on the login screen saying
+   who sent it, and once they are in, the conversation with you is open —
+   the whole point of inviting somebody to a training app is training with
+   them. Found by exact username only, like the search it goes through. */
+const inviteLink = () => { const me = chatMe(); return me ? appBaseUrl() + "?invite=" + encodeURIComponent(me.username) : appBaseUrl(); };
+async function inviteShare() {
+  const url = inviteLink();
+  const text = T("invite.text");
+  try {
+    if (navigator.share) { await navigator.share({ title: "Zenofit", text, url }); return; }
+  } catch (e) { if (e && e.name === "AbortError") return; }
+  chatCopyText(url);
+  appToast(T("invite.copied"), "var(--green)");
+  render();
+}
+async function inviteRun(name) {
+  const C = window.ZenofitCloud;
+  const me = chatMe();
+  const want = String(name || "").toLowerCase().replace(/[^a-z0-9._-]/g, "").slice(0, 24);
+  if (!C || !me || want.length < 2 || want === String(me.username || "").toLowerCase()) return;
+  try {
+    const r = await C.searchUsers(want);
+    const u = ((r && r.users) || []).find((x) => String(x.username || "").toLowerCase() === want);
+    if (!u) return;
+    closeEverything(); resetTransient();
+    ui.tab = "chat";
+    actions["chat-start"]({ dataset: { id: u.userId, n: u.username } });
+  } catch { /* no signal: the invite was a courtesy, not a promise */ }
+}
+
+/* Text for a canvas or a plain-text file: T() carries its own markup
+   (*bold*, _italic_). Parsed in a <template>, whose content is inert, so
+   nothing in the string is ever loaded or run on the way (a detached <div>
+   still fetches an <img> and fires its onerror). The picture studio's
+   plainOf is the same function under the name it was written with. */
+function plainText(html) {
+  return plainOf(html);
+}
+
+/* ── A LINE THAT COMES AND GOES ───────────────────────────────────────
+   A short note at the top of the screen for a moment ("link copied"),
+   then gone. role=status, so a screen reader says it. */
+const APP_TOAST_MS = 4200;
+let appToastTimer = null;
+function appToast(text, ink) {
+  ui.appToast = { text, ink: ink || "var(--gold)", at: Date.now() };
+  clearTimeout(appToastTimer);
+  appToastTimer = setTimeout(() => { ui.appToast = null; if (!syncTyping()) render(); }, APP_TOAST_MS);
+}
+function renderAppToast() {
+  const t = ui.appToast;
+  return `<div role="status" aria-live="polite" class="pb-sheet" style="position:absolute;left:14px;right:14px;top:calc(var(--pb-sat) + 12px);z-index:140;display:flex;justify-content:center;pointer-events:none">
+    <div style="pointer-events:auto;display:flex;align-items:center;gap:9px;max-width:100%;padding:10px 12px 10px 14px;border-radius:14px;background:var(--surface);border:1px solid var(--border);box-shadow:0 10px 30px rgba(0,0,0,.35)">
+      <span style="font-size:13.5px;font-weight:600;color:${t.ink};line-height:1.35">${t.text}</span>
+      <button data-action="app-toast-close" aria-label="${T("a11y.close")}" style="color:var(--muted);padding:2px;flex-shrink:0">${icon("x", 15)}</button>
+    </div>
+  </div>`;
+}
+
+/* ═══════════════════════ THIS WEEK, AT A GLANCE ═══════════════════════
+   One row on Home: the seven days of the week you are in — YOUR week, the
+   same one every other number in the app is counted in (a program week
+   from your start date, or the last seven days if that is how you asked
+   to count) — with a dot on each day you trained and a ring on each day
+   you planned. It answers "have I been in this week?" without a tap, which
+   is the question the Log tab needed three swipes for.
+
+   The streak is weeks in a row with at least one session, counted the same
+   way, and a week still in progress with nothing in it yet does not break
+   it: Monday is not a failure. It is a count of what the log already
+   holds, nothing more — there is no target and nothing to lose. */
+function weekDays(today) {
+  const r = rollingWeeks() ? windowEnding(today) : weekRange(weekOf(today, state.settings.startDate), state.settings.startDate);
+  const out = [];
+  for (let d = r.from; d <= r.to; d = addDays(d, 1)) out.push(d);
+  return out;
+}
+function trainedDays() {
+  return new Set((state.log || []).filter(entryHasData).map((e) => e.date));
+}
+function weekStreak(trained, today) {
+  const days = weekDays(today);
+  let from = days[0];
+  const any = (a) => { for (let i = 0; i < 7; i++) if (trained.has(addDays(a, i))) return true; return false; };
+  let n = 0;
+  if (!any(from)) from = addDays(from, -7);
+  /* bounded by the log itself: nothing before the first session can count */
+  const first = [...trained].sort()[0];
+  while (first && from >= addDays(first, -6) && any(from)) { n++; from = addDays(from, -7); }
+  return n;
+}
+function renderWeekStrip() {
+  const today = todayStr();
+  const days = weekDays(today);
+  const trained = trainedDays();
+  const planned = new Set((state.plans || []).map((p) => p.date));
+  if (!trained.size && !planned.size) return "";
+  const n = days.filter((d) => trained.has(d)).length;
+  const streak = weekStreak(trained, today);
+  const cells = days.map((d) => {
+    const on = trained.has(d), plan = !on && planned.has(d) && d >= today, isToday = d === today, future = d > today;
+    const label = fmtDate(d, { weekday: "long", day: "numeric", month: "long" }) + (on ? ", " + plainText(T("week.trained")) : plan ? ", " + plainText(T("week.planned")) : "");
+    const dot = `<span style="width:30px;height:30px;border-radius:15px;display:flex;align-items:center;justify-content:center;
+      background:${on ? "var(--gold)" : "transparent"};color:${on ? "var(--gold-ink)" : future ? "var(--faint)" : "var(--muted)"};
+      border:${on ? "2px solid var(--gold)" : isToday ? "2px solid var(--gold)" : plan ? "2px dashed var(--faint)" : "2px solid var(--border)"}">${on ? icon("check", 14, 'stroke-width="3"') : ""}</span>`;
+    const head = `<span style="font-size:10.5px;font-weight:700;color:${isToday ? "var(--gold)" : "var(--faint)"}">${esc(fmtDate(d, { weekday: "narrow" }))}</span>`;
+    return on
+      ? `<button data-action="open-log-day" data-date="${d}" aria-label="${esc(label)}" style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;padding:2px 0">${head}${dot}</button>`
+      : `<div role="img" aria-label="${esc(label)}" style="flex:1;display:flex;flex-direction:column;align-items:center;gap:5px;padding:2px 0">${head}${dot}</div>`;
+  }).join("");
+  return `<div class="pb-card" style="padding:11px 12px 12px;margin-bottom:14px">
+    <div style="display:flex;align-items:baseline;justify-content:space-between;margin:0 2px 9px">
+      <span class="pb-label">${T(rollingWeeks() ? "week.last7" : "week.thisWeek")}</span>
+      <span style="font-size:12px;color:var(--muted)">${TN("week.sessionsN", n)}${streak > 1 ? ` · <span style="color:var(--gold);font-weight:700">${TN("week.streakN", streak)}</span>` : ""}</span>
+    </div>
+    <div style="display:flex">${cells}</div>
+  </div>`;
+}
+
+/* ═══════════════════════ THE LOG AS A SPREADSHEET ══════════════════════
+   The app began life as a spreadsheet, and a coach, a physio or the
+   person themselves will sometimes want it back as one. One row per SET
+   (a cardio session is one row), every column as it was logged, the unit
+   it was logged in, never converted. The one computed column is the est.
+   1RM, read off the same curve the app uses.
+
+   Written for the spreadsheet the person will open it in: Svenska and
+   Українська use a comma for decimals, so there the columns are split by
+   semicolons and numbers written with commas, which is what Excel and
+   Sheets in those locales expect; English gets commas and points. It is
+   a different file from the backup, for people, and is never read back
+   in: the backup is still the only thing a restore takes. */
+function csvText() {
+  const lang = resolveLang(state.settings.lang);
+  const semi = lang !== "en";
+  const sep = semi ? ";" : ",";
+  const num = (v) => { const s = String(v ?? "").trim(); return semi ? s.replace(".", ",") : s; };
+  /* quoted only when the SEPARATOR (or a quote or a line break) is in it:
+     quoting on every comma wrapped each decimal-comma number in quotes */
+  const needs = semi ? /[";\n\r]/ : /[",\n\r]/;
+  const cell = (v) => { const s = String(v ?? ""); return needs.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  /* Words typed by people (a lift's name, a group, a note — and on a shared
+     profile, typed by whoever else can write to it) are never handed to a
+     spreadsheet as a formula: one starting with = + - or @ is run by Excel
+     and Sheets the moment the file opens. The apostrophe is the standard
+     way to say "this is text". Numbers never pass through here. */
+  const text = (v) => { const s = String(v ?? ""); return /^[=+\-@\t\r]/.test(s) ? "'" + s : s; };
+  const head = ["date", "week", "exercise", "group", "kind", "set", "drop", "reps", "weight", "unit", "seconds", "rpe", "minutes", "effort", "est_1rm", "notes"];
+  const rows = [head.join(sep)];
+  for (const e of chronoSort(state.log || [])) {
+    if (!entryHasData(e)) continue;
+    const k = kindOf(e);
+    const group = groupOfEntry(e, state.library);
+    /* in rolling mode there is no program week to name, here as everywhere */
+    const wk = rollingWeeks() ? "" : weekOf(e.date, state.settings.startDate);
+    if (k === "cardio") {
+      rows.push([e.date, wk, text(e.exercise), text(group), k, "", "", "", "", "", "", "", num(e.minutes), num(e.intensity), "", text(e.notes || "")].map(cell).join(sep));
+      continue;
+    }
+    filledSets(e).forEach((s, i) => {
+      const rm = k === "strength" && +s.weight > 0 && +s.reps > 0 ? Math.round(est1RM(+s.weight, +s.reps) * 10) / 10 : "";
+      rows.push([e.date, wk, text(e.exercise), text(group), k, i + 1, s.drop ? "1" : "", num(s.reps), num(s.weight), k === "strength" ? unitOf(e) : "",
+        num(s.secs), num(s.rpe), "", "", num(rm), i === 0 ? text(e.notes || "") : ""].map(cell).join(sep));
+    });
+  }
+  return "﻿" + rows.join("\r\n");
+}
+function exportCsv() {
+  const name = "zenofit-log-" + todayStr() + ".csv";
+  const text = csvText();
+  const type = "text/csv";
+  try {
+    const file = new File([text], name, { type });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      navigator.share({ files: [file], title: name }).catch((e) => { if (!e || e.name !== "AbortError") downloadBlob(name, new Blob([text], { type })); });
+      return;
+    }
+  } catch { /* no share sheet for files here */ }
+  downloadBlob(name, new Blob([text], { type }));
+}
+/* downloadText's cousin for anything that is not a backup */
+function downloadBlob(name, blob) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = name; a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+/* ═══════════════════════ WHO YOU COACH, AT A GLANCE ════════════════════
+   A profile shared with you is somebody's training — often somebody you
+   coach. The Profiles window says, for each one, when they last trained
+   and on how many of the last seven days, fetched from the server when the
+   window opens (GET /v1/profiles/activity), because a read-only profile is
+   never on this phone to be counted. Dates only; the log itself stays one
+   tap away, where it always was. */
+/* a date from the server is a date or nothing: it is printed */
+const activityDay = (v) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : "");
+async function sharedActivityLoad() {
+  const C = window.ZenofitCloud;
+  if (!C || !C.sharedActivity || !chatSignedIn()) return;
+  const since = addDays(todayStr(), -6);
+  try {
+    const r = await C.sharedActivity(since);
+    const byRemote = {};
+    for (const a of pList(r && r.activity, 200)) if (a && typeof a.profileId === "string") byRemote[a.profileId] = { last: activityDay(a.lastDay), days: pNum(a.days) || 0 };
+    const out = {};
+    for (const p of profileList()) {
+      const rec = syncFor(p.id);
+      if (rec && rec.remoteId && byRemote[rec.remoteId]) out[p.id] = byRemote[rec.remoteId];
+    }
+    ui.sharedActivity = out;
+    if (ui.profilesWin && !syncTyping()) render();
+  } catch { /* the window works without it */ }
+}
+function sharedActivityLine(localId) {
+  const a = (ui.sharedActivity || {})[localId];
+  if (!a) return "";
+  const when = !a.last ? T("coach.never") : a.last === todayStr() ? T("coach.today") : T("coach.last", { d: esc(fmtShort(a.last)) });
+  return `<span style="display:flex;align-items:center;gap:5px;font-size:11.5px;color:${a.days ? "var(--green)" : "var(--faint)"};margin-top:2px">${icon("activity", 11)} ${when} · ${TN("coach.daysN", a.days)}</span>`;
 }
 
 /* ─────────────────────────── LIBRARY ──────────────────────────────── */
@@ -13594,11 +13978,11 @@ function renderExercisePicker(library) {
   const seg = ui.pickerSeg;
   return fullScreen(60, `
     <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px">
-      <button data-action="close-picker" style="color:var(--muted);padding:4px">${icon("arrow-left", 21)}</button>
+      <button data-action="close-picker" aria-label="${T("a11y.back")}" style="color:var(--muted);padding:4px">${icon("arrow-left", 21)}</button>
       <div style="position:relative;flex:1">
         ${seg === "exercises"
           ? `${icon("search", 15, 'style="position:absolute;left:11px;top:12px;color:var(--faint)"')}
-             <input class="pb-input" style="padding-left:34px" placeholder="${T("pick.search")}" data-bind="pickq" value="${esc(ui.pickerQ)}" data-autofocus>`
+             <input class="pb-input" style="padding-left:34px" placeholder="${T("pick.search")}" aria-label="${T("pick.search")}" data-bind="pickq" value="${esc(ui.pickerQ)}" data-autofocus>`
           : `<div class="pb-num" style="font-size:17px;font-weight:700;padding:8px 2px">${T("preset.pickerTitle")}</div>`}
       </div>
     </div>
@@ -15765,8 +16149,14 @@ function renderProfile(f) {
           <input type="file" accept="application/json,.json,text/plain" data-filebind="backup" style="display:none">
         </label>
       </div>
-      <div style="font-size:11.5px;color:var(--faint);margin-bottom:16px;line-height:1.5">
+      <div style="font-size:11.5px;color:var(--faint);margin-bottom:12px;line-height:1.5">
         ${T("profile.backupHint")}
+      </div>
+      <button data-action="export-csv" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:13.5px;margin-bottom:8px">
+        ${icon("sheet", 15)} ${T("csv.export")}
+      </button>
+      <div style="font-size:11.5px;color:var(--faint);margin-bottom:16px;line-height:1.5">
+        ${T("csv.hint")}
       </div>
 
       ${/* Next to the backup buttons on purpose: this is the screen you want
@@ -15825,8 +16215,10 @@ function renderProfilesWindow() {
         <span style="width:9px;height:9px;border-radius:5px;flex-shrink:0;background:${on ? "var(--gold)" : "var(--border)"}"></span>
         <span style="flex:1;min-width:0">
           <span style="display:block;min-width:0;font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(profileLabel(p, i))}</span>
-          <span style="display:block;font-size:11.5px;color:var(--faint)">${on ? T("profiles.current") + " · " : ""}${TN("day", st.days)} · ${TN("logEntry", st.entries)}</span>
-          ${shared ? `<span style="display:block;font-size:11px;margin-top:1px;color:var(--steel)">${profileShareLine(p.id)}</span>` : ""}
+          ${/* a live profile is not on this phone, so there is nothing here to
+                count; the line under it says when it was last trained instead */
+            syncLive(p.id) && !on ? "" : `<span style="display:block;font-size:11.5px;color:var(--faint)">${on ? T("profiles.current") + " · " : ""}${TN("day", st.days)} · ${TN("logEntry", st.entries)}</span>`}
+          ${shared ? `<span style="display:block;font-size:11px;margin-top:1px;color:var(--steel)">${profileShareLine(p.id)}</span>${sharedActivityLine(p.id)}` : ""}
         </span>
       </button>
       <button data-action="profile-menu" data-id="${esc(p.id)}" title="${T("common.edit")}" style="flex-shrink:0;padding:13px 14px;color:var(--faint);align-self:stretch">${icon("pencil", 16)}</button>
@@ -16123,7 +16515,7 @@ function sheet(title, target, children, z = 60) {
     <div class="pb-sheet-card pb-scroll${enter}" data-stopprop style="background:var(--surface);border-top:1px solid var(--border);border-radius:18px 18px 0 0;padding:16px 18px calc(26px + var(--pb-sab));max-height:calc(88% - var(--pb-sat));overflow-y:auto">
       <div style="display:flex;align-items:center;margin-bottom:14px">
         <div class="pb-num" style="font-size:18.5px;font-weight:700;flex:1">${title}</div>
-        <button data-action="overlay-close" data-target="${target}" style="color:var(--muted);padding:4px">${icon("x", 20)}</button>
+        <button data-action="overlay-close" data-target="${target}" aria-label="${T("a11y.close")}" style="color:var(--muted);padding:4px">${icon("x", 20)}</button>
       </div>
       ${children}
     </div>
@@ -17238,6 +17630,7 @@ const actions = {
     ui.profileStats = profileStats();
     ui.profileOrder = false;
     ui.profilesWin = true; render();
+    sharedActivityLoad();
   },
   "close-profiles": () => { ui.profilesWin = false; ui.profileOrder = false; ui.profileStats = null; render(); },
   "profiles-reorder": () => { ui.profileOrder = !ui.profileOrder; render(); },
@@ -19381,6 +19774,10 @@ const actions = {
      really there, so a stale `data-target` clears nothing rather than
      inventing a key; null rather than false throughout is safe because
      every one of these is only ever read for truthiness. */
+  /* ── the log as a spreadsheet, and a friend brought in ───────────── */
+  "export-csv": () => exportCsv(),
+  "invite-share": () => inviteShare(),
+  "app-toast-close": () => { clearTimeout(appToastTimer); ui.appToast = null; render(); },
   "overlay-close": (el) => {
     const t = el.dataset.target;
     if (t && Object.prototype.hasOwnProperty.call(ui, t)) ui[t] = null;
@@ -19475,6 +19872,8 @@ const READ_OK = new Set([
   "pic-open", "pic-close", "pic-mode", "pic-format", "pic-accent", "pic-align", "pic-pos", "pic-brand",
   "pic-detail", "pic-value", "pic-range", "pic-theme", "pic-toggle", "pic-set-sort", "pic-set",
   "pic-lift-toggle", "pic-photo-lift", "pic-save", "pic-share",
+  /* a spreadsheet of the log only READS it, and an invite is the account's */
+  "export-csv", "invite-share", "app-toast-close",
   "timer-start", "timer-pause", "timer-reset", "timer-sound-test", "timer-add", "timer-edit",
   "timer-save", "timer-delete", "timer-pin", "timer-form-pin", "timer-reorder", "timer-preset",
   "timer-sound",

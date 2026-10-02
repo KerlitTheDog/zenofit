@@ -537,6 +537,38 @@ async function route(request, env, url, ctx) {
     });
   }
 
+  /* ── A TRAINER'S GLANCE ────────────────────────────────────────────────
+     Somebody coaching five people through shared profiles wants to know
+     who trained this week without opening five logs one after the other —
+     and a READ grant is a live profile, never on the phone, so the phone
+     cannot answer it for itself. For every profile shared WITH the caller:
+     the last date anything was logged on, and on how many distinct days
+     since `since` (the client's own date seven days back, 'YYYY-MM-DD',
+     because a week is the person's week, not the server's). Only profiles
+     the caller already has a live grant to read, so it tells nobody
+     anything the profile itself would not. Dates only: no sets, no
+     weights, no names of lifts. */
+  if (p === "/v1/profiles/activity" && method === "GET") {
+    const sinceRaw = url.searchParams.get("since") || "";
+    const since = /^\d{4}-\d{2}-\d{2}$/.test(sinceRaw) ? sinceRaw : new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10);
+    const rows = await env.DB.prepare(
+      "SELECT i.profile_id, MAX(json_extract(i.json, '$.date')) AS last, " +
+      "  COUNT(DISTINCT CASE WHEN json_extract(i.json, '$.date') >= ? THEN json_extract(i.json, '$.date') END) AS days " +
+      "FROM items i JOIN grants g ON g.profile_id = i.profile_id AND g.user_id = ? AND g.revoked_at IS NULL " +
+      "JOIN profiles p ON p.id = i.profile_id AND p.deleted_at IS NULL " +
+      "WHERE i.collection = 'log' AND i.deleted = 0 AND json_valid(i.json) " +
+      /* a lift lined up and never done is a row with nothing in it (see
+         entryHasData in app.js): not a session, so not counted as one */
+      "  AND (CAST(COALESCE(NULLIF(json_extract(i.json, '$.sets'), ''), 0) AS REAL) > 0 " +
+      "    OR CAST(COALESCE(NULLIF(json_extract(i.json, '$.minutes'), ''), 0) AS REAL) > 0) " +
+      "GROUP BY i.profile_id"
+    ).bind(since, user.id).all();
+    return json({
+      since,
+      activity: (rows.results || []).map((r) => ({ profileId: r.profile_id, lastDay: r.last || null, days: r.days || 0 })),
+    });
+  }
+
   /* The order the list is dragged into, which is a property of the account
      rather than of the phone it was dragged on. One call rather than a PUT
      per profile: a drag moves one row and renumbers every row after it, and

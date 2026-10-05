@@ -45,8 +45,8 @@ the tester's own address:
                        empties it again (needs ZENOFIT_SWEEP=1 as well, and
                        `--var PHOTO_BUDGET_CHARS:4000000` on the same wrangler dev).
 
-A full run counts against the ceilings on the address it comes from (29 devices
-and 24 registrations per run), so three full runs fit in one hour.
+A full run counts against the ceilings on the address it comes from (28 devices
+and 26 registrations per run), so three full runs fit in one hour.
 
 Note: Cloudflare answers `error code: 1010` to a bare Python user-agent before
 the Worker ever runs, which is why the script sends a browser one.

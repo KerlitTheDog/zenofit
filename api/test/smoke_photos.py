@@ -31,6 +31,8 @@ The cases worth holding:
   - a device can ask which ids the server already has before uploading
   - only the three formats the app writes are accepted: a data URL goes
     straight into an <img>, and an SVG one can carry script
+  - only an ACCOUNT uploads: a bare device token costs nothing to mint, so
+    it is refused (403 account_required) before the photo is even read
 """
 import os
 import json, urllib.request, urllib.error, sys, hashlib, base64, uuid, time
@@ -74,6 +76,14 @@ def device():
     return b["token"]
 
 
+def register(label):
+    name = (label + uuid.uuid4().hex[:8])[:24]
+    key = hashlib.pbkdf2_hmac("sha256", b"correct horse battery", ("zenofit:" + name.lower()).encode(), 210000, 32).hex()
+    s, b, _ = call("POST", "/v1/auth/register", body={"username": name, "key": key})
+    assert s == 201, (s, b)
+    return b["token"], b["userId"]
+
+
 # The id the app computes: SHA-256 of the data URL string, hex.
 def photo_id(data_url):
     return hashlib.sha256(data_url.encode()).hexdigest()
@@ -87,10 +97,16 @@ def data_url(n=600):
 
 
 print("API: " + API)
-phone = device()
-laptop = device()
+# Accounts, because that is the only thing the app uploads from: a bare
+# device token (no username behind it) is refused, checked below.
+phone, _ = register("phon")
+laptop, _ = register("lapt")
 
 print("\n== uploading ==")
+bare = device()
+early = data_url()
+s, r, _ = call("PUT", "/v1/photos/" + photo_id(early), token=bare, body={"data": early})
+check("a device that never made an account cannot upload a photo", s == 403 and r.get("error") == "account_required", (s, r))
 pic = data_url()
 pid = photo_id(pic)
 s, r, _ = call("PUT", "/v1/photos/" + pid, token=phone, body={"data": pic})
@@ -130,12 +146,6 @@ s, r, _ = call("GET", "/v1/photos/" + pid)
 check("no token, no photo", s == 401, (s, r))
 
 # ── who holds a photo ──────────────────────────────────────────────────────
-def register(label):
-    name = (label + uuid.uuid4().hex[:8])[:24]
-    key = hashlib.pbkdf2_hmac("sha256", b"correct horse battery", ("zenofit:" + name.lower()).encode(), 210000, 32).hex()
-    s, b, _ = call("POST", "/v1/auth/register", body={"username": name, "key": key})
-    assert s == 201, (s, b)
-    return b["token"], b["userId"]
 
 
 def lib_row(item_id, photo=None, name="Belt squat"):

@@ -310,8 +310,15 @@ export async function photoRoute(ctx) {
 
   /* ---- upload a library photo -------------------------------------------
      PUT, because the client names the resource: the id is the hash of what
-     it is about to send, and the server's only job is to check that. */
+     it is about to send, and the server's only job is to check that.
+
+     ── BY AN ACCOUNT, NEVER BY A BARE DEVICE ────────────────────────────
+     A device token costs nothing to mint and each one had a photo quota of
+     its own. The app only ever uploads for a profile in a signed-in
+     account (there is no app without one), so a token with no username
+     behind it is refused before its body is even read. */
   if (method === "PUT") {
+    if (!user.username) return fail(403, "account_required", "Sign in to an account to upload photos.");
     let body;
     try { body = await readJson(request, MAX_PHOTO_CHARS + 4096); }
     catch { return fail(413, "too_large", "That photo is too big."); }

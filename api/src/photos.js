@@ -44,7 +44,7 @@
  * sent and hands back what it stored.
  */
 
-import { limited } from "./limits.js";
+import { limited, limitOf } from "./limits.js";
 
 /* A 1000px JPEG at the app's own quality is 100-300 KB of base64 and the
    worst real one seen was about 700 KB. This leaves room for that and
@@ -55,6 +55,27 @@ export const MAX_PHOTO_CHARS = 1_400_000;
    library of machines and a chat's worth of pictures, and a ceiling on
    what one account stuck in a loop can cost everybody else. */
 export const MAX_ACCOUNT_PHOTO_CHARS = 150 * 1024 * 1024;
+
+/* ── AND THE WHOLE STORE HAS ONE TOO ───────────────────────────────────
+   Photos live in D1 beside everybody's training, and on the free plan a
+   database holds 500 MB. At 150 MB an account, a handful of accounts
+   could fill it, and then every write fails for everyone: a set logged, a
+   message sent, a sync. So uploads stop at a ceiling on ALL photo data,
+   well short of the database's own, and what is refused is the picture,
+   never anything else: sync, chat and the rest carry on, and the phone
+   keeps the photo it was trying to send (the app stops offering it for a
+   while and says so once). 300 MB is 60% of the database, which leaves
+   the rest for rows and indexes. A [var] (PHOTO_BUDGET_CHARS) moves it
+   without a release.
+
+   Checked in storePhoto, which both upload routes go through, by the same
+   one aggregate query that adds up the account's own share. The
+   (owner_id, size) index from migration 0011 covers it, so the sum is read
+   off the index: without it, adding up `size` meant reading every picture
+   in the table, because `size` is stored after `data` in each row.
+   Counted in characters of data URL, which is what `size` holds and what a
+   row costs. */
+export const PHOTO_BUDGET_CHARS = 300_000_000;
 
 const UPLOAD_WINDOW_MS = 10 * 60_000;
 const UPLOAD_MAX_PER_WINDOW = 150;
@@ -117,10 +138,13 @@ export async function storePhoto(env, user, id, data, threadId) {
     return { status: 429, body: { error: "too_fast", message: "Too many photos at once. Wait a few minutes." } };
   }
   const used = await env.DB.prepare(
-    "SELECT COALESCE(SUM(size), 0) AS n FROM photos WHERE owner_id = ?"
+    "SELECT COALESCE(SUM(size), 0) AS total, COALESCE(SUM(CASE WHEN owner_id = ? THEN size END), 0) AS mine FROM photos"
   ).bind(user.id).first();
-  if ((used ? used.n : 0) + data.length > MAX_ACCOUNT_PHOTO_CHARS) {
+  if ((used ? used.mine : 0) + data.length > MAX_ACCOUNT_PHOTO_CHARS) {
     return { status: 413, body: { error: "photo_quota", message: "This account has stored as many photos as it can." } };
+  }
+  if ((used ? used.total : 0) + data.length > limitOf(env, "PHOTO_BUDGET_CHARS", PHOTO_BUDGET_CHARS)) {
+    return { status: 507, body: { error: "photo_storage_full", message: "The photo store is full. The photo stays on your phone." } };
   }
 
   /* OR IGNORE, because two devices uploading the same picture at the same

@@ -3490,6 +3490,27 @@ const photoMissAt = new Map();    // id -> when the server last said "not here"
 const photoRefused = new Set();   // ids the store turned down, this session
 const photoPrev = new Map();      // library row id -> the picture it held before a row gave it an id
 
+/* ── WHEN THE SERVER'S PHOTO STORE IS FULL ──────────────────────────────
+   It says so (507 photo_storage_full, a ceiling on ALL photo data, see
+   photos.js) and goes on saying so until room is made. The picture is
+   still here, on this phone, and the row has gone up without it, because
+   nothing waits on a photo. So the only thing left to decide is not to
+   send a few hundred kilobytes on every sync to be told the same thing:
+   nothing is offered for PHOTO_FULL_PAUSE (remembered per device, so a
+   relaunch does not ask again either), and the person is told once. */
+const PHOTO_FULL_KEY = "zenofit:photo-full";
+const PHOTO_FULL_PAUSE = 6 * 60 * 60 * 1000;
+function photoFullPaused() {
+  try { return Date.now() < Number(localStorage.getItem(PHOTO_FULL_KEY) || 0); } catch { return false; }
+}
+function photoStoreFull() {
+  const told = photoFullPaused();
+  try { localStorage.setItem(PHOTO_FULL_KEY, String(Date.now() + PHOTO_FULL_PAUSE)); } catch { /* asked again next pass */ }
+  if (told) return;
+  appToast(T("photo.storeFull"), "var(--gold)");
+  if (!syncTyping()) render();
+}
+
 const isPhotoId = (v) => typeof v === "string" && /^[0-9a-f]{64}$/.test(v);
 /* the only thing a fetched picture is allowed to be, since it goes straight
    into an <img>: a raster data URL, never markup */
@@ -3603,11 +3624,15 @@ async function photoUpload(rows) {
   try {
     for (const id of ids) {
       if (up.has(id) || photoRefused.has(id)) continue;
+      if (photoFullPaused()) break;
       try {
         await C.photoPut(id, byId.get(id));
         up.add(id);
         sent++;
       } catch (e) {
+        /* the whole store is full: not about this picture, nor about the
+           network (see photoStoreFull) */
+        if (e && e.status === 507) { photoStoreFull(); break; }
         /* the server REFUSING one picture (a format it does not take, a full
            account) is about that picture, and must not stop the others;
            no signal, a rate limit or a server fault is about the network,
@@ -4962,6 +4987,7 @@ function chatErrText(e) {
   if (!e) return T("chat.errGeneric");
   if (e.status === 401) return T("chat.errSignedOut");
   if (!e.status) return T("chat.errOffline");   // never reached the server
+  if (e.code === "photo_storage_full") return T("photo.storeFull");
   return e.message || T("chat.errGeneric");
 }
 

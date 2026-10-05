@@ -41,6 +41,9 @@ the tester's own address:
                        searches per account. The defaults are fine.
     ZENOFIT_SWEEP=1    smoke_photos.py sets off the daily sweep by hand; needs
                        `wrangler dev --test-scheduled --var PHOTO_GRACE_MS:0`.
+    ZENOFIT_BUDGET=1   smoke_photos.py fills the photo store to its ceiling and
+                       empties it again (needs ZENOFIT_SWEEP=1 as well, and
+                       `--var PHOTO_BUDGET_CHARS:4000000` on the same wrangler dev).
 
 A full run counts against the ceilings on the address it comes from (29 devices
 and 24 registrations per run), so three full runs fit in one hour.

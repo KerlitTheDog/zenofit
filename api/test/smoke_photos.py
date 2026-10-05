@@ -15,6 +15,13 @@ that need it run only there:
     npx wrangler dev --test-scheduled --var PHOTO_GRACE_MS:0
     ZENOFIT_API=http://127.0.0.1:8787 ZENOFIT_SWEEP=1 python3 test/smoke_photos.py
 
+The ceiling on ALL photo data (PHOTO_BUDGET_CHARS, 300 million characters in
+production) is checked by filling the store, so that runs only locally too,
+with a small ceiling and the sweep to empty it again:
+
+    npx wrangler dev --test-scheduled --var PHOTO_GRACE_MS:0 --var PHOTO_BUDGET_CHARS:4000000
+    ZENOFIT_API=http://127.0.0.1:8787 ZENOFIT_SWEEP=1 ZENOFIT_BUDGET=1 python3 test/smoke_photos.py
+
 The cases worth holding:
   - an upload whose bytes do not match its id is refused, or anybody could
     store a different picture under an id somebody's library points at
@@ -255,6 +262,51 @@ if os.environ.get("ZENOFIT_SWEEP"):
     check("while one a message shows is left alone", exists(friend_tok, sp), sp)
 else:
     print("\n(the sweep checks need a local wrangler dev: set ZENOFIT_SWEEP=1, see the top of this file)")
+
+# ── the store's own ceiling ─────────────────────────────────────────────────
+# Fills the store, so local only, and only with a small ceiling and the sweep
+# to make room again afterwards (see the top of this file).
+LOCAL = API.startswith("http://127.0.0.1") or API.startswith("http://localhost")
+if os.environ.get("ZENOFIT_BUDGET") and os.environ.get("ZENOFIT_SWEEP") and LOCAL:
+    print("\n== the photo store as a whole has a ceiling (local only) ==")
+    full_tok, _ = register("full")
+    s, fp, _ = call("POST", "/v1/profiles", token=full_tok, body={"name": "fills the store"})
+    fprof = fp["profileId"]
+
+    def big():
+        # about 1.3 million characters, just under one photo's own limit
+        return "data:image/jpeg;base64," + base64.b64encode(b"\xff\xd8\xff\xe0" + os.urandom(970000) + b"\xff\xd9").decode()
+
+    stored, refused = [], None
+    for _ in range(40):
+        pic = big()
+        s, r, _ = call("PUT", "/v1/photos/" + photo_id(pic), token=full_tok, body={"data": pic})
+        if s == 507:
+            refused = r
+            break
+        stored.append(pic)
+    check("uploads stop at the store's ceiling, with an answer of their own",
+          refused is not None and refused.get("error") == "photo_storage_full", (len(stored), s, refused))
+    if stored:
+        s, r, _ = call("PUT", "/v1/photos/" + photo_id(stored[0]), token=full_tok, body={"data": stored[0]})
+        check("a photo already stored is still answered: asking twice costs nothing", s == 200 and r.get("stored") is False, (s, r))
+    s, r, _ = push(full_tok, fprof, [{"collection": "log", "itemId": "full-1", "json": {"id": "full-1", "exercise": "Squat"},
+                                      "clientUpdatedAt": int(time.time() * 1000)}])
+    check("training still goes up while the store is full", s == 200 and r.get("accepted") == 1, (s, r))
+    s, ch, _ = call("POST", "/v1/chats", token=full_tok, body={"userId": friend_id})
+    s, r, _ = call("POST", "/v1/chats/%s/messages" % ch["threadId"], token=full_tok, body={"body": "still here", "clientId": "full1"})
+    check("and so does a message", s == 201, (s, r))
+    # a full-size one: a small picture can still fit in whatever room is left
+    s, r, _ = call("POST", "/v1/chats/%s/photos" % ch["threadId"], token=full_tok, body={"data": big()})
+    check("while a chat photo is refused the same way", s == 507 and r.get("error") == "photo_storage_full", (s, r))
+    # the fillers are held by nothing, so the sweep (grace 0) takes them
+    urllib.request.urlopen(urllib.request.Request(API + "/__scheduled?cron=23+3+*+*+*"), timeout=30).read()
+    again = data_url()
+    s, r, _ = call("PUT", "/v1/photos/" + photo_id(again), token=full_tok, body={"data": again})
+    check("once room is made, uploads work again", s == 201, (s, r))
+    call("DELETE", "/v1/profiles/" + fprof, token=full_tok)
+else:
+    print("\n(the store-ceiling checks need a local wrangler dev with a small ceiling: set ZENOFIT_BUDGET=1 and ZENOFIT_SWEEP=1, see the top of this file)")
 
 call("DELETE", "/v1/profiles/" + profile, token=owner_tok)
 

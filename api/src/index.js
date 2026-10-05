@@ -263,11 +263,16 @@ async function route(request, env, url, ctx) {
   const seg = p.split("/").filter(Boolean);          // ['v1','profiles','<id>','seeds']
 
   /* Liveness. Also proves the D1 binding works, which is the thing that is
-     actually wrong when a fresh deploy misbehaves. */
+     actually wrong when a fresh deploy misbehaves. It answers to anybody,
+     so it says ok or error and nothing else: the database's own words can
+     name tables, limits and internals, and they belong in `wrangler tail`. */
   if (p === "/health" && method === "GET") {
     let db = "unknown";
     try { await env.DB.prepare("SELECT 1").first(); db = "ok"; }
-    catch (e) { db = "error: " + (e && e.message ? e.message : String(e)); }
+    catch (e) {
+      console.error("health: database check failed", e && e.message ? e.message : e);
+      db = "error";
+    }
     return json({ ok: db === "ok", service: "zenofit-api", db, time: Date.now() });
   }
 

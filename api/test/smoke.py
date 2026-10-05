@@ -37,6 +37,11 @@ def device(label):
     assert s == 201, (s, b)
     return b["token"], b["userId"]
 
+print("\n== health ==")
+s, b, _ = call("GET", "/health")
+check("health answers ok", s == 200 and b.get("ok") is True and b.get("db") == "ok", (s, b))
+check("and says nothing else about the database", set(b) == {"ok", "service", "db", "time"}, b)
+
 print("\n== identity ==")
 s, b, _ = call("GET", "/v1/me")
 check("no token is 401", s == 401, (s, b))
@@ -112,6 +117,11 @@ for bad, why in [("", "empty"), ("ABC", "too short"), ("ZZZZ-ZZZZ-ZZZZZZ", "too 
     check("rejects %s code with 400" % why, s == 400, (s, b))
 s, b, _ = call("POST", "/v1/join", token=tokD, body={"seed": "ZZZZ-ZZZZ-ZZ"})
 check("well-formed but unknown code is 404", s == 404, (s, b))
+# a broken percent-escape throws inside the route: whatever it costs, the
+# reply is the API's own general words and never the exception's
+s, b, _ = call("DELETE", "/v1/seeds/%E0%A4%A", token=tokD)
+check("an error inside the API is answered in general terms", b.get("error") in ("server_error", "bad_request")
+      and "URIError" not in json.dumps(b) and "malformed" not in json.dumps(b).lower(), (s, b))
 
 print("\n== rotation ==")
 s, rot, _ = call("POST", "/v1/profiles/%s/seeds" % PID, token=tokA, body={"level": "write", "rotate": True})

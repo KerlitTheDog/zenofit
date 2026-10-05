@@ -29,7 +29,7 @@ import { accessFor, canRead, canWrite, canAdmin } from "./access.js";
 import { sendToUser } from "./push.js";
 import { chatRoute } from "./chat.js";
 import { photoRoute, setHoldings, dropHoldingsUnder, itemHolder, sweepPhotos } from "./photos.js";
-import { overLimit, recordMiss, countIn, limited, limitOf } from "./limits.js";
+import { overLimit, recordMiss, countIn, limited, limitOf, sweepLimits } from "./limits.js";
 import { deleteAccount } from "./account.js";
 import {
   validateItem, encodeCursor, decodeCursor,
@@ -1429,12 +1429,20 @@ async function route(request, env, url, ctx) {
 
 export default {
   /* Once a day (the cron in wrangler.toml): photos nothing has held for the
-     whole grace period, and chat photos no message shows. See photos.js. */
+     whole grace period, and chat photos no message shows (photos.js); and
+     the rate-limit counters whose windows are long over, which hold IP
+     addresses and usernames (limits.js). Each on its own, so one failing
+     never stops the other. Four queries in all. */
   async scheduled(event, env, ctx) {
     ctx.waitUntil(
       sweepPhotos(env)
         .then((r) => console.log("photo sweep", JSON.stringify(r)))
         .catch((e) => console.error("photo sweep failed", e && e.message ? e.message : e))
+    );
+    ctx.waitUntil(
+      sweepLimits(env)
+        .then((r) => console.log("limit sweep", JSON.stringify(r)))
+        .catch((e) => console.error("limit sweep failed", e && e.message ? e.message : e))
     );
   },
 

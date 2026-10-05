@@ -19,8 +19,14 @@ Each of those checks speaks from an address of its own (a CF-Connecting-IP
 header, which wrangler dev passes through and Cloudflare overwrites), so the
 rest of the run is never refused because of them. They ask until refused, so
 they work with the defaults and with any `--var LIMIT_*_PER_HOUR` override.
+
+The daily sweep's other half, deleting rate-limit counters whose window is
+long over, can only be set off locally too, with a short keep:
+
+    npx wrangler dev --test-scheduled --var LIMIT_ROW_KEEP_MS:3000
+    ZENOFIT_API=http://127.0.0.1:8787 ZENOFIT_SWEEP=1 python3 test/smoke_auth.py
 """
-import json, os, urllib.request, urllib.error, hashlib, secrets
+import json, os, urllib.request, urllib.error, hashlib, secrets, time
 
 API = os.environ.get("ZENOFIT_API", "https://zenofit-api.kerlit.workers.dev")
 PASS, FAIL = [], []
@@ -203,6 +209,11 @@ for _ in range(3):
 check("and right passwords are never counted against anyone", s == 200, (s, b))
 
 LOCAL = API.startswith("http://127.0.0.1") or API.startswith("http://localhost")
+
+def fresh_addr():
+    """An address nothing else in the run speaks from (local only, see the top)."""
+    return "10.%d.%d.%d" % tuple(secrets.randbelow(250) + 1 for _ in range(3))
+
 if os.environ.get("ZENOFIT_LIMITS") and LOCAL:
     print("\n== making identities has a ceiling per address (local only) ==")
     CAP = 1000   # a ceiling above this is not a ceiling worth testing for
@@ -217,17 +228,14 @@ if os.environ.get("ZENOFIT_LIMITS") and LOCAL:
             ok += 1
         return ok, s, b
 
-    def addr():
-        return "10.%d.%d.%d" % tuple(secrets.randbelow(250) + 1 for _ in range(3))
-
-    a = addr()
+    a = fresh_addr()
     n, s, b = until_refused(lambda: call("POST", "/v1/devices", body={"displayName": None}, addr=a))
     check("minting devices from one address is refused at a ceiling", s == 429 and b.get("error") == "too_many_signups", (n, s, b))
     print("        (refused after %d devices)" % n)
-    s, b = call("POST", "/v1/devices", body={"displayName": None}, addr=addr())
+    s, b = call("POST", "/v1/devices", body={"displayName": None}, addr=fresh_addr())
     check("while another address still mints one", s == 201, (s, b))
 
-    a = addr()
+    a = fresh_addr()
     n, s, b = until_refused(lambda: call("POST", "/v1/auth/register", addr=a,
                                          body={"username": "zl_" + secrets.token_hex(5), "key": secrets.token_hex(32)}))
     check("registering from one address is refused at a ceiling", s == 429 and b.get("error") == "too_many_signups", (n, s, b))
@@ -236,11 +244,11 @@ if os.environ.get("ZENOFIT_LIMITS") and LOCAL:
     check("a malformed registration is still just malformed: it was never counted", s == 400 and b.get("error") == "bad_username", (s, b))
     s, b = call("POST", "/v1/auth/login", addr=a, body={"username": NAME, "key": derive(NAME, PW)})
     check("and logging in from that address still works", s == 200, (s, b))
-    s, b = call("POST", "/v1/auth/register", addr=addr(),
+    s, b = call("POST", "/v1/auth/register", addr=fresh_addr(),
                 body={"username": "zl_" + secrets.token_hex(5), "key": secrets.token_hex(32)})
     check("another address still registers", s == 201, (s, b))
 
-    a = addr()
+    a = fresh_addr()
     n, s, b = until_refused(lambda: call("GET", "/v1/auth/available?username=zl_" + secrets.token_hex(5), addr=a))
     check("asking whether names are free is refused at a ceiling", s == 429 and b.get("error") == "too_many_lookups", (n, s, b))
     print("        (refused after %d name checks)" % n)
@@ -256,6 +264,36 @@ if os.environ.get("ZENOFIT_LIMITS") and LOCAL:
     check("and the next /64 has its own", s == 201, (s, b))
 else:
     print("\n(the identity-ceiling checks need a local wrangler dev: set ZENOFIT_LIMITS=1, see the top of this file)")
+
+if os.environ.get("ZENOFIT_SWEEP") and LOCAL:
+    print("\n== a spent counter leaves with the daily sweep (local only) ==")
+    # needs wrangler dev --test-scheduled --var LIMIT_ROW_KEEP_MS:3000 (see the top)
+    def sweep():
+        urllib.request.urlopen(urllib.request.Request(API + "/__scheduled?cron=23+3+*+*+*"), timeout=30).read()
+
+    a = fresh_addr()
+    for i in range(10):
+        call("POST", "/v1/auth/login", addr=a, body={"username": NAME, "key": "%064x" % (i + 1)})
+    right = {"username": NAME, "key": derive(NAME, PW)}
+    s, b = call("POST", "/v1/auth/login", addr=a, body=right)
+    check("an address that guessed ten times is held up", s == 429, (s, b))
+    sweep()
+    s, b = call("POST", "/v1/auth/login", addr=a, body=right)
+    check("a counter that can still refuse something survives the sweep", s == 429, (s, b))
+    time.sleep(3.3)
+    sweep()
+    s, b = call("POST", "/v1/auth/login", addr=a, body=right)
+    check("once it is old enough the sweep deletes it (it held an address and a name)", s == 200, (s, b))
+
+    joiner, _ = device("join counter")
+    codes = [call("POST", "/v1/join", token=joiner, body={"seed": "ZZZZ-ZZZZ-ZZ"})[0] for _ in range(12)]
+    check("a device trying codes is held up", 429 in codes, codes)
+    time.sleep(3.3)
+    sweep()
+    s, b = call("POST", "/v1/join", token=joiner, body={"seed": "ZZZZ-ZZZZ-ZZ"})
+    check("and its old join counter goes with the same sweep", s == 404, (s, b))
+else:
+    print("\n(the counter-sweep checks need a local wrangler dev: set ZENOFIT_SWEEP=1, see the top of this file)")
 
 print("\n%d passed, %d failed" % (len(PASS), len(FAIL)))
 if FAIL:

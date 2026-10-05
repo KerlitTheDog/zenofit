@@ -56,6 +56,33 @@ export function limitOf(env, name, fallback) {
   return Number.isFinite(v) && v >= 1 ? Math.floor(v) : fallback;
 }
 
+/* ── A SPENT COUNTER DOES NOT STAY ─────────────────────────────────────
+   Nothing ever deleted a row here once its window was over, so the table
+   only grew, and what it grows with is personal: a login key is an IP
+   address and a username, a signup key an address. A counter is kept for
+   as long as it can still refuse something, and a day on top, then the
+   daily cron (`scheduled` in index.js) deletes it, together with the old
+   join_attempts rows, which are the same thing in a table of their own.
+   The longest window anything here uses is an hour (the signup and search
+   ceilings), so a row whose window began a day and an hour ago is over
+   for every key. Two statements in one batch whatever the count, against
+   the fifty queries the free plan allows per invocation. The environment
+   may shorten the wait, which is only ever done for a local test. */
+export const LIMIT_ROW_KEEP_MS = 25 * 60 * 60 * 1000;
+
+export async function sweepLimits(env, now = Date.now()) {
+  const v = env && env.LIMIT_ROW_KEEP_MS;
+  const keep = v != null && v !== "" && Number.isFinite(Number(v)) ? Number(v) : LIMIT_ROW_KEEP_MS;
+  const [rates, joins] = await env.DB.batch([
+    env.DB.prepare("DELETE FROM rate_limits WHERE window_start < ?").bind(now - keep),
+    env.DB.prepare("DELETE FROM join_attempts WHERE window_start < ?").bind(now - keep),
+  ]);
+  return {
+    rateLimits: (rates.meta && rates.meta.changes) || 0,
+    joinAttempts: (joins.meta && joins.meta.changes) || 0,
+  };
+}
+
 /* What has been counted under a key inside its window, 0 once the window
    has gone by. The wipe guard reads it to see a delete split over several
    pushes as the one delete it is. */

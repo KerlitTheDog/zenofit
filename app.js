@@ -5926,8 +5926,9 @@ window.addEventListener("beforeunload", writeNow);
 
 /* Stamp the active theme onto <html> so the CSS variable blocks apply.
 
-   And leave it where index.html's anti-flash script can read it before
-   anything else has loaded. That script used to read the theme out of
+   And leave it where theme.js, the anti-flash script index.html loads in
+   its head, can read it before anything else has loaded. That script used
+   to read the theme out of
    `powerbuild-tracker:v1`, the one key nothing has written since profiles
    arrived, so a light-theme user got a dark first frame on every launch.
    Its own key, outside `state`, because what the last screen looked like

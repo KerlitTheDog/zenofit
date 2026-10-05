@@ -214,7 +214,8 @@ body { background: var(--outer); }
 /* ── THEMES ────────────────────────────────────────────────────────────
    Every color the app draws with comes from these variables, so a theme
    is just a different set of values. `data-theme` is stamped on <html> by
-   app.js (and by the anti-flash inline script in index.html).            */
+   app.js, and before the first paint by theme.js, which index.html loads
+   in its head.                                                           */
 
 :root,
 :root[data-theme="dark"]{

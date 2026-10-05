@@ -8,6 +8,17 @@ Run against production by default, or a local `wrangler dev` with:
 The client derives its key with PBKDF2 before anything is sent, so this file
 does the same. If these two ever disagree the app will look broken while every
 test here passes, so the parameters live in one obvious place at the top.
+
+The ceilings on making identities (devices, registrations, name checks, per
+address per hour) are checked only against a local `wrangler dev`, because
+tripping one against production would lock the tester's own address:
+
+    ZENOFIT_API=http://127.0.0.1:8787 ZENOFIT_LIMITS=1 python3 test/smoke_auth.py
+
+Each of those checks speaks from an address of its own (a CF-Connecting-IP
+header, which wrangler dev passes through and Cloudflare overwrites), so the
+rest of the run is never refused because of them. They ask until refused, so
+they work with the defaults and with any `--var LIMIT_*_PER_HOUR` override.
 """
 import json, os, urllib.request, urllib.error, hashlib, secrets
 
@@ -21,10 +32,12 @@ def derive(username, password):
     salt = ("zenofit:" + username.lower()).encode()
     return hashlib.pbkdf2_hmac("sha256", password.encode(), salt, PBKDF2_ITERS).hex()
 
-def call(method, path, token=None, body=None):
+def call(method, path, token=None, body=None, addr=None):
     req = urllib.request.Request(API + path, method=method)
     req.add_header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/128 Mobile Safari/537.36")
     if token: req.add_header("Authorization", "Bearer " + token)
+    # local only: the address a request claims to come from (see the top)
+    if addr: req.add_header("CF-Connecting-IP", addr)
     data = None
     if body is not None:
         data = json.dumps(body).encode()
@@ -188,6 +201,61 @@ check("an account nobody is guessing at still logs in", s == 200, (s, b))
 for _ in range(3):
     s, b = call("POST", "/v1/auth/login", body={"username": CLAIM, "key": derive(CLAIM, PW)})
 check("and right passwords are never counted against anyone", s == 200, (s, b))
+
+LOCAL = API.startswith("http://127.0.0.1") or API.startswith("http://localhost")
+if os.environ.get("ZENOFIT_LIMITS") and LOCAL:
+    print("\n== making identities has a ceiling per address (local only) ==")
+    CAP = 1000   # a ceiling above this is not a ceiling worth testing for
+
+    def until_refused(make):
+        """Calls make() until it is refused; returns (how many got through, last status, last body)."""
+        ok = 0
+        for _ in range(CAP):
+            s, b = make()
+            if s == 429:
+                return ok, s, b
+            ok += 1
+        return ok, s, b
+
+    def addr():
+        return "10.%d.%d.%d" % tuple(secrets.randbelow(250) + 1 for _ in range(3))
+
+    a = addr()
+    n, s, b = until_refused(lambda: call("POST", "/v1/devices", body={"displayName": None}, addr=a))
+    check("minting devices from one address is refused at a ceiling", s == 429 and b.get("error") == "too_many_signups", (n, s, b))
+    print("        (refused after %d devices)" % n)
+    s, b = call("POST", "/v1/devices", body={"displayName": None}, addr=addr())
+    check("while another address still mints one", s == 201, (s, b))
+
+    a = addr()
+    n, s, b = until_refused(lambda: call("POST", "/v1/auth/register", addr=a,
+                                         body={"username": "zl_" + secrets.token_hex(5), "key": secrets.token_hex(32)}))
+    check("registering from one address is refused at a ceiling", s == 429 and b.get("error") == "too_many_signups", (n, s, b))
+    print("        (refused after %d registrations)" % n)
+    s, b = call("POST", "/v1/auth/register", addr=a, body={"username": "x", "key": secrets.token_hex(32)})
+    check("a malformed registration is still just malformed: it was never counted", s == 400 and b.get("error") == "bad_username", (s, b))
+    s, b = call("POST", "/v1/auth/login", addr=a, body={"username": NAME, "key": derive(NAME, PW)})
+    check("and logging in from that address still works", s == 200, (s, b))
+    s, b = call("POST", "/v1/auth/register", addr=addr(),
+                body={"username": "zl_" + secrets.token_hex(5), "key": secrets.token_hex(32)})
+    check("another address still registers", s == 201, (s, b))
+
+    a = addr()
+    n, s, b = until_refused(lambda: call("GET", "/v1/auth/available?username=zl_" + secrets.token_hex(5), addr=a))
+    check("asking whether names are free is refused at a ceiling", s == 429 and b.get("error") == "too_many_lookups", (n, s, b))
+    print("        (refused after %d name checks)" % n)
+    s, b = call("GET", "/v1/auth/available?username=ab", addr=a)
+    check("an illegal name is still answered: it never reaches the database", s == 200 and b.get("available") is False, (s, b))
+
+    # IPv6 counts by its /64, the block one machine is handed: walking
+    # through addresses it already owns must not reset anything.
+    n, s, b = until_refused(lambda: call("POST", "/v1/devices", body={}, addr="2001:db8:5:%x::1" % 7))
+    s2, b2 = call("POST", "/v1/devices", body={}, addr="2001:db8:5:7:abcd:ef01:2345:6789")
+    check("an IPv6 address shares its /64's ceiling", s == 429 and s2 == 429, (n, s, s2, b2))
+    s, b = call("POST", "/v1/devices", body={}, addr="2001:db8:5:8::1")
+    check("and the next /64 has its own", s == 201, (s, b))
+else:
+    print("\n(the identity-ceiling checks need a local wrangler dev: set ZENOFIT_LIMITS=1, see the top of this file)")
 
 print("\n%d passed, %d failed" % (len(PASS), len(FAIL)))
 if FAIL:

@@ -37,3 +37,12 @@ VAPID_SUBJECT = "mailto:swagerooner@gmail.com"
 # The public half of the VAPID pair. Public by design: the app ships it too.
 # The private half lives in a secret (wrangler secret put VAPID_PRIVATE_KEY).
 VAPID_PUBLIC_KEY = "BHYPfSTAzNvtQIcnSPN99oHb5YN3FV0W1wJG_VJKQqXngrW8aJ4z8OQPg4vpgWW4MVqt_DtGgv3_I4PDzXlgOMA"
+
+# Ceilings on making identities and on asking about them, per hour. Why
+# these numbers: the block above SIGNUP_WINDOW_MS in src/index.js. Read as
+# numbers; a missing or broken value falls back to the one in the code, and
+# a local test can move one with `wrangler dev --var LIMIT_DEVICES_PER_HOUR:5`.
+LIMIT_DEVICES_PER_HOUR = "100"     # POST /v1/devices, per address
+LIMIT_REGISTER_PER_HOUR = "100"    # POST /v1/auth/register, per address
+LIMIT_AVAILABLE_PER_HOUR = "200"   # GET /v1/auth/available, per address
+LIMIT_SEARCH_PER_HOUR = "300"      # GET /v1/users/search, per account

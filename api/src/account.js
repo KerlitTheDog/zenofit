@@ -158,11 +158,11 @@ export async function deleteAccount(env, user) {
        'login:<address>:<username>' and a username has no colon, so the
        tail is exact */
     loginKey
-      ? q("DELETE FROM rate_limits WHERE key IN (?, ?) OR key IN (SELECT 'wipe:' || id FROM profiles WHERE owner_id = ?) " +
+      ? q("DELETE FROM rate_limits WHERE key IN (?, ?, ?) OR key IN (SELECT 'wipe:' || id FROM profiles WHERE owner_id = ?) " +
           "OR (key >= 'login:' AND key < 'login;' AND substr(key, ?) = ?)",
-          "chat:send:" + uid, "photo:up:" + uid, uid, -loginKey.length, loginKey)
-      : q("DELETE FROM rate_limits WHERE key IN (?, ?) OR key IN (SELECT 'wipe:' || id FROM profiles WHERE owner_id = ?)",
-          "chat:send:" + uid, "photo:up:" + uid, uid),
+          "chat:send:" + uid, "photo:up:" + uid, "search:" + uid, uid, -loginKey.length, loginKey)
+      : q("DELETE FROM rate_limits WHERE key IN (?, ?, ?) OR key IN (SELECT 'wipe:' || id FROM profiles WHERE owner_id = ?)",
+          "chat:send:" + uid, "photo:up:" + uid, "search:" + uid, uid),
     profiles,
 
     /* ── the account itself ── */

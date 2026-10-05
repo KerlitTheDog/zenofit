@@ -31,5 +31,19 @@ Any of them runs against a local `wrangler dev` instead:
 
     ZENOFIT_API=http://127.0.0.1:8787 python3 test/smoke_roster.py
 
+Checks that trip a limit or fill storage run ONLY against a local `wrangler
+dev`, and say so when skipped. Tripping a limit against production would lock
+the tester's own address:
+
+    ZENOFIT_LIMITS=1   smoke_auth.py and smoke_chat.py ask until refused: the
+                       ceilings on devices, registrations and name checks per
+                       address (each from an address of its own), and on
+                       searches per account. The defaults are fine.
+    ZENOFIT_SWEEP=1    smoke_photos.py sets off the daily sweep by hand; needs
+                       `wrangler dev --test-scheduled --var PHOTO_GRACE_MS:0`.
+
+A full run counts against the ceilings on the address it comes from (29 devices
+and 24 registrations per run), so three full runs fit in one hour.
+
 Note: Cloudflare answers `error code: 1010` to a bare Python user-agent before
 the Worker ever runs, which is why the script sends a browser one.

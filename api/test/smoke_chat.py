@@ -15,6 +15,10 @@ The ones that actually break a chat:
   - a stranger reading a thread by guessing an id
   - a block that only hides messages on one screen while the other side
     goes on sending
+
+The ceiling on searches per account is checked only against a local
+`wrangler dev` (ZENOFIT_LIMITS=1), like the identity ceilings in
+smoke_auth.py: it searches until refused.
 """
 import os
 import json, urllib.request, urllib.error, sys, hashlib, time, uuid
@@ -397,6 +401,25 @@ s, r = call("GET", "/v1/chats")
 check("no token, no chats", s == 401, (s, r))
 s, r = call("GET", "/v1/users/search?q=ada")
 check("nor a name search", s == 401, (s, r))
+
+LOCAL = API.startswith("http://127.0.0.1") or API.startswith("http://localhost")
+if os.environ.get("ZENOFIT_LIMITS") and LOCAL:
+    print("\n== searching has a ceiling per account (local only) ==")
+    seeker = account("lim")
+    got, s, r = 0, None, {}
+    for i in range(1000):
+        s, r = call("GET", "/v1/users/search?q=zz" + uuid.uuid4().hex[:4], token=seeker["token"])
+        if s == 429:
+            break
+        got += 1
+    check("one account searching on and on is refused at a ceiling", s == 429 and r.get("error") == "too_many_searches", (got, s, r))
+    print("        (refused after %d searches)" % got)
+    s, r = call("GET", "/v1/users/search?q=a", token=seeker["token"])
+    check("a one-letter search is still answered: it never reaches the database", s == 200 and r.get("users") == [], (s, r))
+    s, r = call("GET", "/v1/users/search?q=" + her["name"], token=him["token"])
+    check("while everybody else still searches", s == 200 and any(u["userId"] == her["id"] for u in r.get("users", [])), (s, r))
+else:
+    print("\n(the search-ceiling check needs a local wrangler dev: set ZENOFIT_LIMITS=1)")
 
 print("\n%d passed, %d failed" % (len(PASS), len(FAIL)))
 if FAIL:

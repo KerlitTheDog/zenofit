@@ -29,7 +29,7 @@ import { accessFor, canRead, canWrite, canAdmin } from "./access.js";
 import { sendToUser } from "./push.js";
 import { chatRoute } from "./chat.js";
 import { photoRoute, setHoldings, dropHoldingsUnder, itemHolder, sweepPhotos } from "./photos.js";
-import { overLimit, recordMiss, countIn } from "./limits.js";
+import { overLimit, recordMiss, countIn, limited, limitOf } from "./limits.js";
 import { deleteAccount } from "./account.js";
 import {
   validateItem, encodeCursor, decodeCursor,
@@ -118,6 +118,48 @@ async function loginMissed(env, keys) {
 }
 const tooManyLogins = () =>
   fail(429, "too_many_attempts", "Too many wrong passwords. Wait a few minutes and try again.");
+
+/* ── MAKING AN IDENTITY, AND ASKING WHETHER A NAME HAS ONE ──────────────
+   POST /v1/devices and POST /v1/auth/register had no ceiling, so a script
+   could mint tokens by the thousand, each with a photo quota of its own,
+   and every one of them spending the free plan's daily D1 writes that
+   everybody's training runs on. Both are now counted per address over an
+   hour, and so is GET /v1/auth/available, the one question that says
+   whether a name is taken (login is careful never to). Search has its own
+   ceiling, per account, in chat.js. The numbers are [vars] in
+   wrangler.toml, so they move without a release; these are the fallback.
+
+   Sized against the two things that must keep working. A full run of all
+   eight smoke suites from one address mints 29 devices and makes 24
+   registrations that count (measured; count again when a suite grows),
+   so three runs fit in one hour. And a gym signing up a whole class on
+   its own wifi, which is one address: one registration and one or two
+   name checks per person. The client asks /available once per refused
+   login, never per keystroke. Only a request that would reach the
+   database is counted: a malformed one is refused before it costs
+   anything, and is not held against the address. */
+const SIGNUP_WINDOW_MS = 60 * 60_000;
+const DEFAULT_DEVICES_PER_HOUR = 100;
+const DEFAULT_REGISTER_PER_HOUR = 100;
+const DEFAULT_AVAILABLE_PER_HOUR = 200;
+
+/* The address a ceiling is kept under. An IPv6 address counts by its /64,
+   the block one household or one server is handed: counting each /128
+   would let one machine walk through addresses it already owns. An IPv4
+   address, or the "local" a dev server reports, is kept as it is. */
+function addressKey(request) {
+  const ip = clientAddress(request).trim();
+  if (!ip.includes(":")) return ip;
+  if (ip.includes(".")) return ip.slice(ip.lastIndexOf(":") + 1);   // IPv4 written as IPv6
+  const [head, tail = ""] = ip.split("::");
+  const h = head ? head.split(":") : [];
+  const t = tail ? tail.split(":") : [];
+  const all = [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill("0"), ...t];
+  return all.slice(0, 4).map((g) => (parseInt(g, 16) || 0).toString(16)).join(":") + "::/64";
+}
+
+const tooManySignups = () =>
+  fail(429, "too_many_signups", "Too many new accounts from this network. Wait a while and try again.");
 
 async function authenticate(request, env) {
   const h = request.headers.get("Authorization") || "";
@@ -232,6 +274,8 @@ async function route(request, env, url, ctx) {
   /* First launch. The app stores the result and never calls this again;
      calling it twice makes two devices, which is correct, not a bug. */
   if (p === "/v1/devices" && method === "POST") {
+    if (await limited(env, "signup:device:" + addressKey(request), SIGNUP_WINDOW_MS,
+        limitOf(env, "LIMIT_DEVICES_PER_HOUR", DEFAULT_DEVICES_PER_HOUR))) return tooManySignups();
     const body = await readJson(request).catch(() => ({}));
     const id = newId();
     const token = newToken();
@@ -275,6 +319,8 @@ async function route(request, env, url, ctx) {
     const key = cleanKey(body.key);
     if (!username) return fail(400, "bad_username", "3 to 24 characters: letters, digits, dot, dash or underscore, starting with a letter or digit.");
     if (!key) return fail(400, "bad_request", "Missing or malformed key. The app derives this from the password.");
+    if (await limited(env, "signup:register:" + addressKey(request), SIGNUP_WINDOW_MS,
+        limitOf(env, "LIMIT_REGISTER_PER_HOUR", DEFAULT_REGISTER_PER_HOUR))) return tooManySignups();
 
     const lc = username.toLowerCase();
     const taken = await env.DB.prepare("SELECT id FROM users WHERE username_lc = ?").bind(lc).first();
@@ -367,12 +413,17 @@ async function route(request, env, url, ctx) {
     return json({ userId: row.id, username: row.username });
   }
 
-  /* Is this name free? Asked while somebody is still typing it, so it is
-     cheap and says nothing a registration attempt would not say a second
-     later anyway. */
+  /* Is this name free? Asked once a login has been refused, to decide
+     whether to offer making the account (never per keystroke). It says
+     nothing a registration attempt would not say a second later anyway,
+     and it is counted per address the way registering is. */
   if (p === "/v1/auth/available" && method === "GET") {
     const username = cleanUsername(url.searchParams.get("username") || "");
     if (!username) return json({ username: null, available: false, reason: "bad_username" });
+    if (await limited(env, "lookup:name:" + addressKey(request), SIGNUP_WINDOW_MS,
+        limitOf(env, "LIMIT_AVAILABLE_PER_HOUR", DEFAULT_AVAILABLE_PER_HOUR))) {
+      return fail(429, "too_many_lookups", "Too many name checks from this network. Wait a while and try again.");
+    }
     const taken = await env.DB.prepare("SELECT id FROM users WHERE username_lc = ?").bind(username.toLowerCase()).first();
     return json({ username, available: !taken });
   }

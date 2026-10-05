@@ -20,7 +20,7 @@
  * the same row instead of sending twice.
  */
 
-import { limited } from "./limits.js";
+import { limited, limitOf } from "./limits.js";
 import { cleanDataUrl, sha256Hex, storePhoto, setHoldings, msgHolder, payloadPhotoIds, isPhotoId } from "./photos.js";
 
 /* Long enough for anything anybody types into a gym app, short enough that
@@ -58,6 +58,13 @@ export const PAGE_MAX = 200;
    nothing in a loop should be able to burn the free request budget. */
 const SEND_WINDOW_MS = 60_000;
 const SEND_MAX_PER_WINDOW = 60;
+
+/* Searches per account per hour. The app asks as somebody types a name,
+   debounced, so one person looking somebody up is a handful; this is the
+   ceiling on walking the list of usernames prefix by prefix. A [var] in
+   wrangler.toml (LIMIT_SEARCH_PER_HOUR) moves it without a release. */
+const SEARCH_WINDOW_MS = 60 * 60_000;
+const DEFAULT_SEARCH_PER_HOUR = 300;
 
 /* How much of a message goes in a notification. The rest is behind the tap. */
 const PREVIEW = 120;
@@ -142,6 +149,11 @@ export async function chatRoute(ctx) {
     /* Two characters, so the first keystroke does not hand back an
        alphabet's worth of accounts. */
     if (q.length < 2) return json({ q: raw, users: [] });
+    /* counted only once it is a question the database has to answer */
+    if (await limited(env, "search:" + user.id, SEARCH_WINDOW_MS,
+        limitOf(env, "LIMIT_SEARCH_PER_HOUR", DEFAULT_SEARCH_PER_HOUR))) {
+      return fail(429, "too_many_searches", "Too many searches. Wait a few minutes and try again.");
+    }
 
     /* LIKE with an escaped prefix: _ and % are wildcards in SQL and legal
        in a username, so "a_" must not match "ab". */

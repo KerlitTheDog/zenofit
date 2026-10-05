@@ -47,6 +47,15 @@ export async function recordMiss(env, key, windowMs, n = 1) {
   ).bind(key, now, n, now, windowMs, now, windowMs).run();
 }
 
+/* A ceiling read from the environment ([vars] in wrangler.toml, or a
+   `wrangler dev --var NAME:VALUE` for a local test), falling back to the
+   number the code was written with when the value is missing or is not a
+   positive number. [vars] arrive as strings. */
+export function limitOf(env, name, fallback) {
+  const v = Number(env && env[name]);
+  return Number.isFinite(v) && v >= 1 ? Math.floor(v) : fallback;
+}
+
 /* What has been counted under a key inside its window, 0 once the window
    has gone by. The wipe guard reads it to see a delete split over several
    pushes as the one delete it is. */

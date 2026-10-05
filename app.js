@@ -4980,15 +4980,48 @@ function chatRepaint() {
   }
 }
 
-/* The server's own sentence wherever it has one, since it is the useful
-   half — "this person is not accepting messages from you" says what to do
-   and `blocked` does not. Same reasoning as syncErrText. */
-function chatErrText(e) {
+/* ── A REFUSAL, IN THE PERSON'S OWN LANGUAGE ───────────────────────────
+   The API answers every refusal with a code and an English sentence. The
+   sentence says what to do where nothing better exists, and syncErrText
+   keeps it on purpose; but on a Svenska or Ukrainian screen an English
+   sentence is the server talking past the person. So a code the app knows
+   is said in their language (API_ERR_KEY, and the caller's own codes
+   first), a request that never reached the server says so in the caller's
+   words for that (`offlineKey`), a fault on the server's side is said as
+   one rather than as a dead connection, and only a code nothing here has
+   heard of falls back to the server's own sentence. */
+const API_ERR_KEY = {
+  too_many_attempts: "acct.errTooMany",
+  too_many_signups: "err.tooManySignups",
+  too_many_lookups: "err.tooManyLookups",
+  too_many_searches: "err.tooManySearches",
+  too_fast: "err.tooFast",
+  photo_storage_full: "photo.storeFull",
+  photo_quota: "err.photoQuota",
+  bad_photo: "err.badPhoto",
+  bad_photo_id: "err.badPhoto",
+  too_large: "err.photoTooBig",
+  account_required: "err.accountRequired",
+  server_error: "err.server",
+};
+function apiErrText(e, offlineKey) {
+  if (!e) return T("chat.errGeneric");
+  if (!e.status) return T(offlineKey || "acct.errFailed");   // never reached the server
+  if (API_ERR_KEY[e.code]) return T(API_ERR_KEY[e.code]);
+  if (e.status >= 500) return T("err.server");
+  return e.message || T("chat.errGeneric");
+}
+
+/* Chat's own codes before the shared ones. `not_found` is the one whose
+   meaning depends on what was asked: a conversation that is gone, or (on
+   opening one) an account that is. */
+const CHAT_ERR_KEY = { blocked: "chat.errBlocked", you_blocked: "chat.errYouBlocked", not_found: "chat.errGone" };
+function chatErrText(e, notFoundKey) {
   if (!e) return T("chat.errGeneric");
   if (e.status === 401) return T("chat.errSignedOut");
-  if (!e.status) return T("chat.errOffline");   // never reached the server
-  if (e.code === "photo_storage_full") return T("photo.storeFull");
-  return e.message || T("chat.errGeneric");
+  if (e.status && e.code === "not_found" && notFoundKey) return T(notFoundKey);
+  if (e.status && CHAT_ERR_KEY[e.code]) return T(CHAT_ERR_KEY[e.code]);
+  return apiErrText(e, "chat.errOffline");
 }
 
 /* Three paces, one timer. The gate compares against the pace the app is
@@ -15152,7 +15185,7 @@ async function notifyDiagLoad() {
   const d = ui.notifyDiag || (ui.notifyDiag = {});
   d.loading = true;
   try { d.status = await C.pushStatus(); d.error = null; }
-  catch (e) { d.error = e && e.status ? (e.message || T("chat.errGeneric")) : T("chat.errOffline"); }
+  catch (e) { d.error = chatErrText(e); }
   d.loading = false;
   if (ui.notifyWin && !syncTyping()) render();
 }
@@ -17837,12 +17870,17 @@ const actions = {
       await C.signIn(username, f.password);
     } catch (e) {
       if (e && e.code === "bad_login") {
-        let free = false;
-        try { free = !!(await C.nameAvailable(username)).available; } catch { /* say wrong password */ }
-        ui.login = { ...ui.login, busy: false, confirmCreate: free, error: free ? null : T("acct.errWrong") };
+        let free = false, asked = null;
+        try { free = !!(await C.nameAvailable(username)).available; } catch (e2) { asked = e2; }
+        /* a question about the NAME that could not be answered (no signal,
+           or the ceiling on name checks from this network) is not a wrong
+           password, and saying it was sends somebody off retyping one */
+        ui.login = { ...ui.login, busy: false, confirmCreate: free,
+          error: asked ? apiErrText(asked, "login.offline") : free ? null : T("acct.errWrong") };
       } else {
-        /* the server slows guessing down; that is not "no signal" */
-        ui.login = { ...ui.login, busy: false, error: T(e && e.status === 429 ? "acct.errTooMany" : "login.offline") };
+        /* the server slows guessing down; that is not "no signal", and nor
+           is a fault on the server's side */
+        ui.login = { ...ui.login, busy: false, error: apiErrText(e, "login.offline") };
       }
       render();
       return;
@@ -17861,10 +17899,10 @@ const actions = {
       await C.register(f.username.trim(), f.password);
     } catch (e) {
       const code = e && e.code;
-      ui.login = { ...ui.login, busy: false, confirmCreate: code !== "name_taken" && code !== "bad_username", error: T(
-        code === "name_taken" ? "acct.errTaken"
-        : code === "bad_username" ? "acct.nameRules"
-        : "login.offline") };
+      ui.login = { ...ui.login, busy: false, confirmCreate: code !== "name_taken" && code !== "bad_username",
+        error: code === "name_taken" ? T("acct.errTaken")
+          : code === "bad_username" ? T("acct.nameRules")
+          : apiErrText(e, "login.offline") };
       render();
       return;
     }
@@ -17919,7 +17957,7 @@ const actions = {
       if (!signedInAs()) return;
       const wrong = e && e.code === "bad_password";
       ui.deleteAcct = { ...ui.deleteAcct, busy: false, password: wrong ? "" : ui.deleteAcct.password,
-        error: T(wrong ? "delacct.errWrong" : e && e.status === 429 ? "acct.errTooMany" : "acct.errFailed") };
+        error: wrong ? T("delacct.errWrong") : apiErrText(e, "acct.errFailed") };
       render();
       return;
     }
@@ -18031,10 +18069,13 @@ const actions = {
       joined = await C.joinWithSeed((f.code || "").trim());
     } catch (e) {
       const code = e && e.code;
+      /* a code of the wrong shape is as unrecognised as an unknown one, and
+         join's own 429 is about codes tried (too_many_attempts there is not
+         a password), so both are decided here before the shared words */
       ui.joinSheet = { ...ui.joinSheet, busy: false,
-        error: T(code === "not_found" || e.status === 404 ? "sync.joinBadCode"
-          : code === "rate_limited" || e.status === 429 ? "sync.joinTooMany"
-          : "sync.joinFailed") };
+        error: e && (code === "bad_code" || code === "not_found" || e.status === 404) ? T("sync.joinBadCode")
+          : e && e.status === 429 ? T("sync.joinTooMany")
+          : apiErrText(e, "sync.joinFailed") };
       render();
       return;
     }
@@ -18109,7 +18150,7 @@ const actions = {
       who = await C.verifyPassword(f.username.trim(), f.password);
     } catch (e) {
       ui.storUnlock = { ...ui.storUnlock, busy: false, password: "",
-        error: T(e && e.code === "bad_login" ? "stor.unlockWrong" : e && e.status === 429 ? "acct.errTooMany" : "stor.unlockOffline") };
+        error: e && e.code === "bad_login" ? T("stor.unlockWrong") : apiErrText(e, "stor.unlockOffline") };
       render();
       return;
     }
@@ -19021,7 +19062,7 @@ const actions = {
       chatPoll();
     } catch (e) {
       ui.chatStarting = false;
-      ui.chatResults = { q: (ui.chatFind || "").trim(), users: [], error: chatErrText(e) };
+      ui.chatResults = { q: (ui.chatFind || "").trim(), users: [], error: chatErrText(e, "chat.errNoAccount") };
       render();
     }
   },

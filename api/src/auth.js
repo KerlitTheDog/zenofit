@@ -9,7 +9,7 @@
  *
  * So the browser does it. zenofit-cloud.js runs PBKDF2-SHA256, 210,000
  * iterations, salted with the username, and what reaches this file is 256
- * bits of derived key — never the password itself. That is worth saying
+ * bits of derived key: never the password itself. That is worth saying
  * twice: THE SERVER NEVER SEES THE PASSWORD, in the request, in a log, or
  * in the database.
  *
@@ -65,7 +65,7 @@ export function cleanUsername(input) {
 }
 
 /* The client's PBKDF2 output, as it should arrive: 64 hex characters. This
- * is a shape check and nothing more — it stops a literal password being
+ * is a shape check and nothing more: it stops a literal password being
  * accepted by a client that skipped the derivation, which would otherwise
  * store something guessable under a fast hash. */
 export function cleanKey(input) {

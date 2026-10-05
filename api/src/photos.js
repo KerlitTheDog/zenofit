@@ -149,7 +149,7 @@ export async function storePhoto(env, user, id, data, threadId) {
 
   /* OR IGNORE, because two devices uploading the same picture at the same
      moment are both right, and whichever lands second has nothing to add.
-     A library photo arrives UNHELD — the row naming it comes after — so its
+     A library photo arrives UNHELD (the row naming it comes after), so its
      grace period starts now and the push that names it stops the clock. */
   const now = Date.now();
   await env.DB.prepare(

@@ -4,7 +4,7 @@
   /* Phase 5 will read this: sw.js posts notification clicks here so the app
      can jump to the timer that fired. Queued until app.js claims it.
      `updated` says a newer build than the one running is ready (see
-     updateReady), and `wantReload` that somebody asked for it — Refresh in
+     updateReady), and `wantReload` that somebody asked for it: Refresh in
      app.js reads both. */
   window.__zenofitSW = { pendingClicks: [], onClick: null, updated: false, wantReload: false };
   navigator.serviceWorker.addEventListener("message", function (e) {
@@ -61,7 +61,7 @@
 
   /* ── A NEW VERSION WAITS FOR A TAP, OR FOR NOBODY TO BE LOOKING ─────
      sw.js takes over the moment it installs (skipWaiting), and this used
-     to reload the page on every controllerchange — so a deploy reloaded
+     to reload the page on every controllerchange, so a deploy reloaded
      the app out from under whoever had it open, mid-set, keyboard up,
      and the banner below never got the chance to say anything. And on a
      phone's very FIRST visit, the new worker claiming the page fired the
@@ -69,7 +69,7 @@
 
      Now: a first install is ignored (this page IS the version that just
      installed). An update says so with the banner and reloads when
-     somebody taps Reload or Refresh — or straight away if the app is not
+     somebody taps Reload or Refresh, or straight away if the app is not
      on screen, and otherwise the moment it leaves the screen, which is
      the one reload nobody sees. Either way an app that is never closed
      still ends up on the new build without anybody having to know. */

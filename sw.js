@@ -73,7 +73,7 @@ self.addEventListener("activate", (e) => {
 /* A timer notification from a build before v32 carries no `ref` (see the
    push handler), so nothing can ever match it to the rest it announced and
    take it down: it would sit in the shade, and as the dot on the app's
-   icon, until swiped away by hand — which is the bug v32 fixes. A new
+   icon, until swiped away by hand, which is the bug v32 fixes. A new
    worker activates while the app is open, where the rest itself is on
    screen, so these are cleared then. The Notifications window's test
    timer has no `ref` either, and goes the same way if it is still there. */
@@ -105,8 +105,8 @@ function tellWindows(msg) {
 
 /* ── A CACHE THAT FAILS IS A CACHE THAT IS NOT THERE, NOT A DEAD APP ────
    Keeping a copy is the extra; the response is the job. `cache.put` used to
-   sit inside the chain that produced the response, so when it threw — a
-   full phone's QuotaExceededError, or Cache Storage broken outright — the
+   sit inside the chain that produced the response, so when it threw (a
+   full phone's QuotaExceededError, or Cache Storage broken outright), the
    perfectly good response fell through to `.catch(() => hit)`, and with
    nothing cached (which is exactly the state a failed install leaves) the
    page got a network error instead of the app: it would not open at all,
@@ -132,8 +132,8 @@ self.addEventListener("fetch", (e) => {
       const served = hit && shell ? hit.clone() : null;
       /* A shell file is asked for with `no-cache`, which is a conditional
          request (an unchanged file is a 304 of a few hundred bytes), because
-         a plain fetch is answered from the browser's own HTTP cache — GitHub
-         Pages allows it ten minutes — and would hand back the very bytes it
+         a plain fetch is answered from the browser's own HTTP cache (GitHub
+         Pages allows it ten minutes), and would hand back the very bytes it
          is meant to be checking against. */
       const net = (shell ? fetch(url.href, { cache: "no-cache" }) : fetch(req))
         .then(async (res) => {
@@ -163,8 +163,8 @@ self.addEventListener("fetch", (e) => {
    notification for a message you are watching arrive is noise, so the push
    is handed to the page instead, which draws it. Only the page knows what is
    on its screen, so the service worker ASKS it (chatShowing in app.js) and
-   waits a moment for the answer; a page that does not answer — frozen, or a
-   build from before this — gets the notification, because a message nobody
+   waits a moment for the answer; a page that does not answer (frozen, or a
+   build from before this) gets the notification, because a message nobody
    was told about is the worse of the two mistakes.
 
    It used to be "any window of the app is focused", and that silenced far
@@ -176,7 +176,7 @@ self.addEventListener("fetch", (e) => {
 
    AND ON WEBKIT THERE IS NO EXCEPTION AT ALL. Safari, and every web app
    installed on an iPhone, counts a push that shows nothing as a silent push
-   whatever the app was doing, and after a handful revokes the subscription —
+   whatever the app was doing, and after a handful revokes the subscription:
    notifications then simply stop, for every kind, until somebody turns them
    on again. Chrome has the focused-window allowance; WebKit does not. So on
    WebKit even the conversation you are reading gets a notification, shown
@@ -197,7 +197,7 @@ self.addEventListener("fetch", (e) => {
    the cancel that should have stopped this push was still on its way.
    And every window hears about the push afterwards, because the one thing
    the worker cannot know is whether that rest has already been dealt with
-   in the app — Done, Reset, started again — in which case the page takes
+   in the app (Done, Reset, started again), in which case the page takes
    the notification straight back down (timerNotifsTidy in app.js). It
    used to stay in the shade, and as the dot on the app's icon, until it
    was swiped away by hand.                                                  */
@@ -206,7 +206,7 @@ const STRICT_PUSH = /AppleWebKit/.test(UA) && !/Chrome|Chromium|Android|Edg\//.t
 const ASK_MS = 1500;
 
 /* Every window hears about the message, the one behind the lock screen
-   included — it wants the message waiting when it comes back, and it costs
+   included: it wants the message waiting when it comes back, and it costs
    nothing to say so now. The ones on screen are also asked whether that
    conversation is what they are showing. Resolves true if one says yes AND
    is focused: Chrome only forgives a push that shows nothing while a window
@@ -255,7 +255,7 @@ self.addEventListener("push", (e) => {
       watching = await tellAndAsk(live, d);
       if (watching && !STRICT_PUSH) return;
       /* One notification per conversation rather than one per message, so a
-         burst of five replies is one line in the shade and not five — but
+         burst of five replies is one line in the shade and not five, but
          each of them still has to ALERT. `renotify` says so and only
          Chrome listens: Safari and Firefox swap a same-tag notification in
          without a sound, so the second message of a conversation arrived in
@@ -313,7 +313,7 @@ self.addEventListener("notificationclick", (e) => {
    default (the app paints instantly, offline included) and has one cost the
    user feels: a deploy shows the OLD app on the first open and the new one
    only on the second. Closing the app and opening it twice was the whole
-   workaround, and people do not know that is what they are doing — they just
+   workaround, and people do not know that is what they are doing: they just
    know it takes a couple of goes.
 
    So the page can ask for the shell to be fetched from the NETWORK, past

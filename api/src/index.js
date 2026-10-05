@@ -92,7 +92,7 @@ const cleanName = (v, fallback = null) =>
 /* ── A PASSWORD CAN ONLY BE GUESSED SO FAST ─────────────────────────────
    The expensive half of a password check happens in the browser (auth.js),
    which is the right call for a 10ms Worker and also means the server's
-   half costs nothing to ask — so nothing stopped anybody asking it a
+   half costs nothing to ask, so nothing stopped anybody asking it a
    thousand times a minute. Failures are counted, never successes, so a
    person logging in correctly is never refused because of somebody else:
    per address AND name (the account being guessed at from one place), and
@@ -452,7 +452,7 @@ async function route(request, env, url, ctx) {
      The app used to log out by forgetting the token and nothing else, so
      every token ever issued stayed good for ever: one copied off a borrowed
      phone before its owner logged out still read every profile in the
-     account. This revokes the token the request came in on and no other —
+     account. This revokes the token the request came in on and no other:
      the phone in the gym bag is signed in with its own and stays that way. */
   if (p === "/v1/auth/logout" && method === "POST") {
     const h = (request.headers.get("Authorization") || "").match(/^Bearer\s+(.+)$/i);
@@ -478,8 +478,8 @@ async function route(request, env, url, ctx) {
      It asks for the PASSWORD, not only the token. A token is a thing left
      lying around: on a borrowed phone somebody forgot to log out of, in a
      browser's storage. Logging out with one costs nothing, and this cannot
-     be taken back. The check is login's own — the client's derived key,
-     never the password — and its misses count against the same limits, so
+     be taken back. The check is login's own (the client's derived key,
+     never the password), and its misses count against the same limits, so
      this is not a way round them. A device row that never had a password
      has nothing to check, and its token is the whole of it. A wrong
      password is 403, never 401: 401 means the token itself is no good,
@@ -542,7 +542,7 @@ async function route(request, env, url, ctx) {
 
   /* Everything you can see: what you made, plus what you joined.
      THIS IS THE ROSTER, and a second device builds its whole profile list
-     from it — names, order and all — so it carries `position` and
+     from it (names, order and all), so it carries `position` and
      `nameUpdatedAt` rather than just enough to draw a row in one sheet.
      NULL positions sort last so profiles that predate the column keep the
      order they already had. */
@@ -595,7 +595,7 @@ async function route(request, env, url, ctx) {
 
   /* ── A TRAINER'S GLANCE ────────────────────────────────────────────────
      Somebody coaching five people through shared profiles wants to know
-     who trained this week without opening five logs one after the other —
+     who trained this week without opening five logs one after the other,
      and a READ grant is a live profile, never on the phone, so the phone
      cannot answer it for itself. For every profile shared WITH the caller:
      the last date anything was logged on, and on how many distinct days
@@ -665,7 +665,7 @@ async function route(request, env, url, ctx) {
     const id = newId();
     const now = Date.now();
     const position = Number.isFinite(body.position) ? Math.trunc(body.position) : null;
-    /* The client's clock, and only ever compared with itself — see the
+    /* The client's clock, and only ever compared with itself: see the
        migration for why a name needs a stamp at all. */
     const nameAt = Number.isFinite(body.nameUpdatedAt) ? body.nameUpdatedAt : now;
 
@@ -730,7 +730,7 @@ async function route(request, env, url, ctx) {
        The roster is account data now, so two devices can both rename the
        same profile and both push. `nameUpdatedAt` is the client's clock
        and is used exactly as items.client_updated_at is: never to merge,
-       only to refuse to go backwards — otherwise a phone reconnecting
+       only to refuse to go backwards; otherwise a phone reconnecting
        after a week in flight mode would undo yesterday's rename on the
        laptop simply by being the last to speak. A refused rename is not
        an error; it comes back 200 with the name that won, so the caller
@@ -871,8 +871,8 @@ async function route(request, env, url, ctx) {
     }
 
     /* ── THE CODE YOU CAME IN ON DECIDES YOUR LEVEL, BOTH WAYS ──────────
-       This used to keep the better of the two — a write grant survived a
-       later join on a read code — reasoning that only the owner revoking
+       This used to keep the better of the two (a write grant survived a
+       later join on a read code), reasoning that only the owner revoking
        should take access away. Both halves of that were wrong.
 
        It is the OWNER who mints a code, so handing somebody a read code IS
@@ -917,8 +917,8 @@ async function route(request, env, url, ctx) {
 
        It revokes the caller's OWN grant and nothing else. "me" is
        accepted alongside the real id so a client does not have to be
-       sure which user it currently is. An owner has no grant to revoke —
-       leaving your own profile is deleting it — so that is refused with
+       sure which user it currently is. An owner has no grant to revoke
+       (leaving your own profile is deleting it), so that is refused with
        the verb that does work rather than a silent no-op. */
     if (method === "DELETE" && seg.length === 5 && (seg[4] === "me" || seg[4] === user.id)) {
       if (level === "owner") {
@@ -1109,14 +1109,14 @@ async function route(request, env, url, ctx) {
        push carries it, and is tagged with it the way the app tags its own
        notification for the same timer, so the two are one notification
        rather than two, and the app can find it again to take it down once
-       the rest has been dealt with in the app — Done, Reset, starting it
+       the rest has been dealt with in the app: Done, Reset, starting it
        again. Without it the push's tag named this server's id, which the
        app forgets the moment the timer fires, and a finished rest sat in
        the shade (and as the dot on the app icon) until swiped away by hand.
 
        `endpoint` is the push subscription of the phone that started it,
        and that phone is the only one that rings. A timer is not account
-       data — it lives on one phone and never syncs — so ringing every
+       data (it lives on one phone and never syncs), so ringing every
        device on the account put a rest nobody there was taking on a
        laptop's screen, where nothing could ever acknowledge it. Neither is
        required: a build that sends neither is answered exactly as before. */
@@ -1332,7 +1332,7 @@ async function route(request, env, url, ctx) {
 
     /* ── A CLOCK FROM THE FUTURE DOES NOT GET TO WIN FOR EVER ────────────
        clientUpdatedAt is the device's own clock, trusted only to refuse
-       going backwards — which a stamp from next century turns into a lock:
+       going backwards, which a stamp from next century turns into a lock:
        every honest edit of that row after it is "stale", on every device,
        for good. Phones are seconds off, not days, so a stamp is held to at
        most CLOCK_AHEAD_MS past this server's clock, on the way in and when
@@ -1359,7 +1359,7 @@ async function route(request, env, url, ctx) {
 
        ── THE STAMP IS TAKEN WHERE THE ROWS LAND ───────────────────────────
        updated_at used to be `now`, read before any of this ran. Two pushes
-       racing — or one push's later chunks against somebody's pull — could
+       racing (or one push's later chunks against somebody's pull) could
        therefore commit rows stamped OLDER than a cursor another device had
        already moved past, and that device never saw them. Each chunk is one
        transaction (a D1 batch is), and its first statement moves the

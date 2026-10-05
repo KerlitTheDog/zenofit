@@ -126,7 +126,7 @@ const DEFAULT_LIBRARY = [
   /* No `kind` on any of them, deliberately: they all sit in a group that
      answers for them, the three cardio machines included. Note the seeded
      pull-ups and plank are therefore strength, not the bodyweight and hold
-     kinds they could obviously be — re-declaring them here would change the
+     kinds they could obviously be: re-declaring them here would change the
      form under everyone who already has reps × weight on record for them.
      They are one tap away in the exercise editor for anyone who wants them. */
   image: "", video: "", custom: false,
@@ -206,8 +206,8 @@ const colorFor = (muscle, i = 0) =>
    EXCEPTION to its group: `ex.kind` absent means "whatever my group is
    for", which is why filing a lift under a cardio group makes it cardio,
    and why re-declaring a group takes its exercises with it. Stamping a kind
-   on every row instead (which is what v13 did) made the group setting inert
-   — the exercises all had their own answer already and never asked.
+   on every row instead (which is what v13 did) made the group setting inert:
+   the exercises all had their own answer already and never asked.
 
    An ENTRY is different: its kind is FROZEN on the record the moment it is
    logged. Re-declaring a group must never reach back and change what a
@@ -241,8 +241,8 @@ const kindOf = (e) => (e && KIND[e.kind] ? e.kind : DEFAULT_KIND);
    a drop, and set the "beat last time" card a target in the wrong units.
 
    So the rule is: **a lift is READ in the kind it is logged in today, and
-   only sessions in that kind are compared.** The others are still shown —
-   they happened — but they are not plotted, not ranked and never the bar
+   only sessions in that kind are compared.** The others are still shown
+   (they happened), but they are not plotted, not ranked and never the bar
    to beat. `readKind` is that "today", taken from the library rather than
    from the last row logged, since the library is what the next set will be
    typed into. */
@@ -289,7 +289,7 @@ function groupLabel(name) {
    A wide-grip pulldown and a close-grip one are the same movement and not
    the same lift: the weights are different, and averaging them into one
    history tells you nothing about either. So a variation is a LIBRARY ROW
-   OF ITS OWN — its own log, its own best set, its own graph, its own PRs —
+   OF ITS OWN (its own log, its own best set, its own graph, its own PRs)
    carrying `variantOf` (the row it branched from) and `variantName` ("Wide
    grip"). Everything downstream already works, because everything
    downstream only ever knew about library rows.
@@ -324,7 +324,7 @@ const variantsOf = (id, library) =>
    The stored name is recomposed from the new parent's so it stays the
    thing exwin-save would have written, which makes it a RENAME, and a
    rename here is the same cascade it is anywhere else. Its own variations
-   come with it — a family is one level deep, so they re-attach beside it
+   come with it: a family is one level deep, so they re-attach beside it
    rather than hanging off a row that is no longer a base.
 
    The short part is what is left of a name once the parent's is taken off
@@ -349,7 +349,7 @@ function shortUnder(ex, parentName) {
    rather than draw a blank where a machine should be.
 
    Two ways to be in that state, and they read differently on screen:
-   `photoId` with no image is a photo ON ITS WAY — it is in the store and
+   `photoId` with no image is a photo ON ITS WAY: it is in the store and
    is being fetched. `imageMissing` with no id is a photo taken on a device
    still running a build from before the store, which kept pictures on the
    phone that took them; it comes across once that device updates. The
@@ -382,7 +382,7 @@ function exLabelOf(ex) {
    only `ex.name` finds nothing at all in Ukrainian or Svenska: the library
    search comes back empty for a lift sitting right there in the list, and
    the picker, seeing no exact match either, offers to add a lift you
-   already have — under its translated name, as a second row keyed by a
+   already have, under its translated name, as a second row keyed by a
    name nothing else points at. Both names are tried, so either one finds
    it, and a lift can only be "new" when neither of them says otherwise.
    (renderStdPicker has always searched both; these two had not.) */
@@ -395,8 +395,8 @@ const exIsNamed = (ex, q) => {
   return !!s && (ex.name.toLowerCase() === s || exLabelOf(ex).toLowerCase() === s);
 };
 
-/* the same test where all that is to hand is a stored NAME — a dashboard
-   row, a log entry — rather than the library row itself. Same two readings
+/* the same test where all that is to hand is a stored NAME (a dashboard
+   row, a log entry) rather than the library row itself. Same two readings
    for the same reason: a lift is stored in English and shown translated,
    and a variation is shown as its parent plus its own short part, so
    typing "pulldown" has to find "Lat Pulldown · Wide grip" too. */
@@ -560,7 +560,7 @@ const convertWeight = (w, from, to) =>
    one: a gym makes 1.25 kg and 2.5 lb jumps, so 26.25 kg is a weight
    somebody actually loaded, and rounding it to 26.3 to compare it against
    itself is precisely how a set that exactly repeated last time came back
-   as "under" — the logged 26.25 really was less than the 26.3 it was being
+   as "under": the logged 26.25 really was less than the 26.3 it was being
    measured against, and the app was right about a number it had invented.
    Two decimals hold every step a plate tree can make, which is the only
    precision a weight off the log is ever claiming. */
@@ -576,7 +576,7 @@ const baseWeight = (e) => convertWeight(+e.weight, unitOf(e), state.settings.uni
 
 /* THE one number an entry is spoken for by: what the PR badge compares,
    what the graph plots, what "your best ever" means. One per kind, and each
-   one points the same way — more is better — which is the whole reason the
+   one points the same way (more is better), which is the whole reason the
    kinds that could not promise that are not in the table.
 
    Strength converts into the default unit first, because a kg session and
@@ -608,8 +608,8 @@ const metricLabel = (k, unit) =>
 /* ─────────────────────── PER-SET LOGGING ────────────────────────────
    Every entry of a set-shaped kind carries a `setList`: one row per set,
    each with its own reps / weight / RPE. It is the only way the app logs,
-   and — since migration v15 brought the last of the old first-set-best-set
-   rows across — the only shape on record. There is no second way to write
+   and (since migration v15 brought the last of the old first-set-best-set
+   rows across) the only shape on record. There is no second way to write
    a set down and no branch anywhere that reads one.
 
    The entry still keeps the four headline fields filled in (sets / reps /
@@ -765,7 +765,7 @@ function chainKeys(list) {
   return out;
 }
 
-/* The key the set at `index` carries — or the one it WOULD carry if it were
+/* The key the set at `index` carries, or the one it WOULD carry if it were
    added now, which is what the two Add buttons need before there is a set
    to ask about. */
 const chainKeyAt = (list, index, asDrop) => {
@@ -1383,7 +1383,7 @@ function setVerdict(actual, target, kind = DEFAULT_KIND) {
    by 11 × 65 kg reads "under": the reps went down, and that is the end of
    the sentence. But that set is 88.5 kg of estimated max against 87.4, a
    heavier top-end for the same slot, and it is the whole shape of getting
-   stronger — you trade reps for plates, and the reps come back. Grading
+   stronger: you trade reps for plates, and the reps come back. Grading
    it "under" tells somebody who just improved that they went backwards,
    which is the app arguing with a lifter about their own training. Worse,
    the est. 1RM card open on that same set said "1.1 higher than set 2" in
@@ -1402,7 +1402,7 @@ function setVerdict(actual, target, kind = DEFAULT_KIND) {
    screen: a verdict worked out to more precision than it is shown at is a
    verdict nobody can check by reading the two numbers.
 
-   The one-axis kinds are unaffected — for reps and for seconds the score
+   The one-axis kinds are unaffected: for reps and for seconds the score
    IS the axis, so this and setVerdict agree by construction.           */
 function setProgress(actual, prev, kind = DEFAULT_KIND) {
   if (!actual || !prev) return null;
@@ -1459,7 +1459,7 @@ function entryPlanResult(e) {
    set two, exactly as a planned set is answered by the set in its slot.
    The per-set estimate is exactly the right tool for that and the
    whole-exercise one was never in the running, which is why the answer is
-   setProgress rather than setVerdict — the two-axis plan rule called a
+   setProgress rather than setVerdict: the two-axis plan rule called a
    set that had raised its own estimate "under" on the strength of the
    reps alone. See setProgress for why that had to go.
 
@@ -1624,7 +1624,7 @@ const seedTimers = () =>
 /* A stopwatch is `{startedAt, acc, laps}` and the clock is ARITHMETIC, never
    a ticking number: `acc` is what was banked by the last pause and
    `startedAt` is when the current run began, so the reading survives a
-   re-render, a backgrounded tab, and the app being closed and reopened —
+   re-render, a backgrounded tab, and the app being closed and reopened:
    the same trick `endsAt` plays for the countdown timers, pointed the other
    way. Nothing is written to disk while it RUNS (a save per frame for a
    number the paint can work out for itself), only when it starts, stops,
@@ -1854,7 +1854,7 @@ function migrate(s) {
        v5 took the SETTING away and left the SHAPE: an entry logged in that
        mode is a total-set count plus the numbers of one top set, with no
        setList, and every screen that could meet one carried a second branch
-       for it — a second set of form fields, a Convert button, a "top set of
+       for it: a second set of form fields, a Convert button, a "top set of
        4" caption, its own word in the summary line. Ten code paths and eight
        strings kept alive for a prototype nobody chose and nothing has
        written to since v5.
@@ -1862,7 +1862,7 @@ function migrate(s) {
        So the shape goes too, and the rows that are in it are brought across
        rather than left behind: the recorded top set becomes set 1 and the
        entry is re-derived from it. **The count of sets that were never
-       written down is NOT invented** — four sets of which one was recorded
+       written down is NOT invented**: four sets of which one was recorded
        come back as the one that was recorded. That is the same claim the
        old row made in words ("top set of 4") said as data instead, and it
        is the only honest way to read it: repeating the top set four times
@@ -1885,8 +1885,8 @@ function migrate(s) {
        failed upgrade, it surfaces as "the training saved on this device
        will not open". So nothing is assumed. A value that is not a list at
        all, and a row inside one that is not an object, are not recoverable
-       data in any case — every screen in the app reads these as arrays of
-       records — so they are dropped rather than either thrown over or
+       data in any case (every screen in the app reads these as arrays of
+       records), so they are dropped rather than either thrown over or
        handed onward to a renderer that will trip on them next. */
     const rows = (list) => (Array.isArray(list) ? list.filter((r) => r && typeof r === "object") : []);
     const crossAll = (list) => rows(list).map(cross);
@@ -1914,8 +1914,8 @@ function migrate(s) {
 /* ── DATA FROM ANYWHERE ELSE IS DATA, NEVER MARKUP ─────────────────────
    render() builds HTML out of strings, and every NAME, note and label in
    it goes through esc(). What did not were the fields this app only ever
-   writes itself — ids, dates, units, colours, kinds, the numbers in a set
-   — because nothing typed ever reaches them. Something RECEIVED can: a
+   writes itself (ids, dates, units, colours, kinds, the numbers in a set),
+   because nothing typed ever reaches them. Something RECEIVED can: a
    shared profile's rows come from whoever else can write to it, a backup
    is a file people hand each other, and a group colour of
    `#fff"><img onerror=…>` arriving by sync ran script on the owner's phone,
@@ -1924,8 +1924,8 @@ function migrate(s) {
    So those fields are held to the one shape this app ever gives them,
    everywhere data comes IN: hydrate() (every load, every import, every
    off-screen read) and syncApply() (every pulled row). Nothing the app
-   writes itself is ever changed by it — an id it made has no quote in it,
-   a unit is kg or lbs — which is what makes it safe to run on somebody's
+   writes itself is ever changed by it (an id it made has no quote in it,
+   a unit is kg or lbs), which is what makes it safe to run on somebody's
    whole history on every launch. Only what could close an attribute or
    open a tag is taken out, and nothing is dropped: a row that arrives
    malformed is still a row, just not a script.
@@ -2126,8 +2126,8 @@ function signedInAs() {
 /* ── WHOSE EACH SAVE IS, FOR STORAGE CHECK AND NOTHING ELSE ─────────────
    A state key does not say which account it belongs to, and once it has
    left every list nothing else on the phone does either. Storage check
-   needs exactly that answer — it asks for the owning account's password
-   before handing the training out — so it is written down here the moment
+   needs exactly that answer (it asks for the owning account's password
+   before handing the training out), so it is written down here the moment
    a profile joins a list, and kept for as long as the key exists.
    Outside `state` for the same reason `zenofit:device` is: a backup is a
    file people share. */
@@ -2189,8 +2189,8 @@ function readRoster(userId) {
      · the first-run blank (no link, no name, nothing in it) → deleted,
        because it is not anybody's training and is the thing that used to
        put a stray "Profile 1" in every account;
-     · anything else — sync deliberately turned off, or only on this
-       phone with nobody signed in — goes in NO list. It stays on the disk
+     · anything else (sync deliberately turned off, or only on this
+       phone with nobody signed in) goes in NO list. It stays on the disk
        untouched, and Storage check offers it back, with no password,
        since no account ever owned it.
 
@@ -2309,7 +2309,7 @@ let unreadable = null;            // profile id whose stored save will not open
    JSON any more, which is a real loss and a job for Storage check. But a
    save whose bytes are perfect and whose MIGRATION threw landed in the
    same catch and wore the same words, and that is the app blaming a
-   person's data for a bug in its own upgrade code — which is exactly what
+   person's data for a bug in its own upgrade code, which is exactly what
    v15 did the day it shipped, over a helper declared too far down the
    file (see uid). Nothing about the training was wrong; every one of
    those entries was sitting there intact, being described as damaged.
@@ -2347,7 +2347,7 @@ function readProfileState(id) {
 /* The off-screen counterpart of writeNow, and it answers to the same two
    guards for the same reasons: a profile whose save will not parse is not
    written over, and a full store is reported rather than swallowed. Only
-   the roster's background fill uses it — the profile in front of you is
+   the roster's background fill uses it: the profile in front of you is
    still written by writeNow, from `state`, on the debounce. */
 function writeProfileState(id, data) {
   /* the answer is writeNow's, not an assumption: it refuses an unreadable
@@ -2372,7 +2372,7 @@ let unreadableWarned = false;
 
    It now also carries that answer as far as the cloud copy. Restoring a
    backup over a full profile is the one legitimate way to delete most of
-   what is up there, and syncPush refuses a push like that on its own —
+   what is up there, and syncPush refuses a push like that on its own,
    correctly, because every bug in this file looks identical from there.
    This is the difference between the app inferring a wipe and the user
    asking for one, which is the whole distinction that block is drawing. */
@@ -2415,7 +2415,7 @@ function snapshotDrafts() {
    write was a lost write. syncPull cannot: it persists a cursor saying "I
    have everything up to here", and a cursor that outlives the rows it
    describes is how a device ends up claiming to hold training it does not
-   have — which the next push turns into tombstones. So the three ways
+   have, which the next push turns into tombstones. So the three ways
    this does NOT write are now reported rather than swallowed. */
 let quotaWarned = false;
 function writeNow() {
@@ -2426,7 +2426,7 @@ function writeNow() {
      worth a byte on a device that is short of them. Reported as TRUE: the
      rows are exactly as kept as they are ever meant to be. */
   if (typeof syncLive === "function" && syncLive(profiles.active)) return true;
-  /* No profile open — logged out, or an account that has none yet. What is
+  /* No profile open: logged out, or an account that has none yet. What is
      in `state` is a placeholder the login screen sits on, and it has no key
      to go to. */
   if (!profiles.active) return true;
@@ -2467,8 +2467,8 @@ function patch(p) { state = { ...state, ...p }; persist(); render(); }
    hundred milliseconds of it would otherwise be dropped on the floor.
 
    Switching is a bigger event than it looks: `ui` is full of things that
-   belong to the profile being left — an open workout, a half-typed set, a
-   chart selection, an exercise window — and none of them mean anything in
+   belong to the profile being left (an open workout, a half-typed set, a
+   chart selection, an exercise window), and none of them mean anything in
    the next one. So the screen is cleared back to Home rather than left
    pointing at rows that no longer exist. */
 function closeEverything() {
@@ -2526,7 +2526,7 @@ function switchProfile(id) {
    seeded library, the seeded timers, nothing logged.
 
    ── EXCEPT ONE THAT IS ABOUT TO BE FILLED FROM THE SERVER ─────────────
-   `forRemote` is a profile being made to HOLD somebody's cloud copy —
+   `forRemote` is a profile being made to HOLD somebody's cloud copy:
    joined with a code, pulled from the account, adopted by the roster.
    Those start with the library and the groups EMPTY, because the seeds
    are not this profile's data, they are this app's opening offer, and
@@ -2535,7 +2535,7 @@ function switchProfile(id) {
    What they used to do instead was survive. The owner had deleted five
    built-in exercises and renamed a group; the pull replaced the rows the
    owner still had and left the other five sitting there, unmatched and
-   unmarked — so the joining device pushed them back up as its own, and
+   unmarked, so the joining device pushed them back up as its own, and
    the five lifts the owner had thrown out reappeared in their library
    with nobody having asked for them. A profile that is a copy of another
    one has to start from nothing, or it is not a copy, it is a merge.
@@ -2595,7 +2595,7 @@ function deleteProfile(id) {
   try { localStorage.removeItem(stateKeyFor(id)); } catch { /* already gone */ }
   ownerForget(id);
   /* and its sync link, or zenofit:profiles keeps a remoteId under a local id
-     that no longer exists — which a later profile could never be given,
+     that no longer exists, which a later profile could never be given,
      since ids are minted fresh, but which sits there naming somebody's
      cloud profile forever */
   syncForget(id);
@@ -2654,7 +2654,7 @@ function profileStats() {
    which is exactly what made "the same profiles on every device" a thing
    the app could not promise: a profile with sync off is a profile the
    other device cannot have. An account is the thing you log in to so
-   your training follows you, so everything in it follows you — the way
+   your training follows you, so everything in it follows you, the way
    a document follows you in any online editor, including the part where
    what you do with no signal is kept here and goes up when there is one.
    The word "sync" is not in the interface at all any more. What is left
@@ -2674,8 +2674,8 @@ function profileStats() {
    dropping it quietly, so the two lists disagreeing is loud. Deliberately
    absent: `drafts`, which is a photograph of a half-typed set editor, and
    `timers`, which carry a cloudId naming a push alarm booked for ONE
-   device. Of `settings` only the training half travels — units, start
-   date, week mode, sex, name — because theme and language are properties
+   device. Of `settings` only the training half travels (units, start
+   date, week mode, sex, name), because theme and language are properties
    of a phone rather than of a person's training, and having her dark mode
    follow his device around is nobody's idea of a feature.
 
@@ -2701,14 +2701,14 @@ const SYNC_PAGE = 200;            // the server's own per-push ceiling
    the same JSON, but a margin means a rounding difference can never turn a
    row we thought was fine into a batch the server throws out whole. */
 const SYNC_MAX_ITEM = 500 * 1024;
-/* The server's own cap on an itemId. An itemId here is frequently a NAME —
-   the exercise a goal belongs to, the muscle group a volume target is for —
+/* The server's own cap on an itemId. An itemId here is frequently a NAME
+   (the exercise a goal belongs to, the muscle group a volume target is for),
    and a name the server refuses fails the WHOLE push, for ever, silently.
    See syncPush: a row it would refuse never joins a batch. */
 const SYNC_MAX_ID = 200;
 /* Below this many deletions in one push, nothing is questioned: scrapping a
    day, clearing a few goals and renaming a group all land in single figures.
-   Above it, see the block in syncPush — a push is refused when it would
+   Above it, see the block in syncPush: a push is refused when it would
    delete more than the profile still holds. */
 const SYNC_WIPE_FLOOR = 10;
 /* One push's worth of permission to do exactly that, granted only by
@@ -2719,7 +2719,7 @@ let syncWipeOk = false;
    The photo is by far the biggest thing in this app: a 1000px picture in
    base64 is 100-700 KB, against a few hundred bytes for the lift it
    belongs to. It used to ride inside the library row, and a row over the
-   item limit went up WITHOUT it so that the lift could still travel —
+   item limit went up WITHOUT it so that the lift could still travel,
    which meant the other phone got the exercise and a placeholder, and
    every pull of a library re-sent every photo on the page.
 
@@ -2734,8 +2734,8 @@ let syncWipeOk = false;
    as it always has, so nothing that never had a picture is re-sent.
 
    Done HERE rather than in syncPush so the wire row is built before `__i`
-   is appended, which keeps the key order — and therefore the change hash
-   — identical on the device that sent it and the device that got it. The
+   is appended, which keeps the key order (and therefore the change hash)
+   identical on the device that sent it and the device that got it. The
    image is taken OUT wherever it sat and the flag put back on the end, so
    a row that has since had its photo filled in on the receiving phone
    (added last, by photoPass) still hashes the same as the one it came
@@ -2758,7 +2758,7 @@ const syncLinked = (localId) => { const r = syncFor(localId); return r && r.remo
    The one thing the profile list still has to say about a profile, and it
    has to say it without any room for doubt: whether this is your training
    or somebody else's that they let you into. Everything else the list
-   used to print — backed up, on this phone, get it, syncing — described
+   used to print (backed up, on this phone, get it, syncing) described
    machinery, and the machinery now just runs.
 
    A profile with no link yet is yours: only this account can have made
@@ -2901,7 +2901,7 @@ function syncApply(items, into) {
         /* ── A ROW WITHOUT ITS PICTURE NEVER TAKES THE ONE THAT IS HERE ──
            A library row always travels without its photo (libraryWire),
            and the server does not filter a pull by the device that wrote
-           it — so the phone that took the photo pulls the photo-less row
+           it, so the phone that took the photo pulls the photo-less row
            straight back. Applied literally that is a phone deleting its
            own photograph the moment it syncs. So the picture held here is
            kept whenever the row is talking about the SAME one: the same
@@ -2915,8 +2915,8 @@ function syncApply(items, into) {
           row.image = mine.image;
           delete row.imageMissing;
         } else if (mine && mine.image && !row.image && row.photoId && !mine.photoId) {
-          /* The picture here has no id yet — it came the old way, inside its
-             row — and the other device has just given THE SAME picture one.
+          /* The picture here has no id yet (it came the old way, inside its
+             row), and the other device has just given THE SAME picture one.
              Kept aside rather than thrown away: photoPass hashes it, and if
              it is the photo the id names it goes straight back in, with no
              download and no blank placeholder while the other phone is
@@ -2936,7 +2936,7 @@ function syncApply(items, into) {
      last, which is only correct when the page IS the whole collection.
      It almost never is. Renaming one exercise on the other phone pushes
      exactly one library row, so this arrived holding one index and an
-     opinion about nothing else — and sorted that single row to the top of
+     opinion about nothing else, and sorted that single row to the top of
      the library while every other row fell in behind it. The local order
      then went back up as if somebody had meant it, and the two devices
      spent the rest of the day shuffling each other's library.
@@ -2980,7 +2980,7 @@ async function syncPull(localId) {
      had to visit one at a time before any of them had anything in them.
      A profile that is not on screen is read off its own key, filled, and
      written back; `state` is never touched for one, and the screen never
-     repaints for one. A LIVE profile is never pulled this way at all —
+     repaints for one. A LIVE profile is never pulled this way at all:
      the whole point of one is that nothing of it is on this phone. */
   const onScreen = localId === activeProfileId();
   if (!onScreen && syncLive(localId)) return { ok: false, reason: "live-offscreen" };
@@ -2991,8 +2991,8 @@ async function syncPull(localId) {
 
   /* ── THE PAGE GOES DOWN BEFORE THE CURSOR THAT SAYS WE HAVE IT ───────
      This loop used to persist `marks` and `cursor` per page and write the
-     ROWS once, after the loop. Every way out of the middle of it — a
-     page that throws, a phone locking, a full store — therefore left the
+     ROWS once, after the loop. Every way out of the middle of it (a
+     page that throws, a phone locking, a full store) therefore left the
      device holding a cursor past rows it never saved and marks claiming
      rows it never had. Nothing on screen said so, and the damage did not
      surface here at all: syncPush reads a mark with no item behind it as
@@ -3001,7 +3001,7 @@ async function syncPull(localId) {
      the account.
 
      So the order is inverted. The rows are written first, and the cursor
-     only moves if the write actually happened — which is why writeNow and
+     only moves if the write actually happened, which is why writeNow and
      writeProfileState now report. A page that cannot be kept ends the
      loop with the cursor where it was, so the very same page is fetched
      again next pass; the server pages by (updated_at, collection, itemId)
@@ -3031,7 +3031,7 @@ async function syncPull(localId) {
        overwriting whatever has been done to it since and not pushed yet:
        a set added to a lift that had already synced, a weight corrected,
        vanished the moment a poll (or Refresh) landed inside the push's
-       debounce — and every keystroke re-arms that debounce. The mark then
+       debounce, and every keystroke re-arms that debounce. The mark then
        matched, so nothing went up afterwards and the edit was simply gone.
        A lift deleted in that window came back and was never deleted.
        A row whose content is exactly what this device last sent or last
@@ -3061,7 +3061,7 @@ async function syncPull(localId) {
     /* ── A LIVE PROFILE IS ONLY EVER A READ GRANT ──────────────────────
        The other direction of the same news. If the owner has given this
        phone write access, the profile stops being a window onto theirs
-       and becomes one to train in — and a live profile is one writeNow
+       and becomes one to train in, and a live profile is one writeNow
        refuses to save, so leaving the flag up would mean her sessions
        went to the server and nowhere else, and a launch with no signal
        would open an empty log she had been writing in all week. */
@@ -3071,7 +3071,7 @@ async function syncPull(localId) {
   }
   /* Each page has already written itself. This is only for a profile that
      stopped being live during the loop, whose rows were deliberately not
-     written while the flag was up — and never for a loop that bailed,
+     written while the flag was up, and never for a loop that bailed,
      where `into` is precisely the thing that must not be saved. */
   const settled = !syncLive(localId) && rec.live;   // just stopped being live
   if (settled && kept) {
@@ -3098,7 +3098,7 @@ function syncDemoted(localId) {
 
 /* The active profile is `state`; any other one is still on disk. Only the
    FIRST push of a profile being put into the account ever asks for another,
-   and only for reading — nothing here writes to a profile that is not on
+   and only for reading: nothing here writes to a profile that is not on
    screen. (readProfileState's `unreadable` latch is filed by id, so asking
    it about a neighbour cannot disarm the guard on the one you are in.) */
 const profileStateFor = (localId) =>
@@ -3132,7 +3132,7 @@ async function syncPush(localId) {
      rows whose second batch failed therefore recorded all 450 as sent
      while the server held 200. The hash matched from then on, so the
      other 250 were never offered again: stranded on one device, silently,
-     for ever — and read as deletions by the next device to push.
+     for ever, and read as deletions by the next device to push.
 
      So a hash waits here until the batch it travelled in is accepted. */
   const pending = new Map();
@@ -3146,7 +3146,7 @@ async function syncPush(localId) {
        The server validates the whole batch before writing any of it and
        refuses all of it if one item is bad, which is the right call there:
        a push that half-lands leaves the client unable to say what it still
-       owes. The consequence on this side is the part that bit — a single
+       owes. The consequence on this side is the part that bit: a single
        bad row meant the profile NEVER uploaded, so the person it was
        shared with opened it and saw an empty log, with nothing on either
        screen naming the row responsible.
@@ -3184,7 +3184,7 @@ async function syncPush(localId) {
   /* ── NOTHING DELETES A PROFILE BY ACCIDENT, EVER AGAIN ───────────────
      Every path above is now honest about what it holds, and this is the
      backstop for the one after it that is not. A tombstone is generated
-     from an ABSENCE — a mark with no item behind it — which means any bug
+     from an ABSENCE (a mark with no item behind it), which means any bug
      that empties or half-fills the local state reads, here, as the user
      having deleted their entire training. It is the one operation in this
      app that is irreversible on every device at once, and it was reached
@@ -3197,8 +3197,8 @@ async function syncPush(localId) {
      cannot get through is 139 deletions from a state holding five rows,
      which is what every bug in this file looks like from here.
 
-     It is not a lock. allowOverwrite() — importing a backup, Reset all
-     data — is the user saying "replace what is there" out loud, behind a
+     It is not a lock. allowOverwrite() (importing a backup, Reset all
+     data) is the user saying "replace what is there" out loud, behind a
      confirm, and it opens this for exactly one push. And a refusal keeps
      the marks untouched, so nothing is lost: once a pull has put the
      profile back, the same push goes through on its own. */
@@ -3254,7 +3254,7 @@ async function syncPush(localId) {
      This phone remembers which photos it has uploaded (PHOTO_UP_KEY) so it
      never asks twice. The server deletes a photo nothing has held for days
      (the sweep in photos.js), and a row naming one can still come along
-     afterwards — a backup restored, a photo put back, a phone that uploaded
+     afterwards: a backup restored, a photo put back, a phone that uploaded
      and then lost its signal for a week. The push says so, the memory of
      having sent it is dropped, and the next pass sends it again from the
      picture this phone still holds. */
@@ -3352,13 +3352,13 @@ async function syncNow(localId = activeProfileId()) {
    A LIVE profile is read-only and holds NOTHING on disk. `state` is
    filled from the server into memory when you switch to it, and writeNow
    refuses to write its key, so closing the app forgets it entirely and
-   opening it fetches again. That is the whole trick — there is no clever
+   opening it fetches again. That is the whole trick: there is no clever
    eviction, just a profile the save path declines to save.
 
    WHAT IT COSTS, said plainly: no signal means no profile. Every other
    profile in this app works in a basement with the phone in flight mode,
    and this one does not. That is the trade, it was chosen on purpose, and
-   it is only ever applied to a READ grant — somebody else's training,
+   it is only ever applied to a READ grant: somebody else's training,
    which they are still holding the real copy of. A profile you own is
    never live, because losing your own log to a dead connection is not a
    trade anybody would take.
@@ -3375,7 +3375,7 @@ async function syncNow(localId = activeProfileId()) {
 const syncLive = (localId) => { const r = syncFor(localId || activeProfileId()); return !!(r && r.live); };
 
 /* Switching into one: forget what a previous session cached, then fetch.
-   Nothing is awaited by the caller — the app draws the empty profile with
+   Nothing is awaited by the caller: the app draws the empty profile with
    its "fetching" strip and fills in when the rows land. */
 function liveEnter(localId) {
   if (!syncLive(localId)) return;
@@ -3394,8 +3394,8 @@ function liveEnter(localId) {
     .then((res) => {
       /* ── A PULL THAT RESOLVED IS NOT A PULL THAT FETCHED ──────────────
          syncPull only REJECTS on a network or permission failure. Every
-         other way it gives up — no link, no cloud client because the
-         script did not load, a live profile asked for off screen —
+         other way it gives up (no link, no cloud client because the
+         script did not load, a live profile asked for off screen)
          resolves with {ok:false}, lands here, and used to delete the key
          on the strength of it. `state` is already the blank by then, so
          that is the app throwing away the copy it has and replacing it
@@ -3435,7 +3435,7 @@ function liveAdopt(localId) {
   if (!rec || rec.level !== "read") return false;
   /* The key is deliberately left where it is. writeNow stops writing it
      from here on, and liveEnter drops it once a fetch has proved the
-     server can hand the same thing back — so a phone with no signal on the
+     server can hand the same thing back, so a phone with no signal on the
      day this ships still opens the copy it already had. */
   syncSet(localId, { live: true, cursor: null, marks: {} });
   return true;
@@ -3479,7 +3479,7 @@ function liveAdopt(localId) {
 
 const PHOTO_CACHE = "zenofit-photos";
 const PHOTO_UP_KEY = "zenofit:photos-up";
-/* a 404 is "not uploaded YET" — the other device may be mid-upload — so it
+/* a 404 is "not uploaded YET" (the other device may be mid-upload), so it
    is asked again, just not on every render */
 const PHOTO_MISS_RETRY = 3 * 60000;
 const PHOTO_MEM_MAX = 80;
@@ -3727,7 +3727,7 @@ async function photoPass() {
    dozen times in a minute (every set, every field), and a push per write
    would be a dozen requests for one session. SYNC_PUSH_AFTER waits for
    the typing to stop. A push that finds nothing changed sends zero rows
-   anyway — see the marks hash — so the cost of being a little eager is
+   anyway (see the marks hash), so the cost of being a little eager is
    one cheap request, and the cost of being late is that a phone closed
    inside the window has not uploaded yet. Hence the pagehide flush.
 
@@ -3826,7 +3826,7 @@ function syncTouch() {
    one is active THEN. Leaving one profile inside the eight-second window
    therefore armed a push for the profile you arrived at and dropped the
    one you left, whose last few sets sat on the phone until something
-   else happened to touch it — which, for a profile you switched away
+   else happened to touch it, which, for a profile you switched away
    from, can be weeks. The person it is shared with sees a log that
    stopped mid-session.
 
@@ -3854,7 +3854,7 @@ function syncPollStart() {
 }
 
 /* Coming back to the app is the moment somebody wants to see what the
-   other phone did, so it pulls then — throttled, because on some platforms
+   other phone did, so it pulls then, throttled, because on some platforms
    visibilitychange fires more than once for one glance. */
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
@@ -3877,7 +3877,7 @@ window.addEventListener("online", () => { rosterSync({ force: true }).then(() =>
    `profiles` on the server IS the roster: one row per profile, carrying
    its name, when that name was typed, and where it sits in the list. The
    list on this device is the signed-in account's own (see PROFILES) and
-   this block keeps it in step with that, both ways — the same deal the
+   this block keeps it in step with that, both ways: the same deal the
    items inside a profile have always had, applied one level up.
 
    WHAT IS STILL LOCAL, deliberately: which profile you are LOOKING at.
@@ -3896,7 +3896,7 @@ window.addEventListener("online", () => { rosterSync({ force: true }).then(() =>
 
    HOW A DISAGREEMENT IS SETTLED, because there are only two and both are
    worth being explicit about. A NAME carries the moment it was typed
-   (`nameAt` here, `name_updated_at` there) and the later one wins — not
+   (`nameAt` here, `name_updated_at` there) and the later one wins, not
    the last device to reconnect, which would let a phone coming back from a
    week in flight mode silently undo yesterday's rename on the laptop. The
    ORDER is whatever the server says, and dragging pushes it; there is no
@@ -3909,7 +3909,7 @@ window.addEventListener("online", () => { rosterSync({ force: true }).then(() =>
    has and the account does not is either on its way up (made here, not
    uploaded yet) or on its way out (deleted elsewhere). Nothing is taken
    from any other list on this phone, because there is no other list this
-   pass can see — the account signed in is the only one it reads or writes.
+   pass can see: the account signed in is the only one it reads or writes.
 
    NOTHING HERE DESTROYS A SAVE. A profile removed from the account goes
    out of the list on this device too, but its key is left exactly where
@@ -3920,7 +3920,7 @@ const acctUserId = () => { const a = signedInAs(); return a ? a.userId : null; }
 const accountOn = () => !!signedInAs();
 
 /* ── REMOVING A PROFILE IS A PROMISE, NOT A REQUEST ───────────────────
-   Deleting used to be `C.deleteProfile(id).catch(() => {})` — fire and
+   Deleting used to be `C.deleteProfile(id).catch(() => {})`: fire and
    forget, on the reasoning that a tombstone can wait. It cannot. The row
    is already gone from this device by the time that request goes out, so
    a failure is invisible AND permanent: no retry, nothing on screen, and
@@ -3930,7 +3930,7 @@ const accountOn = () => !!signedInAs();
 
    So a removal is queued and survives being closed. The queue is drained
    at the top of every roster pass and an entry only leaves it when the
-   server has actually agreed — or when it answers 404, which is the same
+   server has actually agreed, or when it answers 404, which is the same
    thing said differently: it is already gone.
 
    EACH ENTRY SAYS WHICH ACCOUNT MADE IT, and is only ever sent as that
@@ -3974,8 +3974,8 @@ async function runPendingRemovals() {
       any = true;
     } catch (e) {
       /* 404 is success wearing a different hat: no such profile, or no
-         grant of ours left on it. Anything else — offline, a 500, a
-         token that is briefly unhappy — stays queued for the next pass. */
+         grant of ours left on it. Anything else (offline, a 500, a
+         token that is briefly unhappy) stays queued for the next pass. */
       if (e && e.status === 404) { clearRemoval(p.remoteId); any = true; }
       else console.warn("removal still pending", p.op, e && e.message);
     }
@@ -4007,7 +4007,7 @@ function profileHasContent(id) {
          someMap("goals") || someMap("volumeGoals") || someMap("dayNotes");
 }
 
-/* Out of the list, NOT off the disk — unless there is nothing on the disk
+/* Out of the list, NOT off the disk, unless there is nothing on the disk
    worth keeping. Storage check exists to hand back a save no list names,
    and a trail of empty keys is how that screen stops being worth reading:
    every row on it should be a row somebody might want.
@@ -4057,8 +4057,8 @@ function rosterPushOrder() {
   if (ids.length) C.setProfileOrder(ids).catch(() => { /* the next pass will */ });
 }
 
-/* An account whose list was empty when this device got it — a first login
-   here, before the listing had arrived — has nothing open. Once the roster
+/* An account whose list was empty when this device got it (a first login
+   here, before the listing had arrived) has nothing open. Once the roster
    has brought something in, the first one is opened, the way a new
    device arrives on a profile rather than on a screen asking for one. */
 function landOnFirstProfile() {
@@ -4158,7 +4158,7 @@ async function rosterSync(opts) {
          it is not your profile, so the server will not take the name,
          and the result was one profile reading "Em" on the phone,
          "Profile 1" on the laptop. The list is supposed to be the same
-         everywhere, so a read grant simply follows the owner's name — and
+         everywhere, so a read grant simply follows the owner's name, and
          profile-form-save refuses the rename rather than accepting one it
          knows it cannot keep. */
       if (rec.level === "read") {
@@ -4170,7 +4170,7 @@ async function rosterSync(opts) {
 
       /* ── THE FIRST PASS OVER A PROFILE THAT PREDATES NAME STAMPS ─────
          Its record has no stamp at all, and the server's is back-filled
-         from created_at by migration 0005 — a real number, so a plain
+         from created_at by migration 0005: a real number, so a plain
          comparison would say the server wins and hand the phone back the
          name the profile was CREATED with. The bootstrap is gated on the
          server's name still being the ORIGINAL one (`nameUpdatedAt` still
@@ -4261,7 +4261,7 @@ async function rosterSync(opts) {
        Your own profiles stay ahead of the ones shared with you, because
        that is how the list is drawn. */
     /* A profile that has just gone up took its index as its position, and
-       that index can tie with one the account already had there — the
+       that index can tie with one the account already had there: the
        server breaks the tie by age, this list by where the row sits, and
        the two lists then disagree for ever. So the moment anything has
        gone up, the whole order goes up with it, as a drag would send it. */
@@ -4321,7 +4321,7 @@ function chatReset() {
 }
 
 /* Just logged in. The account's own list, from this device if it has held
-   it before — instantly, with no signal needed — and then brought up to
+   it before (instantly, with no signal needed), and then brought up to
    date by a roster pass that also fetches anything this device has not
    got. A first login here starts on "getting your profiles" rather than
    on an empty list, since the listing is on its way. */
@@ -4354,8 +4354,8 @@ async function enterAccount() {
 
 /* ── WHAT HAS NOT REACHED THE ACCOUNT YET ─────────────────────────────
    Counted, not guessed, for the one moment it matters: logging out. It
-   is the same arithmetic a push does — a row whose hash no longer matches
-   its mark, a mark whose row is gone — plus the three things that live
+   is the same arithmetic a push does (a row whose hash no longer matches
+   its mark, a mark whose row is gone) plus the three things that live
    above the rows: a profile not in the account yet, a removal still
    queued, a rename not yet sent. Rows a push would refuse to send are
    left out; they would never stop being counted, and the warning would
@@ -4430,7 +4430,7 @@ function leaveAccount() {
    phone would otherwise sit here for good, signed in to nobody.
 
    What goes is everything filed under the account: every profile in its
-   list — its own and the ones shared with it — and every save the owner
+   list (its own and the ones shared with it), and every save the owner
    index says is its, including ones it logged out of and left for Storage
    check; their sync records, its queued removals, its list, its messages
    and fetched pictures, anything it put in the shade, and the credential.
@@ -4520,7 +4520,7 @@ window.addEventListener("zenofit:account-deleted", (e) => {
    of it filed under a profile, all of it in `state` and therefore in the
    backup file and in `SYNC_COLLECTIONS`.
 
-   A MESSAGE IS NONE OF THAT. It belongs to the ACCOUNT — to the person —
+   A MESSAGE IS NONE OF THAT. It belongs to the ACCOUNT (to the person),
    and it reaches somebody else. Putting it in `state` would have filed a
    conversation under whichever profile happened to be open, shared it with
    whoever holds that profile's code, sent it up as an `item`, and carried
@@ -4538,8 +4538,8 @@ window.addEventListener("zenofit:account-deleted", (e) => {
    drops it rather than showing one person's messages to another).
 
    IT NEEDS AN ACCOUNT, not just a device. A device token is enough to
-   search — so the screen works while somebody is still deciding to sign
-   up — but a person who never registered has no username, so there is
+   search (so the screen works while somebody is still deciding to sign
+   up), but a person who never registered has no username, so there is
    nothing for anybody to find them under.                              */
 
 const CHAT_KEY = "zenofit:chat";
@@ -4548,7 +4548,7 @@ const CHAT_KEY = "zenofit:chat";
    photos already in it; the rest is one request away up the thread. */
 const CHAT_KEEP = 200;
 /* How often the app asks. There is no socket and no push for "the list
-   changed" — a message gets a real web push, which is what wakes a closed
+   changed": a message gets a real web push, which is what wakes a closed
    phone, and these are for the app already on screen. Three paces,
    because the answer is wanted at three different speeds: while you are
    IN a conversation, while you are looking at the list, and while you are
@@ -4603,8 +4603,8 @@ function chatRead() {
    `state.drafts` exists because a killed tab must not cost somebody the
    set they were mid-way through typing, and a message is the same promise
    about a different field. It cannot live in `state` for the reason the
-   whole block above gives — it would sync, and it would ride inside an
-   exported backup — so it lives in the chat cache, which is per account
+   whole block above gives (it would sync, and it would ride inside an
+   exported backup), so it lives in the chat cache, which is per account
    and goes when the account does.
 
    Keyed by thread, because backing out of one conversation to check
@@ -4624,7 +4624,7 @@ function chatDraftSet(threadId, text) {
 
 /* Guarded like every other write in here: private mode, a full quota and
    blocked site data all throw, and none of them is worth breaking a
-   screen over — the cache is a convenience and the server has the
+   screen over: the cache is a convenience and the server has the
    messages. */
 function chatWrite() {
   const me = chatMe();
@@ -4684,7 +4684,7 @@ const chatUnread = () => chatThreads().reduce((n, t) => n + (t.unread || 0), 0);
    the server's: two phones seconds apart must not be able to sort a reply
    above the message it answers. A message still in flight has no stamp of
    its own yet and carries the moment it was typed, which is right where
-   it belongs — at the end, under everything already acknowledged. */
+   it belongs: at the end, under everything already acknowledged. */
 const chatSortMsgs = (list) => list.slice().sort((a, b) => (a.at - b.at) || String(a.messageId).localeCompare(String(b.messageId)));
 
 /* Upsert by id, and by clientId as well, because that is what turns the
@@ -4729,10 +4729,10 @@ function chatMerge(threadId, incoming) {
    work here is dropping the copy this phone already holds, and it learns
    about one in two ways:
 
-     by NAME — a `since` poll lists what was unsent since the newest
+     by NAME: a `since` poll lists what was unsent since the newest
        message held, because that message was fetched long before it was
        unsent and its timestamp never moves (`page.unsent`);
-     by ABSENCE — a tail or a page of history is a complete window of the
+     by ABSENCE: a tail or a page of history is a complete window of the
        thread, so anything held inside that window that the page does not
        mention is no longer there (chatReconcile).
 
@@ -4789,7 +4789,7 @@ function chatRelast(threadId) {
    One request answers the question the nav is asking ("is there anything
    new anywhere"), and a second answers the one an open thread is asking
    ("what came in since the last message I have"). Nothing here throws at
-   the UI and nothing here renders unless something landed — and not even
+   the UI and nothing here renders unless something landed, and not even
    then while a field has the caret in it, the same rule syncQuiet lives
    under: render() rebuilds `#app`, and a repaint mid-word from a timer
    nobody can see would throw away what somebody was typing.            */
@@ -4814,8 +4814,8 @@ async function chatPoll(opts) {
     chatApplyMarks(c.threads);
     if (JSON.stringify(c.threads.map((t) => [t.threadId, t.unread, t.lastMessageAt, t.muted])) !== before) changed = true;
     chatCloseRead();
-    /* A conversation that has left the list — removed here or on another
-       phone, or deleted with the other person's account — takes its
+    /* A conversation that has left the list (removed here or on another
+       phone, or deleted with the other person's account) takes its
        notifications with it: there is nothing left for them to open. */
     const listed = new Set(c.threads.map((t) => t.threadId));
     for (const id of had) if (!listed.has(id)) chatCloseNotifs(id);
@@ -4823,7 +4823,7 @@ async function chatPoll(opts) {
     /* The open conversation, if there is one. Asked for by the stamp of
        the newest message already held: the boundary millisecond comes
        back with it and is deduped on id, because a repeat is harmless
-       and a gap is not — the same lean the change feed takes. */
+       and a gap is not: the same lean the change feed takes. */
     const open = ui.chatThread && ui.chatThread.threadId;
     if (open && chatThreadOf(open)) {
       const held = chatMsgs(open).filter((m) => !chatLocal(m));
@@ -4870,8 +4870,8 @@ async function chatPoll(opts) {
 /* ── WHAT THIS PHONE HAS READ, UNTIL THE SERVER HAS SAID SO BACK ───────
    The badge used to come back after a conversation had been read. A poll
    asks for the list, the conversation is opened and marked read while that
-   request is still out, and then the list lands — an answer the server gave
-   BEFORE the mark — and puts the old count straight back over it. Nothing
+   request is still out, and then the list lands (an answer the server gave
+   BEFORE the mark), and puts the old count straight back over it. Nothing
    corrected it until the next poll, a minute and a half away on another
    tab. So a mark is remembered here until a list shows the server has it,
    and a list that has not caught up yet cannot resurrect a count for
@@ -4902,8 +4902,8 @@ function chatApplyMarks(threads) {
    that has since scrolled cannot bring the badge back.
 
    Reading a conversation also takes its notification out of the shade. It
-   used to stay there — and on Android that also leaves the dot on the app
-   icon — after the messages it announced had been read, which is exactly
+   used to stay there (and on Android that also leaves the dot on the app
+   icon) after the messages it announced had been read, which is exactly
    the notification nobody should still be looking at. */
 async function chatMarkRead(threadId) {
   const C = window.ZenofitCloud;
@@ -4927,7 +4927,7 @@ async function chatMarkRead(threadId) {
    shade for good. Every list the poll brings back says, per conversation,
    how far this account has read, and a notification carries the server's
    stamp of the message it announced (`at`, see sw.js), so anything at or
-   before that point is gone — and a notification for a message that
+   before that point is gone, and a notification for a message that
    landed after the list was put together is left alone. One from a server
    that did not stamp it yet is taken down once nothing is unread. */
 function chatCloseRead() {
@@ -4954,7 +4954,7 @@ function chatCloseRead() {
    fetched a reply had already merged it, so the next one found nothing new
    and never tried again: somebody sat in a conversation with the keyboard
    up, waiting for an answer, and it never appeared. Nor were they told any
-   other way — sw.js stays quiet for the conversation on screen, and a
+   other way: sw.js stays quiet for the conversation on screen, and a
    conversation on screen is marked read. The same went for the count on
    the nav while a set was being typed in somewhere else.
 
@@ -5056,7 +5056,7 @@ document.addEventListener("visibilitychange", () => {
    sw.js posts every chat push to the page, and does not show a
    notification for a message in the conversation somebody is looking at
    (see the push handler there): the page is what they are already looking
-   at. So this is the other half of that decision — without it, a message
+   at. So this is the other half of that decision: without it, a message
    arriving in the open conversation would wait for the next poll and
    nothing would have rung at all.
 
@@ -5066,7 +5066,7 @@ document.addEventListener("visibilitychange", () => {
    disagree with it.
 
    A window on screen is also ASKED, on the port that comes with the push,
-   whether that conversation is the one it is showing — only the page knows
+   whether that conversation is the one it is showing: only the page knows
    what is on its own screen, and the answer decides whether sw.js shows a
    notification at all. It must be answered at once and synchronously: the
    worker gives up waiting after a moment and rings anyway. */
@@ -5204,7 +5204,7 @@ async function chatLoadEarlier(threadId) {
 
    `clientId` is what makes that safe. The optimistic copy carries it, the
    send carries it, and the server refuses to store a second message under
-   the same one — so a retry after a dropped reply lands on the row that
+   the same one, so a retry after a dropped reply lands on the row that
    already exists instead of sending twice, and chatMerge replaces the
    local copy with the stored one by that same id.
 
@@ -5222,7 +5222,7 @@ async function chatSend(threadId, text) {
    exercise's photo before the exercise that names it. Neither belongs in
    the chat cache: a picture is hundreds of kilobytes and the cache lives
    in localStorage beside everybody's training. So it is held here, in
-   memory, by clientId, for as long as the send takes — and a photo
+   memory, by clientId, for as long as the send takes, and a photo
    message the app closed on before it went is marked failed on the next
    load (chatRead), with a line saying to send it again. */
 /* (declared with chatGone, above the poll, so nothing can reach it early) */
@@ -5286,7 +5286,7 @@ async function chatUnsend(threadId, messageId) {
    the one place a chat is ever useful and the only spot the composer
    makes sense under. `render()` restores the scrollTop of anything
    carrying a `data-scrollkey`, which is right for reading history and
-   wrong the moment a message arrives, so this overrides it — but only
+   wrong the moment a message arrives, so this overrides it, but only
    while `ui.chatStick` is on.
 
    Scrolling up turns it off, because somebody reading last week's
@@ -5304,7 +5304,7 @@ function chatStickBottom() {
 
 /* The composer grows with what is in it, up to four lines. handleBind does
    this on every keystroke; this is the same sizing applied to a draft that
-   was already there when the frame was drawn — backing out of a
+   was already there when the frame was drawn: backing out of a
    conversation and coming back to a three-line message showed one line of
    it with the rest scrolled out of sight. */
 function chatFitComposer() {
@@ -5392,8 +5392,8 @@ async function chatDeliver(threadId, clientId) {
 
    From where the user stands those are one request, so they are one
    button. It asks the worker for the shell from the network past both
-   caches, reloads ONLY if something really came back different — a
-   refresh that reloads every time is one nobody dares press mid-set — and
+   caches, reloads ONLY if something really came back different (a
+   refresh that reloads every time is one nobody dares press mid-set), and
    otherwise pulls the profile in front of them.
 
    Nothing here can cost anything: the debounce is flushed before a reload
@@ -5431,9 +5431,9 @@ async function refreshNow() {
   const floor = new Promise((r) => setTimeout(r, 450));
   const hub = window.__zenofitSW || {};
   try {
-    /* A newer build has already been noticed — a worker took over, or the
-       re-fetch behind this launch brought back different bytes (see sw.js)
-       — and this page is still the old one. Asking the network again would
+    /* A newer build has already been noticed: a worker took over, or the
+       re-fetch behind this launch brought back different bytes (see sw.js),
+       and this page is still the old one. Asking the network again would
        compare it with a cache that already matches and say nothing changed. */
     if (hub.updated) { location.reload(); return; }
     if ("serviceWorker" in navigator) {
@@ -5693,8 +5693,8 @@ function importBackup(text) {
    ── A BACK POCKET, NOT A PART OF THE APP ──────────────────────────────
    Nothing outside this screen reads what it finds, and nothing it finds
    reaches anywhere else unless somebody is stood on this screen pressing
-   Recover. It used to be wired into the rest of the app — the account
-   sheet listed every save on the phone beside the account's profiles —
+   Recover. It used to be wired into the rest of the app (the account
+   sheet listed every save on the phone beside the account's profiles),
    and that is how training from one account kept surfacing in another's
    list. The profile list is the account's; this is the phone's.
 
@@ -5739,7 +5739,7 @@ function storageScan() {
   catch { out.readable = false; return out; }
 
   /* which account's list names each save, across every account this phone
-     has ever held — a save in somebody's list is theirs even where the
+     has ever held: a save in somebody's list is theirs even where the
      owner index has no entry for it */
   const listedBy = {};
   for (const key of keys) {
@@ -5849,7 +5849,7 @@ function storageFileFor(key) {
 
 /* ── PUTTING A SAVE INTO THE ACCOUNT YOU ARE IN ──────────────────────
    Additive and nothing else, and always into the account logged in right
-   now — whoever it used to belong to, since whoever is recovering it has
+   now: whoever it used to belong to, since whoever is recovering it has
    either proved they hold that account's password or it never had one.
 
    A save no list names any more is simply put in this account's list. A
@@ -5901,7 +5901,7 @@ function storAskPassword(row, then) {
 /* Recover, after any password has been given. Two different confirms,
    because they are two different facts: putting back a save that is
    already yours (or nobody's), and moving training from another account
-   into this one — which is allowed, since whoever is doing it has just
+   into this one, which is allowed, since whoever is doing it has just
    proved they hold both, but is never done without saying so. */
 function storRecover(row) {
   if (!row || !row.ok || row.mine || storLocked(row)) return;
@@ -5991,7 +5991,7 @@ const ui = {
   exWinEdit: false,     // false = read-only view, true = editable
   exWinDraft: null,     // working copy while editing/creating
   /* filing an existing lift under another one, see reparentUnder:
-     {id, q, parentId, short} — the row being moved, the search box, the
+     {id, q, parentId, short}: the row being moved, the search box, the
      base picked for it, and the short name it will wear under that base */
   exWinAttach: null,
   exHistAll: false,     // its history list is showing every session, not just the recent ones
@@ -6134,7 +6134,7 @@ const decimalize = (v) => String(v ?? "").replace(/,/g, ".");
 
 /* aria-hidden rides onto the <svg> lucide draws (it copies the element's
    attributes across): an icon is decoration to a screen reader, and the
-   control around it carries the words — its text, its title, or the
+   control around it carries the words: its text, its title, or the
    label a11yPass gives it. */
 const icon = (name, size = 16, extra = "") =>
   `<i data-lucide="${name}" width="${size}" height="${size}" aria-hidden="true" ${extra}></i>`;
@@ -6181,7 +6181,7 @@ const stat = (label, value, sub = "", color = "") =>
    Stored per DATE rather than on a row, because a date is what it is about:
    a day's rows are added, edited and deleted all the time and the day they
    happened on does not move with them. There is no "day" record to hang it
-   on — the log is a flat list of entries carrying a date — so this is a map
+   on (the log is a flat list of entries carrying a date), so this is a map
    keyed by that date, exactly as `goals` is keyed by a lift's name.
 
    IT COUNTS FOR NOTHING. No PR, no volume, no week, no graph: it is a
@@ -6193,7 +6193,7 @@ const stat = (label, value, sub = "", color = "") =>
    the whole reason it is not just a text field: the day in the log, the day
    on the calendar, a day parked above the history, the point you tap on a
    lift's graph (where "why is this one down?" is the actual question), every
-   session in a lift's history, and `Last time` in the next workout — the
+   session in a lift's history, and `Last time` in the next workout: the
    one that pays for the feature, because "shoulder was cold, went light" is
    exactly what you want in front of you stood over the bar a week later,
    and a note filed under one exercise could never say it. */
@@ -6403,14 +6403,14 @@ function applyViewport() {
      field you just tapped 455px up the screen and Chrome gives up on the
      IME) and names the price: a bar parked at the bottom of the frame
      ends up underneath it. The rule stated there is to lift that ONE bar
-     by measuring visualViewport, and this is the measurement — written
+     by measuring visualViewport, and this is the measurement: written
      here because this is the only code that reads the device, and handed
      to the layout as `--pb-kb` like every other `--pb-*` token.
 
      `innerHeight - (height + offsetTop)` is what the keyboard has taken
      off the bottom, and it is divided by the scale because both sides of
      that subtraction are screen pixels while the frame is laid out in its
-     own — the same correction the drag handlers make. On a phone it
+     own: the same correction the drag handlers make. On a phone it
      divides by 1; on a tablet it is the difference between a composer
      that clears the keyboard and one that clears twice too much.
 
@@ -6513,13 +6513,13 @@ function flashLogDay() {
    was given underneath was a hand-written 120px. That is right for a footer
    holding one button and wrong the moment it holds more: the workout sheet
    adds *Save as preset*, and above that up to two lines saying what is
-   still unlogged — copy that WRAPS, so the number was not merely too small,
+   still unlogged: copy that WRAPS, so the number was not merely too small,
    it was not a fixed number at all. Past 120px the bottom of the list came
    to rest under the transparent top of that gradient, and the caption
    printed straight across the timer dials' labels.
 
    So the clearance is read off the footer. This is content being measured,
-   not the device — applyViewport still owns every dimension that answers to
+   not the device: applyViewport still owns every dimension that answers to
    the screen, and the safe-area inset is already inside this height because
    the footer's own padding carries it. It runs with flashLogDay, after the
    icons, for the reason stated there: the glyphs are what settle the final
@@ -6600,7 +6600,7 @@ function render() {
 
   /* Somebody else's training, on your phone. A strip rather than a dialog:
      every screen still works, so the only thing that needs saying is whose
-     it is and why the buttons refuse — said once, at the top, on every tab,
+     it is and why the buttons refuse: said once, at the top, on every tab,
      including Home, where there is no header to hang it under. */
   if (syncReadOnly()) {
     /* A live profile says where it is as well as whose it is, because the
@@ -6805,7 +6805,7 @@ function render() {
      its own heading.
    - Only the TOP overlay can be reached: everything under it is `inert`,
      so VoiceOver and a keyboard cannot wander into the screen behind a
-     sheet — which a sighted person cannot touch either, since the sheet's
+     sheet, which a sighted person cannot touch either, since the sheet's
      backdrop covers it. A live announcement (role=status) is left alone.
    - A window that has just opened takes focus, on its first control, when
      nothing in it asked for the caret: a screen reader starts reading the
@@ -6900,8 +6900,8 @@ function a11yPass(opened, hadFocus, focusBack) {
    the way nearly every app does, and nothing else: no tabs, no settings,
    no training from whoever used it last.
 
-   Logged in to an account with no profiles yet — a new account, or one
-   whose last profile was deleted — gets the other half: a field for the
+   Logged in to an account with no profiles yet (a new account, or one
+   whose last profile was deleted) gets the other half: a field for the
    first one's name, a way into a profile somebody shared, Storage check,
    and a way back out. The app proper only draws once there is a profile
    to draw.
@@ -8064,8 +8064,8 @@ function renderVolume(log, library, settings, currentWeek) {
    1RM, Progress and Standards are the same shape of thing: none of them
    writes to the log, all three read it, and each answers a question about
    what your numbers are worth. The calculator had a tab of its own in the
-   bottom nav and did not earn one — it is a form you fill in twice a month
-   — while sitting one row away from the two screens it belongs beside.
+   bottom nav and did not earn one (it is a form you fill in twice a month),
+   while sitting one row away from the two screens it belongs beside.
 
    It is FIRST because it is the one that needs no history: somebody who
    opened the app today can use it, where Progress and Standards both want
@@ -8226,9 +8226,9 @@ function renderProgress(log, library, goals, badges, settings, unit) {
    TWO WAYS TO SAY WHAT YOU LIFTED, ONE ANSWER. The tables are written in
    one-rep maxes and nobody trains in them, so the lift field takes either
    one: a max, or a set you actually did (`f.mode`, stdMode, stdLiftValue).
-   A set is folded into a max by est1RM — the same anchored Wathan curve
+   A set is folded into a max by est1RM (the same anchored Wathan curve
    the log and the 1RM tab run on, reps rounded exactly as that tab rounds
-   them — and that identity is the entire point. The rank you get from
+   them), and that identity is the entire point. The rank you get from
    5 × 135 is the rank you would have got by working the max out on the
    1RM tab and typing it back in here, which is the trip this exists to
    save. No second curve, and nothing new to disagree with the first.
@@ -8344,7 +8344,7 @@ function stdCheck(f, unit) {
    `STD_MATCH` ties the app's own built-ins to a slug and can never reach
    any further: it is keyed by the shipped `default-N` ids, so a custom
    exercise, a variation, and a built-in somebody rebuilt by hand are all
-   invisible to it — and those are exactly the rows people care most about.
+   invisible to it, and those are exactly the rows people care most about.
    Somebody whose whole leg day is custom rows had a standards tab that
    knew nothing about any of it.
 
@@ -8368,8 +8368,8 @@ const stdSlugFor = (ex) => {
 };
 
 /* ── YOUR BEST SET EVER ON ONE LIFT, IN THE TABLES' OWN TERMS ─────────
-   The single best set on record for THIS row of the library — not the best
-   of everything tied to the same standard — because it is read from that
+   The single best set on record for THIS row of the library (not the best
+   of everything tied to the same standard), because it is read from that
    lift's own page and is an answer about that lift.
 
    Best means the highest estimated 1RM, the same measure `bestSet` and the
@@ -8377,7 +8377,7 @@ const stdSlugFor = (ex) => {
    in: the strongest set is the one that puts you highest, so there is no
    second opinion to have. A rep-count standard is ranked on reps instead,
    and reads only a BODYWEIGHT-kind exercise, where the log stores a set as
-   a number of reps and nothing else — a set of reps × weight cannot answer
+   a number of reps and nothing else: a set of reps × weight cannot answer
    "your best set of pull-ups at bodyweight" and never could. */
 function stdBestSetFor(ex, sEx) {
   if (!ex || !sEx) return null;
@@ -8423,8 +8423,8 @@ const stdLatestBw = () => [...(state.body || [])]
    It used to live only in `ui`, which meant every visit started from
    nothing: pick the lift again, answer the sex question again, type the
    bodyweight again, and only then ask the question. Nothing about that
-   was a what-if — a person's sex does not change between two checks and
-   their bodyweight barely does — so the form is now kept in
+   was a what-if (a person's sex does not change between two checks and
+   their bodyweight barely does), so the form is now kept in
    `settings.std`, and `ui.std` IS that object rather than a copy of it:
    every keystroke is therefore already in `state` and the next save writes
    it, with no second place for the two to drift apart.
@@ -8438,7 +8438,7 @@ const stdLatestBw = () => [...(state.body || [])]
    The rule is simply the later of the two. A value that CAME from a
    check-in always follows the newest check-in, so logging a new one is
    enough to make every rank current. A value TYPED here is a what-if and
-   holds against check-ins already on record — but a check-in logged on a
+   holds against check-ins already on record, but a check-in logged on a
    later day is the newer fact and takes the box back. `bwOn` is the day
    the figure in the box is true for, which is what lets those two cases be
    one comparison instead of a special case each. */
@@ -8774,7 +8774,7 @@ function renderChartFull() {
    IT FILTERS THE LIST AND NOTHING ELSE. The selected lift is worked out
    from the WHOLE list before the filter runs, so typing never moves the
    graph out from under you, and the dropdown above the graph still offers
-   everything — narrowing a control that owns the selection would leave the
+   everything: narrowing a control that owns the selection would leave the
    lift on screen missing from the only thing that can change it. Tapping a
    result is what moves the graph, exactly as tapping a row always has. */
 function progressLiftRows(rows, sel, unit) {
@@ -9042,7 +9042,7 @@ function renderChat() {
      ── THE WHOLE TAB BELOW THE FIELD IS ONE PATCHABLE BOX ────────
      and that is not a tidiness choice, it is the fix for a real bug.
      Typing used to swap the tab between the thread list and the
-     results, and that swap was done with render() — which rebuilds
+     results, and that swap was done with render(), which rebuilds
      `#app`, throws away the input the caret is sitting in, and drops
      focus. So the FIRST letter typed and the LAST one deleted each
      kicked you out of the field: you typed one character, the keyboard
@@ -9051,10 +9051,10 @@ function renderChat() {
      and never renders, and this one now does the same. The two states
      are one `chatBodyHTML()` and the field itself never moves.
 
-     The clear button is ALWAYS in the DOM for the same reason — drawing
+     The clear button is ALWAYS in the DOM for the same reason (drawing
      it only while there is something to clear would change the field's
      own markup on the first keystroke, which is the very thing that
-     cost the focus — so it is shown and hidden in place, and the
+     cost the focus), so it is shown and hidden in place, and the
      padding that makes room for it is constant.                     */
   const finder = `<div style="position:relative;margin-bottom:12px">
     <input class="pb-input" data-bind="chatFind" value="${esc(ui.chatFind || "")}"
@@ -9174,7 +9174,7 @@ function chatResultsHTML() {
   }
 
   /* A name already in the list says so, and opens the conversation you
-     have rather than pretending to start a new one — which is what the
+     have rather than pretending to start a new one, which is what the
      server does anyway (find-or-create), so this only makes the button
      honest about it. */
   const known = new Map();
@@ -9232,7 +9232,7 @@ function renderChatThread() {
 
     ${/* The composer. A textarea rather than an input, because people
           write more than one line and enter has to be able to mean a new
-          line — sending is the button, always, which is also what stops
+          line: sending is the button, always, which is also what stops
           a stray keyboard return posting half a sentence. It grows to
           four lines and then scrolls. */""}
     <div style="flex-shrink:0;display:flex;align-items:flex-end;gap:8px;padding:9px 12px calc(9px + var(--pb-sab));border-top:1px solid var(--border-soft);background:var(--surface)">
@@ -9319,7 +9319,7 @@ function chatThreadBodyHTML(f) {
       </div>`;
     }
 
-    /* Words — and anything of a kind this build does not know yet, which
+    /* Words, and anything of a kind this build does not know yet, which
        arrives with a one-line summary for exactly this reason. An unsent
        message never reaches this point: it is taken off the screen, not
        drawn as a row saying it was there (see chatDrop). */
@@ -9370,8 +9370,8 @@ function renderChatMenu() {
 /* ══ THINGS IN A MESSAGE ═════════════════════════════════════════════
    A message can carry something from the app, not only words: an
    exercise, a preset, a logged day, a personal record, a strength rank, a
-   photo. It arrives as a card — the way a link or a game invite arrives in
-   a messaging app, not as a line of text describing one — and tapping the
+   photo. It arrives as a card (the way a link or a game invite arrives in
+   a messaging app, not as a line of text describing one), and tapping the
    card opens it in full (renderChatView), where the things that belong in
    a library can be added to your own.
 
@@ -9409,7 +9409,7 @@ const pStr = (v, max = 300) => (typeof v === "string" ? v.slice(0, max) : "");
 const pNum = (v) => (typeof v === "number" && isFinite(v) ? v : null);
 const pColor = (v) => (typeof v === "string" && /^#[0-9a-fA-F]{6}$/.test(v) ? v : null);
 const pList = (v, max = 80) => (Array.isArray(v) ? v.slice(0, max).filter((x) => x && typeof x === "object") : []);
-/* a number as the app stores one (a string), or "" — which is also what
+/* a number as the app stores one (a string), or "", which is also what
    keeps a payload's "minutes" from reaching a template unescaped */
 const pNumStr = (v) => {
   const n = parseFloat(String(v ?? "").replace(",", "."));
@@ -9437,7 +9437,7 @@ const stdOf = (slug) =>
      would strand it as a lift named "Lat Pulldown (Wide grip)" with no
      family (chatAddEx files it under theirs, or brings the parent along);
    - its STRENGTH STANDARD link, made by hand (`ex.std`), which says which
-     of the seventy-one lifts the ranks read it as — a property of the
+     of the seventy-one lifts the ranks read it as: a property of the
      movement that would otherwise have to be worked out twice;
    - its PHOTO, by id (chatSnapPhoto).
 
@@ -9541,7 +9541,7 @@ async function chatBuildThing(kind, ref) {
   }
 
   /* A PLANNED DAY: the lifts, and the targets on them, set by set. What
-     travels is exactly what the plan holds — a lift planned with no
+     travels is exactly what the plan holds: a lift planned with no
      numbers ("weights on the day") travels with none. */
   if (kind === "plan") {
     const pl = (state.plans || []).find((x) => x.id === ref);
@@ -9657,7 +9657,7 @@ function snapBuiltinIx(snap) {
   return b && Object.prototype.hasOwnProperty.call(DEFAULT_INDEX, b) ? DEFAULT_INDEX[b] : null;
 }
 /* the name in YOUR language when it is a built-in still wearing the name
-   the app shipped it under, and exactly as its owner typed it otherwise —
+   the app shipped it under, and exactly as its owner typed it otherwise:
    exLabelOf's rule, applied to a row that is not in your library, down to
    a variation reading as its parent plus what makes it one */
 function snapLabel(snap) {
@@ -10314,14 +10314,14 @@ function renderChatMsgMenu() {
 }
 
 /* ── LONG PRESS, THE WAY EVERY MESSAGING APP DOES IT ──────────────────
-   A tap on a message already means something — open the card, open the
-   photo — so the actions on a message (copy it, unsend it) live behind a
+   A tap on a message already means something (open the card, open the
+   photo), so the actions on a message (copy it, unsend it) live behind a
    long press, and behind a right click on a desktop. One listener on the
    document, like everything else here, because render() throws the nodes
    away on every frame.
 
    The finger is still down when the menu opens, and lifting it lands a
-   click on whatever is now underneath — the menu's own backdrop, which
+   click on whatever is now underneath: the menu's own backdrop, which
    would close it again. So that one click is swallowed, in the capture
    phase, before the dispatcher sees it. A press that moves is a scroll,
    and cancels. */
@@ -10387,7 +10387,7 @@ function chatCopyText(text) {
 /* ── SENDING SOMETHING FROM WHERE IT LIVES ────────────────────────────
    The composer's + is one way in. The other is from the thing itself: an
    exercise's window, a preset, a rank you have just been given. This sheet
-   picks the conversation, sends, and says it went — it does not take you
+   picks the conversation, sends, and says it went: it does not take you
    away from where you were, because you were in the middle of something. */
 function renderShareTo() {
   const sh = ui.shareTo;
@@ -10437,9 +10437,9 @@ const chatShareBtn = (kinds, ref, style = "") => chatSignedIn()
   : "";
 
 /* ── ADDING IT TO YOUR OWN ────────────────────────────────────────────
-   The group it goes in: yours if you have it — by the key the app shipped
+   The group it goes in: yours if you have it (by the key the app shipped
    it under first, so "Chest" lands in your chest group even if you renamed
-   it "Pecs" — then by name, and made fresh with the sender's colour and
+   it "Pecs"), then by name, and made fresh with the sender's colour and
    kind when you have nothing like it. `groups` is a working copy the caller
    commits. */
 function chatGroupFor(snap, groups) {
@@ -10465,7 +10465,7 @@ function chatGroupFor(snap, groups) {
    returned as it is, or with `asCopy` the new one is numbered beside it. A
    built-in you had deleted comes back AS the built-in, so it speaks your
    language again; anything else is a custom row, exactly as typed. */
-/* The row in `lib` that a snapshot already IS, or null — asked by the
+/* The row in `lib` that a snapshot already IS, or null: asked by the
    import and by the screen that offers it, so the two can never disagree
    about what is "new to you".
 
@@ -10504,7 +10504,7 @@ function chatAddEx(snap, lib, groups, asCopy) {
   }
 
   /* A variation lands in the family it belongs to: under their own copy of
-     the parent if they have one, or with the parent brought along if not —
+     the parent if they have one, or with the parent brought along if not,
      and is named the way this app names a variation, from THEIR parent's
      name, so it stays unique and reads right in their library. */
   const short = pStr(snap && snap.variantName, 60).trim();
@@ -10554,7 +10554,7 @@ function chatAddEx(snap, lib, groups, asCopy) {
 
 /* What a lift is logged in, read against the groups being committed rather
    than `state.groups`: an import can make a group in the same breath, and
-   exKind asked about it would not find it yet and answer "strength" — which
+   exKind asked about it would not find it yet and answer "strength", which
    is how a lift from a brand-new cardio group would arrive asking for sets. */
 const kindAmong = (row, groups) =>
   (KIND[row.kind] ? row.kind : ((groups.find((g) => g.name === row.muscle) || {}).kind) || DEFAULT_KIND);
@@ -10608,7 +10608,7 @@ function chatImport(m, asCopy, opts = {}) {
      makes when you plan a day yourself, with the same rules. Nothing in it
      counts until the day is logged, one plan per day (a day that already
      has one is refused rather than overwritten), and a target only rides
-     along while it fits the shape the lift is logged in HERE — a lift you
+     along while it fits the shape the lift is logged in HERE: a lift you
      log in seconds is not handed reps and kilos (planTargetUsable's rule),
      it comes as "numbers on the day". */
   if (m.kind === "plan") {
@@ -10654,7 +10654,7 @@ function chatImport(m, asCopy, opts = {}) {
    A friend's invite: the app is opened on its own address with
    `?invite=` (a username) on it. It is taken off the address straight away
    (so a reload or a bookmark does not do it twice) and kept for this tab
-   until there is somebody signed in with a profile open to act for — on a
+   until there is somebody signed in with a profile open to act for: on a
    phone that has never seen the app, that is after the login screen, which
    says why it is there. */
 const LINK_KEY = "zenofit:link";
@@ -10683,7 +10683,7 @@ function linkRun() {
 /* ── BRING A FRIEND ────────────────────────────────────────────────────
    The link is the app's own address with your username on it. Opened by
    somebody who has never seen the app, it lands on the login screen saying
-   who sent it, and once they are in, the conversation with you is open —
+   who sent it, and once they are in, the conversation with you is open:
    the whole point of inviting somebody to a training app is training with
    them. Found by exact username only, like the search it goes through. */
 const inviteLink = () => { const me = chatMe(); return me ? appBaseUrl() + "?invite=" + encodeURIComponent(me.username) : appBaseUrl(); };
@@ -10746,17 +10746,17 @@ function renderAppToast() {
 }
 
 /* ═══════════════════════ THIS WEEK, AT A GLANCE ═══════════════════════
-   One row on Home: the seven days of the week you are in — YOUR week, the
+   One row on Home: the seven days of the week you are in: YOUR week, the
    same one every other number in the app is counted in (a program week
    from your start date, or the last seven days if that is how you asked
-   to count) — with a dot on each day you trained and a ring on each day
+   to count), with a dot on each day you trained and a ring on each day
    you planned. It answers "have I been in this week?" without a tap, which
    is the question the Log tab needed three swipes for.
 
    The streak is weeks in a row with at least one session, counted the same
    way, and a week still in progress with nothing in it yet does not break
    it: Monday is not a failure. It is a count of what the log already
-   holds, nothing more — there is no target and nothing to lose. */
+   holds, nothing more: there is no target and nothing to lose. */
 function weekDays(today) {
   const r = rollingWeeks() ? windowEnding(today) : weekRange(weekOf(today, state.settings.startDate), state.settings.startDate);
   const out = [];
@@ -10827,7 +10827,7 @@ function csvText() {
      quoting on every comma wrapped each decimal-comma number in quotes */
   const needs = semi ? /[";\n\r]/ : /[",\n\r]/;
   const cell = (v) => { const s = String(v ?? ""); return needs.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
-  /* Words typed by people (a lift's name, a group, a note — and on a shared
+  /* Words typed by people (a lift's name, a group, a note, and on a shared
      profile, typed by whoever else can write to it) are never handed to a
      spreadsheet as a formula: one starting with = + - or @ is run by Excel
      and Sheets the moment the file opens. The apostrophe is the standard
@@ -10879,7 +10879,7 @@ function downloadBlob(name, blob) {
 }
 
 /* ═══════════════════════ WHO YOU COACH, AT A GLANCE ════════════════════
-   A profile shared with you is somebody's training — often somebody you
+   A profile shared with you is somebody's training: often somebody you
    coach. The Profiles window says, for each one, when they last trained
    and on how many of the last seven days, fetched from the server when the
    window opens (GET /v1/profiles/activity), because a read-only profile is
@@ -11178,7 +11178,7 @@ function reorderPinnedTimers(from, to) {
 /* DRAG_READ_OK below is READ_OK's other half, and it draws the same line:
    the profile INDEX and the timers belong to this phone, everything else
    here is a write into somebody else's training. A drag never met that
-   check at all, because it arrives as pointerdown rather than as a click —
+   check at all, because it arrives as pointerdown rather than as a click,
    so on a profile whose every button said no, dragging the library into a
    different order went straight through, and the next pull silently put it
    back. A new reorderable list has to be decided about in both tables, and
@@ -11263,7 +11263,7 @@ function reorderLibraryExercises(from, to, row) {
    occupies are rewritten, so nothing outside it shifts by a row.
 
    The BASE is not in the list. It is not ranked against its own variations
-   — every surface that draws the family draws it first, by construction —
+   (every surface that draws the family draws it first, by construction),
    so a handle on it would promise a move that nothing would carry out. */
 function reorderVariations(from, to, row) {
   const rootId = row && row.dataset ? row.dataset.root : null;
@@ -11652,7 +11652,7 @@ function readImageScaled(file, cb, opts = {}) {
    handleBind, to flip it while somebody types. Keeping a second copy of
    the rule is what broke variations.
 
-   A VARIATION types its short part and nothing else — "Wide grip" — and
+   A VARIATION types its short part and nothing else ("Wide grip"), and
    its stored name is composed from the parent's at save time, so the
    draft's `name` starts empty and STAYS empty no matter how completely
    the form is filled in. Both copies of the check looked at `name`, found
@@ -11720,8 +11720,8 @@ function exerciseHistory(name, log) {
     .map((e) => ({ ...e, m: metricOf(e) }))
     .filter((e) => e.m != null);
 
-  /* What this lift is logged in TODAY. Everything that RANKS — the graph,
-     the best ever, the PR flags — reads only the sessions in that kind,
+  /* What this lift is logged in TODAY. Everything that RANKS (the graph,
+     the best ever, the PR flags) reads only the sessions in that kind,
      because a rep count and an est. 1RM cannot be put in order together.
      The list below still shows every session: they happened, and a ledger
      that hides them is worse than one that labels them. */
@@ -11847,7 +11847,7 @@ function exWindowViewBody(ex, hist) {
    stood on the lift's own page, so from here it is one press.
 
    What it CANNOT know is which of the seventy-one a lift of yours is, for
-   anything the built-in table does not cover — so that is the one thing
+   anything the built-in table does not cover, so that is the one thing
    this panel asks, once, and remembers on the row (see stdSlugFor). Until
    it is answered the button is disabled rather than hidden: a control that
    is not there teaches nothing, and the line under it says which of the two
@@ -12056,8 +12056,8 @@ function exWindowVariations(ex) {
    WHAT TO CALL IT: the short part it will wear under that base, guessed by
    shortUnder and shown in a field rather than applied quietly, because the
    guess is arithmetic on a string and the person reading it knows what the
-   lift is. The line under it spells out the whole move — the new label, and
-   what happens to the variations coming along — before anything is
+   lift is. The line under it spells out the whole move (the new label, and
+   what happens to the variations coming along) before anything is
    written, since this renames rows the log points at. */
 function attachBasesHTML() {
   const a = ui.exWinAttach;
@@ -12464,8 +12464,8 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
    WHAT IT SAYS IS ONLY WHAT THE LOG SAYS. The same numbers the app shows,
    read the same ways (exerciseHistory, computeBadges, bestSet, est1RM),
    and nothing the app does not know: no calories, no "intensity score",
-   no guess at how long it took. The one figure added is weight moved —
-   reps × weight over every set, in your unit — which is arithmetic on
+   no guess at how long it took. The one figure added is weight moved
+   (reps × weight over every set, in your unit), which is arithmetic on
    what you logged, not an opinion about it. A total is a sum of est.
    1RMs and says "est." on it, because that is what it is.
 
@@ -13937,7 +13937,7 @@ function renderStorUnlock() {
    Adding a lift mid-workout meant typing its name or scrolling the whole
    library, while the Library tab two taps away has had a chip per muscle
    group all along. Same chips here, same test (`ex.muscle`), and the same
-   list of groups the Library offers — minus any with nothing in them, since
+   list of groups the Library offers, minus any with nothing in them, since
    a chip that empties the list is no use to somebody picking a lift. It
    narrows what is SHOWN and nothing else: whether a typed name is new to
    the library is still asked of the whole library, so a lift filed under
@@ -14110,7 +14110,7 @@ function entryComputed() {
      now that it is a number: metricOf answers in kilos for a strength
      session and in reps for a bodyweight one, so pooling them put a rep
      count in a kilo column. Same rule as computeBadges, earlierOutings
-     and the graph — a lift is read in the kind it is logged in today.
+     and the graph: a lift is read in the kind it is logged in today.
 
      The window is otherwise unchanged, and deliberately wider than
      earlierOutings: it includes the entries in the open day sheet, which
@@ -14172,9 +14172,9 @@ function entryComputed() {
    is the ceiling you are walking toward, and putting the ceiling first
    would make every ordinary session look like a failure.
 
-   Each wears the set list's own verdict colours against its own bar —
-   gold when today's figure is past it, green when it is level, muted when
-   it is not there yet — so "did I beat it" is answered by the colour and
+   Each wears the set list's own verdict colours against its own bar
+   (gold when today's figure is past it, green when it is level, muted when
+   it is not there yet), so "did I beat it" is answered by the colour and
    "by how much" by the two numbers, without a sentence in between. A bar
    that does not exist yet (a first outing) prints an em dash rather than
    going missing, so the row does not change shape the moment you have
@@ -14643,7 +14643,7 @@ function renderEntryFields(form, unit) {
    sheet with, so this line and the beat/under badge on the row can never
    disagree. It used to be measured against last session's BEST set, which
    made the card say "1.2 lower than last time" on a back-off set that had
-   just beaten the back-off set it was actually repeating — the estimate
+   just beaten the back-off set it was actually repeating: the estimate
    was true and the comparison was answering a question nobody asked. A
    session is a list of sets, and the bar for a set is the set that stood
    in its place.
@@ -14656,8 +14656,8 @@ function renderEntryFields(form, unit) {
    the set in the boxes clears it, it goes gold and says so, which is the
    same claim the PR badge will make when the entry is saved.
 
-   Both are read in the unit being typed in today — the positional one
-   through lastTimeSets, the all-time one through weightAs — because the
+   Both are read in the unit being typed in today (the positional one
+   through lastTimeSets, the all-time one through weightAs), because the
    number they are subtracted from is drawn in the entry's unit and a kg
    estimate held up against an lbs one is not a comparison at all.
 
@@ -14730,7 +14730,7 @@ function vsLastLine(m, ref) {
 /* The quiet number to the right of it: the ceiling this lift has ever hit,
    and how far under it you are. Small, muted and second, because on most
    sets of most sessions the answer is "a long way", and a figure nobody can
-   beat today is context, not a target — the positional line to its left is
+   beat today is context, not a target: the positional line to its left is
    the one with something to say about the set in the boxes.
 
    It goes gold and says so the moment the set clears it, which is the same
@@ -14797,7 +14797,7 @@ function renderSetForm(form, unit) {
   const sug = isNew && ui.entryForm && !stillPlanned ? setSuggestion(ui.entryForm.f, ui.entryForm.isDraft) : null;
   /* both of them, same as the card behind this sheet, minus whichever one
      the open set already IS, which is what you get by tapping it there */
-  /* both of them minus whichever the open set already IS — or the single
+  /* both of them minus whichever the open set already IS, or the single
      one, on a kind with only one way forward. Compared on the fields THIS
      kind has: bodyweight was matching on a weight neither side has, so the
      option it was already showing never went away. */
@@ -14876,8 +14876,8 @@ function updateSetPreview() {
 }
 
 /* ── WHAT THE SAVE BUTTON SAYS ───────────────────────────────
-   Two things read this — the paint, and updateEntryPreview patching the
-   button as you type — so it is worked out once rather than written out
+   Two things read this (the paint, and updateEntryPreview patching the
+   button as you type), so it is worked out once rather than written out
    twice.
 
    CARDIO IS WHY IT HAS TO BE PATCHED AT ALL. Every other kind puts its
@@ -14888,7 +14888,7 @@ function updateSetPreview() {
    the button kept the face it was painted with: ten minutes at RPE 10 on
    screen, session load reading 100 beside it, and the button still
    offering to line the lift up for later. It saved the numbers correctly
-   — it was only ever the label that was stale — but a button that
+   (it was only ever the label that was stale), but a button that
    misdescribes what it is about to do is a button nobody should trust. */
 function entrySaveFace(f, c) {
   return {
@@ -15011,7 +15011,7 @@ function renderBodyFormSheet(f, unit) {
 
    There used to be two buttons that looked like two features: "Turn on
    notifications" in Settings and a strip in the chat tab offering to "Turn
-   on" message notifications. They were the same button — both asked the
+   on" message notifications. They were the same button: both asked the
    browser for permission and subscribed this device to push, and that one
    subscription is what a rest timer rings through AND what a message
    arrives through. Two controls for one thing is how somebody turns it
@@ -15100,8 +15100,8 @@ async function notifyEnable() {
 
 /* Off: the subscription is taken back on the server and in the browser,
    so nothing is sent here at all, and the page stops showing its own
-   timer notification too. The browser's permission stays granted — only
-   the user can take that away, in its settings — which is what makes
+   timer notification too. The browser's permission stays granted (only
+   the user can take that away, in its settings), which is what makes
    switching back on a tap with no prompt. */
 async function notifyDisable() {
   const C = window.ZenofitCloud;
@@ -15144,16 +15144,16 @@ function notifySetKind(kind, on) {
    you, and relaunching did not help. The same request carries this
    device's kinds, so it also does what notifySyncPrefs did here.
 
-   If it is NOT on while the browser has already said yes — the old
+   If it is NOT on while the browser has already said yes (the old
    first-timer prompt asked for exactly that permission and stopped short of
-   subscribing — the switch is on as far as anybody decided, so the
+   subscribing), the switch is on as far as anybody decided, so the
    subscription that makes a locked phone ring is made now, quietly. No
    prompt can appear: the browser only prompts while the answer is still
    "default". A device that was switched OFF is left off.
 
    Nobody signed in, nothing is done. This used to subscribe at a logged-out
    launch as well, and a subscription needs an account to file it under, so
-   it quietly made one — an anonymous device the phone then rang for, which
+   it quietly made one: an anonymous device the phone then rang for, which
    nobody would ever sign in to. */
 async function notifyAttach() {
   const C = window.ZenofitCloud;
@@ -15450,7 +15450,7 @@ function playSound(id, volume = DEFAULT_VOLUME) {
    top of all three is the fourth copy of one fact.
 
    Through the service worker where there is one, because Chrome on
-   Android refuses `new Notification()` from a page outright — it only
+   Android refuses `new Notification()` from a page outright: it only
    ever worked on a desktop. The constructor stays as the fallback for a
    page the worker does not control yet. */
 function notifyDone(t) {
@@ -15506,8 +15506,8 @@ function notifyDone(t) {
    profile's timers can answer for is closed unless its timer is finished
    right now. It runs when the app comes back, when it goes, at launch, and
    when sw.js reports a push, because a push can still land AFTER the rest
-   was dealt with — the cancel that should have stopped it was slower than
-   the server's two-second grace — and it would otherwise stand, unasked,
+   was dealt with (the cancel that should have stopped it was slower than
+   the server's two-second grace), and it would otherwise stand, unasked,
    over a timer that is already running again. Notifications it cannot
    match are left alone: another profile's rest, and the Notifications
    window's test timer, which is not a timer at all. */
@@ -15552,7 +15552,7 @@ function timerNotifsTidy() {
 
 /* ── A REST IS ANNOUNCED ONCE, BY WHOEVER WAS THERE WHEN IT RAN OUT ────
    It used to ring twice. Lock the phone mid-rest, the page is frozen, the
-   server's push rings at the deadline — and then you open the app, the
+   server's push rings at the deadline, and then you open the app, the
    page wakes, finds the rest overdue, and fireTimer buzzes and chimes all
    over again at somebody who has just tapped the notification that told
    them. Once outside, once inside, for the same rest.
@@ -15603,7 +15603,7 @@ function fireTimer(t) {
   const cameBack = !hidden && !(visibleSince != null && visibleSince <= t.endsAt);
   const pushHasIt = hidden && !!t.cloudId && over >= PUSH_GRACE_MS;
   /* We got here first, so the server's copy has nothing left to say and is
-     handed back before it can say it — unless it is the one saying it. */
+     handed back before it can say it, unless it is the one saying it. */
   if (!pushHasIt) cloudTimerCancel(t);
   t.endsAt = null; t.remaining = null; t.doneAt = Date.now();
   if (!cameBack && !pushHasIt) {
@@ -15693,9 +15693,9 @@ if ("serviceWorker" in navigator) {
    THE LOCAL ONE WINS WHEREVER IT CAN. The server's copy is booked
    PUSH_GRACE_MS late and fireTimer cancels it on the way past, so the
    push only ever speaks when the page was not there to. The gap is
-   already in our favour — the server starts counting when the request
+   already in our favour (the server starts counting when the request
    lands and we started when we sent it, so its deadline trails ours by a
-   round trip — but leaning on network latency for correctness is not a
+   round trip), but leaning on network latency for correctness is not a
    plan, and two deliberate seconds is nothing on a rest timer.
 
    IT IS A SECOND CHANCE, NEVER A PREREQUISITE. Nothing here is awaited
@@ -15848,7 +15848,7 @@ function timerIdleRow(t, last) {
    float to the top as full dials so the countdown is the first thing you see. */
 /* The Timer tab is two: the countdowns, and the one that counts up. They are
    the same question asked in opposite directions and belong behind the same
-   icon — a stopwatch filed under the workout log would be a clock kept in
+   icon: a stopwatch filed under the workout log would be a clock kept in
    the filing cabinet. The running dot sits on whichever one is not in front
    of you, and on the nav icon, so neither can be left ticking unseen. */
 function renderTimers() {
@@ -16013,7 +16013,7 @@ function updateTimerPreview() {
 
 /* ══════════════════════════ STOPWATCH ══════════════════════════════
    The Log tab's third mini tab, beside History and Calendar. The timers
-   already in the app all count DOWN to something — a rest, a hold — and
+   already in the app all count DOWN to something (a rest, a hold), and
    there was nothing that counted up, which is what you want for the other
    half of a session: how long a circuit took, how long the whole workout
    ran, how long a walk was before anybody decided whether to log it.
@@ -16056,8 +16056,8 @@ function fmtStopwatch(ms) {
    Its own loop rather than a passenger on the 250ms timer engine: at four
    frames a second the hundredths column would flicker through values it
    never showed. It paints in place like paintTimers does and for the same
-   reason — a render() per frame would throw away whatever field had the
-   caret — and it stops the moment the digits leave the screen, so a
+   reason (a render() per frame would throw away whatever field had the
+   caret), and it stops the moment the digits leave the screen, so a
    stopwatch left running in the background costs one arithmetic per
    start/stop and nothing in between. */
 let swRaf = null;
@@ -16271,7 +16271,7 @@ function renderProfile(f) {
 /* ── WHICH TRAINING IS ON SCREEN ─────────────────────────────────────
    A profile is a whole separate app: its own log, library, groups, presets,
    timers, goals, body check-ins, plans and settings. Nothing is shared, on
-   purpose — the point is to try a different block, or log for somebody
+   purpose: the point is to try a different block, or log for somebody
    without their phone, and be certain none of it can touch what you have.
 
    The list is deliberately blunt about which one you are in: the active row
@@ -16288,8 +16288,8 @@ function renderProfilesWindow() {
   /* ── YOURS, THEN SHARED WITH YOU, AND NOTHING ELSE ─────────────────
      This is the account's list and only the account's list: every profile
      in it, none that is not. Each row used to carry a line saying where
-     the profile physically was — on this phone only, backed up, synced but
-     not to this account — which described the machinery rather than the
+     the profile physically was (on this phone only, backed up, synced but
+     not to this account), which described the machinery rather than the
      profile, and read as a list of things that had gone wrong. The only
      fact a row still states is whose training it is, by putting the ones
      somebody shared with you under their own heading, each naming who. */
@@ -16470,8 +16470,8 @@ function renderSyncSheet() {
 
    The list is the account's and nothing else, in the same two groups the
    Profiles screen draws. It used to list every profile on the PHONE, each
-   with a word about where it was — back up, get it, on this phone, synced
-   but not to this account — and a button for whichever of those needed
+   with a word about where it was (back up, get it, on this phone, synced
+   but not to this account), and a button for whichever of those needed
    doing. That was a list of the app's bookkeeping. A profile is either in
    your account, and so in this list on every device you log in on, or it
    is not in the list. */
@@ -17159,9 +17159,9 @@ function dropDayDraft(id) {
 
 /* ── …AND READ BACK OUT OF IT, IN ONE PLACE ──────────────────────
    stashDayDraft above is the only thing that WRITES a parked day, and this
-   is the only thing that reads one. Four buttons pick one back up —
-   Continue in the log, Log this day on the calendar, Start on a plan, and
-   Log exercise in a lift's window — and each of them used to spell the
+   is the only thing that reads one. Four buttons pick one back up
+   (Continue in the log, Log this day on the calendar, Start on a plan, and
+   Log exercise in a lift's window), and each of them used to spell the
    same object literal out by hand.
 
    They drifted, which is the one thing four copies reliably do: the fourth
@@ -17171,7 +17171,7 @@ function dropDayDraft(id) {
    went on showing as missed on its day in the calendar forever, with no
    way left to clear it.
 
-   So A FIELD ADDED TO A PARKED DAY IS ADDED HERE, not at a call site —
+   So A FIELD ADDED TO A PARKED DAY IS ADDED HERE, not at a call site:
    the same rule renameExerciseIn states for everything that stores an
    exercise name, arrived at from the same direction. */
 const sheetFromParked = (d) => ({
@@ -17180,7 +17180,7 @@ const sheetFromParked = (d) => ({
   draftId: d.id,
   /* copied, not handed over, for the same reason the entries are: plan-start
      PUSHES onto the open sheet's list, and a sheet sharing the stored row's
-     array would be editing the store through the back door — which is the
+     array would be editing the store through the back door, which is the
      same species of bug as the drift above, arrived at from the other side.
      stashDayDraft copies it on the way in for the same reason. */
   planIds: [...(d.planIds || [])],
@@ -17377,7 +17377,7 @@ const planResultOf = (draft, sum) => ({
    read one gesture as two different decisions and only the app knew which.
    Saving part-way through is normal (wo.draftNote says so, and prunePlans
    exists because of it), and *forgetting to write a lift down* is not the
-   same as *deciding not to do it* — yet dropping the row made them
+   same as *deciding not to do it*, yet dropping the row made them
    identical, and the one you actually did was the one you lost.
 
    So blanks are KEPT, in state.unlogged, one row per date. It is not the
@@ -17390,8 +17390,8 @@ const planResultOf = (draft, sum) => ({
    THROWING ONE AWAY IS NOW A DELIBERATE ACT, and it has to be, because the
    save no longer decides it for you: scrap-draft-entry, the bin on a
    waiting card. Taking a lift out of the sheet is the decision not to have
-   done it — exactly what it already means for a lift that came from a
-   plan — and the next save writes the shorter list.
+   done it (exactly what it already means for a lift that came from a
+   plan), and the next save writes the shorter list.
 
    Plan-linked blanks are deliberately NOT in here. prunePlans already
    leaves those on the plan and edit-day hydrates them from there, so
@@ -17402,7 +17402,7 @@ const planResultOf = (draft, sum) => ({
    not outstanding, it is the same lift twice: edit-day deals the logged row
    into the sheet anyway, so the waiting twin can only ever arrive as a
    duplicate card under a lift the day says you did. Deleting the twin and
-   backing out without saving used to leave it exactly where it was — right,
+   backing out without saving used to leave it exactly where it was: right,
    as a rule about unsaved edits, and wrong here, because there was nothing
    left for it to be waiting on. So the rule is not about who pressed save:
    stillOutstanding drops it on the way OUT of the store as well as on the
@@ -17450,8 +17450,8 @@ const unloggedWith = (date, entries, alsoDrop = null) => {
    It is a count of lifts and never a verdict. A planned lift you did three
    of four sets on is not in it: it HAS numbers, the plan line on the row
    already says 3/4, and an indicator nothing could ever clear would only
-   teach people to ignore it. Everything this counts has a way out — fill
-   it in, or bin it — which is the test for being on it at all.
+   teach people to ignore it. Everything this counts has a way out (fill
+   it in, or bin it), which is the test for being on it at all.
 
    NOTHING HERE IS COUNTED toward anything, exactly as before: this reads
    the three stores and writes none of them. */
@@ -17514,7 +17514,7 @@ function leftoverNames(entries, max = 3) {
 function commitWorkout(draft) {
   if (draft && draft.planning) return commitPlan(draft);
   /* Only real, filled-in entries get LOGGED. A blank never becomes a row, so
-     it can never turn up in the history, the volume or a PR — and it is not
+     it can never turn up in the history, the volume or a PR, and it is not
      thrown away for it either: see the unlogged block above. */
   /* Blanks dropping out can leave a superset link on what is now the first
      lift of the day, pointing at nothing. Marks on a first item are ignored
@@ -17539,7 +17539,7 @@ function commitWorkout(draft) {
     .map(stripPlanLink);
   /* A sheet saved onto a date that ALREADY had lifts waiting keeps them: it
      was never handed them, so it cannot be the thing that decides they are
-     gone. An EDITING sheet is the opposite — edit-day dealt them into it on
+     gone. An EDITING sheet is the opposite: edit-day dealt them into it on
      the way in, so what it holds now is the whole answer, scraps included. */
   const already = draft.editing ? [] : unloggedOn(draft.date);
   const named = new Set(waiting.map((e) => e.exercise));
@@ -17558,7 +17558,7 @@ function commitWorkout(draft) {
   /* The session note follows the day, and it is dropped with it: a day
      emptied out and saved as not done has no session left for a note to be
      about. The one thing an empty note does NOT do is clear a note already
-     sitting on a date this day has just been MOVED onto — that note was
+     sitting on a date this day has just been MOVED onto: that note was
      never dealt into the sheet, so the sheet cannot be what decides it is
      gone, exactly as the waiting lifts above are reasoned about. */
   const dayNote = String(draft.dayNote || "").trim();
@@ -17607,7 +17607,7 @@ function commitWorkout(draft) {
    the lifts waiting on a saved day, the presets and the goals all point at
    a lift by name, as do the sheet and the entry form that may be open
    right now. Writing a new name into the library alone leaves every one of
-   them aimed at a lift that no longer exists — the session still renders
+   them aimed at a lift that no longer exists: the session still renders
    in the day, and opening it finds nothing to edit.
 
    So the sweep lives here and nowhere else, and anything added later that
@@ -17647,7 +17647,7 @@ function renameExerciseIn(p, from, to) {
    family is one level deep and leaving them pointing at a row that is now
    itself a variation would build the tree of grips nobody wants. And every
    moved row's STORED NAME is recomposed from the new parent's, which is a
-   rename and goes through the cascade above — except where that name is
+   rename and goes through the cascade above, except where that name is
    already taken, where the row keeps the one it has: a unique name it
    already answers to is worth more than a tidy one, and two rows under a
    single name is the desync the clash check exists to prevent.
@@ -17761,10 +17761,10 @@ const actions = {
        "Profile 1" on the laptop. The stamp is what makes it converge:
        the later typing wins, so a phone that has been offline for a week
        cannot undo a rename made yesterday simply by reconnecting last.
-       Still fire and forget — a failed request costs a stale label for
+       Still fire and forget: a failed request costs a stale label for
        one poll, not data, and the roster pass will carry it. */
-    /* Not yours to name. A read grant's nickname went nowhere — the
-       server will not take a name for somebody else's profile — so it
+    /* Not yours to name. A read grant's nickname went nowhere (the
+       server will not take a name for somebody else's profile), so it
        only ever produced one profile called three different things on
        three different screens. See the roster's read-grant branch. */
     if ((syncLinked(f.id) || {}).level === "read") { toastReadOnly(); return; }
@@ -17821,7 +17821,7 @@ const actions = {
        is what made this local-only. It used to send `deleteProfile` for
        anything not marked "read", so a profile somebody had shared with
        write access got a delete the server rightly refused as not-yours,
-       into a `.catch` that said nothing — and a read one got no request
+       into a `.catch` that said nothing, and a read one got no request
        at all. Either way the grant survived, the profile stayed in the
        account, and the laptop kept its copy of something that had been
        deleted on the phone hours ago.
@@ -17883,7 +17883,7 @@ const actions = {
   /* ── LOGGING IN, AND ASKING BEFORE AN ACCOUNT IS MADE ───────────────
      Log in first, always. Only a login the server refuses leads anywhere
      near creating an account, and even then only when the name is really
-     free — a name that exists and a wrong password is just a wrong
+     free: a name that exists and a wrong password is just a wrong
      password. A free name does NOT become an account on the spot: the
      screen asks, because a typo in your own username is the likeliest way
      to reach this branch and an empty new account is the worst answer to
@@ -17944,7 +17944,7 @@ const actions = {
   /* ── LOGGING OUT SENDS FIRST, THEN SAYS WHAT IT COULD NOT ───────────
      Everything this account did on this device is sent before anything
      else happens, all of it rather than only the profile on screen. If
-     some of it could not go — no signal, usually — the confirm says how
+     some of it could not go (no signal, usually), the confirm says how
      much and where it will be: still on this phone, reachable from Storage
      check with this account's password, and on its way up the moment this
      account logs in here again. Nothing is deleted either way. */
@@ -17960,9 +17960,9 @@ const actions = {
 
   /* ── DELETING THE ACCOUNT: THE SERVER FIRST, THEN THIS PHONE ─────────
      Nothing on the phone is touched until the server has said the account
-     is gone, so every failure — a wrong password, no signal, a server
+     is gone, so every failure, whether a wrong password, no signal or a server
      that could not finish (its delete is one transaction and leaves the
-     account whole) — leaves everything exactly as it was, still signed in,
+     account whole), leaves everything exactly as it was, still signed in,
      to try again. An answer of `account_deleted` means another phone got
      there first, and this one finishes the job the same way. */
   "acct-delete-open": () => {
@@ -18026,8 +18026,8 @@ const actions = {
      because nothing in the app had ever revoked one.
 
      rotate: true is the server's word for "revoke every code on this
-     profile, then mint this one". Nobody already in is touched — a grant
-     is a person, a seed is only the doorway — which is the difference
+     profile, then mint this one". Nobody already in is touched (a grant
+     is a person, a seed is only the doorway), which is the difference
      between this and Remove.                                          */
   "sync-make-code": async (el) => {
     const f = ui.syncSheet;
@@ -18110,7 +18110,7 @@ const actions = {
     /* Your own code, typed on the phone that made it. The server says so
        rather than letting you in, and without this the "read" fallback
        below turned that into a second, read-only, live copy of a profile
-       already sitting in the list — one that would then be blank the first
+       already sitting in the list: one that would then be blank the first
        time the signal went. */
     if (joined.alreadyMine) {
       ui.joinSheet = { ...ui.joinSheet, busy: false, error: T("sync.joinOwn") };
@@ -18125,7 +18125,7 @@ const actions = {
     const localId = addProfile(joined.name || T("sync.joinedName"), { forRemote: true });
     if (!localId) { ui.joinSheet = { ...ui.joinSheet, busy: false, error: T("profiles.quota") }; render(); return; }
     /* A READ grant is held live: nothing of it is written to this phone,
-       it is fetched when you open it. See the LIVE block for the trade —
+       it is fetched when you open it. See the LIVE block for the trade:
        it needs a connection, and it is somebody else's log, so there is
        nothing here a failed fetch can lose. A WRITE grant is a profile you
        are expected to train in, so it is stored like any other. */
@@ -18138,7 +18138,7 @@ const actions = {
   },
 
   /* Read-only, both of them, so they still work on a device too full to
-     save anything. Nothing is awaited before the share, see shareFile —
+     save anything. Nothing is awaited before the share, see shareFile,
      except where the save is another account's, which asks for that
      account's password first and then carries on by itself. */
   "storage-export": (el) => {
@@ -18307,7 +18307,7 @@ const actions = {
     const p = (state.plans || []).find((x) => x.id === el.dataset.id);
     if (!p) return;
     /* there is only ever one workout for today, the same rule
-       actions["log-exercise"] follows, for the same reason — and the same
+       actions["log-exercise"] follows, for the same reason, and the same
        call, now that both of them ask sheetForDay for it */
     if (!ui.workoutSheet || ui.workoutSheet.planning) ui.workoutSheet = sheetForDay(todayStr());
     const w = ui.workoutSheet;
@@ -18713,7 +18713,7 @@ const actions = {
      pre-computed 1RM would have it quoting a number nobody ever lifted.
 
      The one thing that can still stop it is a profile that has never
-     answered the sex question and has no bodyweight anywhere — stdCheck
+     answered the sex question and has no bodyweight anywhere: stdCheck
      returns null, the form is left filled in, and the two boxes that are
      missing are the only two things left to do. */
   "ex-std-check": () => {
@@ -18809,7 +18809,7 @@ const actions = {
     patch(res.p);
   },
   /* out of the family and back to being a lift of its own, keeping the name
-     it already answers to — the same thing deleting a parent does to what it
+     it already answers to: the same thing deleting a parent does to what it
      leaves behind, which is why it needs no rename and no confirm: nothing
      is lost, and doing it again re-files it. */
   "ex-detach": (el) => {
@@ -19010,7 +19010,7 @@ const actions = {
         ghosts.push(planEntryToDraftEntry(pl.entries[i], pl.id, i));
     /* and the lifts this day was saved WITHOUT logging, back exactly as they
        were left: blank, counting for nothing, one bin-tap from gone. They come
-       after what was logged because that is what they are — the part of the
+       after what was logged because that is what they are: the part of the
        session still outstanding. */
     const waiting = clone(unloggedOn(date)) || [];
     ui.workoutSheet = {
@@ -19517,7 +19517,7 @@ const actions = {
     ui.setForm = { s: openingSetFor(f, ui.entryForm.isDraft, i), isNew: true, index: i };
     render();
   },
-  /* the same new set as any other, marked as continuing the one above — and
+  /* the same new set as any other, marked as continuing the one above, and
      it has to SAY so on the way in, or openingSetFor works out the key of a
      normal set and offers last week's normal set for a drop */
   "add-drop": () => {
@@ -19640,7 +19640,7 @@ const actions = {
        leaving a countdown that no longer matches its own dial */
     const alert = { sound: soundOf(form.t), volume: volumeOf(form.t) };
     /* that restart stops the countdown, so the server's copy of the OLD
-       length goes back too — otherwise editing 90s to 120s leaves a push
+       length goes back too; otherwise editing 90s to 120s leaves a push
        booked for a rest that no longer exists */
     if (existing) { cloudTimerCancel(existing); timerCloseNotifs(existing); }
     const row = existing
@@ -19860,7 +19860,7 @@ const actions = {
      Every sheet() names its own `ui` field as its target, so closing one
      is clearing that field and nothing else. This used to be an if/else
      ladder with one line per sheet, which meant every new sheet had to
-     remember to add itself — and the Join sheet shipped without its line.
+     remember to add itself, and the Join sheet shipped without its line.
      Its X and its backdrop both fell through every branch, did nothing,
      and the only way out of a code box you had opened by mistake was to
      kill the app.
@@ -19885,8 +19885,8 @@ const actions = {
    nothing can be written, and the enforcement is an ALLOWLIST rather than
    a list of things to block, so it fails the safe way: an action added
    next year is refused here until somebody decides it is safe, instead of
-   quietly becoming a hole. The server refuses the write as well — a check
-   on this side is a courtesy, not a lock — but it is the courtesy that
+   quietly becoming a hole. The server refuses the write as well (a check
+   on this side is a courtesy, not a lock), but it is the courtesy that
    stops somebody logging a session into a profile that will throw it away
    on the next pull.
 
@@ -19899,8 +19899,8 @@ const actions = {
    was a bug the first time this list was drawn up:
 
    THE TIMERS, all of them, including making and editing one. They are
-   deliberately NOT in SYNC_COLLECTIONS — they belong to the phone rather
-   than to the training — so nothing about them can be overwritten by a
+   deliberately NOT in SYNC_COLLECTIONS (they belong to the phone rather
+   than to the training), so nothing about them can be overwritten by a
    pull or pushed to anybody. Allowing Start while refusing Edit was this
    list disagreeing with its own reasoning.
 
@@ -19918,7 +19918,7 @@ const actions = {
    Left blocked deliberately: everything in Settings that writes
    `settings` (units, week mode, start date, and Save), because those ARE
    synced and a local change to one would be quietly reverted by the next
-   pull — the one outcome this whole list exists to prevent.           */
+   pull: the one outcome this whole list exists to prevent.           */
 /* CHAT is on this list in full, and deliberately. A read grant is about
    somebody else's TRAINING being on your phone; a conversation is not
    training and is not theirs. Looking at a friend's log must not stop you
@@ -20068,7 +20068,7 @@ function handleBind(el) {
     /* Lower-cased as it is typed, for the reason `acctName` gives: it is
        compared as `username_lc` anyway, and a name that reads back
        differently from what you typed is a name you will mistrust. Same
-       rule about the caret, too — NOTHING here calls render(), because
+       rule about the caret, too: NOTHING here calls render(), because
        render() rebuilds `#app` and would throw away the field the caret
        is sitting in on every keystroke. */
     const clean = v.toLowerCase().replace(/[^a-z0-9._-]/g, "").slice(0, 24);

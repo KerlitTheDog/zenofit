@@ -31,8 +31,8 @@ const vapidFrom = (env) => ({
  *
  * `opts.endpoint` narrows it to ONE of the user's devices, for a push that
  * belongs to a phone rather than to the account (a rest timer). If that
- * endpoint is not this user's any more — logged out, handed to somebody
- * else, notifications switched off — nothing is sent: ringing the
+ * endpoint is not this user's any more (logged out, handed to somebody
+ * else, notifications switched off), nothing is sent: ringing the
  * account's other devices instead is exactly what the narrowing is for. */
 export async function sendToUser(env, userId, message, opts = {}) {
   if (!env.VAPID_PRIVATE_KEY || !env.VAPID_PUBLIC_KEY) {

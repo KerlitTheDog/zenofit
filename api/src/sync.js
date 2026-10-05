@@ -61,7 +61,7 @@ export const BATCH_CHUNK = 50;
 /* ── THE LAST THING STANDING BETWEEN A BUG AND EVERYBODY'S TRAINING ────
  * A tombstone is the one write here that cannot be undone and that reaches
  * every device on the account at once. The client decides to send one by
- * INFERENCE — it holds a mark with no item behind it — so any bug that
+ * INFERENCE (it holds a mark with no item behind it), so any bug that
  * empties or half-fills a phone's local copy arrives at this endpoint
  * indistinguishable from a person deleting their whole log.
  *
@@ -74,8 +74,8 @@ export const BATCH_CHUNK = 50;
  * The rule is deliberately crude, because a sharp one would need to know
  * what the client meant. A batch may not delete more than half of what the
  * profile is currently holding, once it is deleting more than a handful.
- * Ordinary tidying — scrapping a day, clearing a few goals, renaming a
- * group — is single figures and never comes near it. `allowWipe` is the
+ * Ordinary tidying (scrapping a day, clearing a few goals, renaming a
+ * group) is single figures and never comes near it. `allowWipe` is the
  * escape, and the client only sets it when the user has said "replace what
  * is there" out loud, behind a confirm: restoring a backup, or a reset.
  *
@@ -83,7 +83,7 @@ export const BATCH_CHUNK = 50;
  * A push arrives as up to 200 items at a time and there is no transaction
  * spanning them. This used to be judged one batch at a time, which only
  * caught a batch bigger than half the profile: a 1,000-row profile deleted
- * 200 rows at a time lost 800 before the fifth batch finally tripped it —
+ * 200 rows at a time lost 800 before the fifth batch finally tripped it,
  * so the profiles with the most in them, the ones this exists for, were the
  * ones it protected least. Deletions are now summed over WIPE_WINDOW_MS
  * (under the `wipe:<profileId>` key in rate_limits) and judged against what

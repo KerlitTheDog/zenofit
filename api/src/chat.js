@@ -480,9 +480,9 @@ export async function chatRoute(ctx) {
 
          EVERYBODY in the thread, including somebody who has cleared it out
          of their list. Only counting the ones still listing it meant a
-         message to somebody who had removed the chat went to nobody — no
+         message to somebody who had removed the chat went to nobody (no
          list entry, no badge, no notification, while the sender saw it as
-         sent — and it meant a block was never checked once the blocker had
+         sent), and it meant a block was never checked once the blocker had
          also removed the chat, so the messages piled up for them to find. */
       const others = await env.DB.prepare(
         "SELECT user_id FROM chat_members WHERE thread_id = ? AND user_id != ?"
@@ -534,7 +534,7 @@ export async function chatRoute(ctx) {
          And writing to somebody puts the conversation back in their list,
          which is exactly what "Remove this chat" promises them: "writing to
          them again brings this same chat back, messages and all". It is the
-         other person writing that has to bring it back — they are the one
+         other person writing that has to bring it back: they are the one
          who cannot know it was removed. */
       await env.DB.batch([
         env.DB.prepare("UPDATE chat_threads SET last_message_at = ? WHERE id = ?").bind(now, threadId),

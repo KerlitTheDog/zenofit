@@ -32,7 +32,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username
 -- users.token_hash holds exactly one token, which was right while a user WAS
 -- a device. The moment you can sign in somewhere else, signing in on the new
 -- phone would have overwritten the old phone's token and quietly logged it
--- out — the opposite of what an account is for. So tokens move to their own
+-- out: the opposite of what an account is for. So tokens move to their own
 -- table, one row per device, and revoking one leaves the others alone.
 CREATE TABLE IF NOT EXISTS tokens (
   token_hash   TEXT PRIMARY KEY,       -- sha256 hex of the bearer token

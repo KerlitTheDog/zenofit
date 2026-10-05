@@ -112,7 +112,7 @@
    * WHY THE BROWSER DOES THE EXPENSIVE PART. A password has to be slow to
    * check or a leaked table is a list of passwords, and the Worker running
    * the other end of this gets TEN MILLISECONDS of CPU per request on the
-   * free plan — less than PBKDF2 needs at any honest iteration count. So the
+   * free plan: less than PBKDF2 needs at any honest iteration count. So the
    * stretching happens here, where the CPU is the user's and free, and what
    * goes over the wire is 256 bits of derived key. The server salts and
    * hashes that once more before storing it, which is cheap and sound
@@ -179,15 +179,15 @@
 
      The server half used to be missing, so a logged-out token went on
      working for ever: anybody who had copied it off a borrowed phone still
-     had the account. It is sent and not awaited — logging out in a basement
-     must still log out — so a token that could not be revoked because there
+     had the account. It is sent and not awaited (logging out in a basement
+     must still log out), so a token that could not be revoked because there
      was no signal is the one case left, and nothing on this phone holds it
      any more.
 
      It names this device's push endpoint too, so the account stops ringing
      a phone nobody is signed in to: its messages used to go on arriving
      here, on the lock screen, after its owner had logged out. The browser's
-     subscription itself stays — it is the device's, like its theme — and
+     subscription itself stays (it is the device's, like its theme), and
      whoever signs in next has it filed under them (refilePush). */
   function signOut() {
     const d = read(DEVICE_KEY);
@@ -208,7 +208,7 @@
      For good, on the server (DELETE /v1/me), which asks for the password
      again and is given the derived key, exactly as a login is. Throws like
      `call` does: 403 bad_password, 429 too many wrong passwords, no status
-     at all with no signal — and in every one of those nothing has been
+     at all with no signal, and in every one of those nothing has been
      deleted. It does NOT forget this device's credential: app.js does
      that, once it has taken the account's training off this phone too. */
   async function deleteAccount(password) {
@@ -515,7 +515,7 @@
      most of the profile (409 wipe_refused). It is never set by the ordinary
      sync path: only by a restore or a reset, which are the user saying
      "replace what is there" behind a confirm. Passing it is app.js's
-     decision, not this file's — see the block in syncPush. */
+     decision, not this file's: see the block in syncPush. */
   function pushChanges(profileId, items, opts) {
     const body = { items: items };
     if (opts && opts.allowWipe) body.allowWipe = true;
@@ -668,7 +668,7 @@
   const unblockUser  = (userId) => call("DELETE", "/v1/chats/blocks/" + userId);
 
   /* When each profile shared WITH you was last trained, and on how many of
-     the last seven days — a trainer's glance over the people they coach,
+     the last seven days: a trainer's glance over the people they coach,
      without opening each one (GET /v1/profiles/activity). */
   const sharedActivity = (since) => call("GET", "/v1/profiles/activity?since=" + encodeURIComponent(since || ""));
 

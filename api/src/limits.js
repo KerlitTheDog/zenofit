@@ -28,7 +28,7 @@ export async function limited(env, key, windowMs, max) {
    `limited` counts every request, which is right for sending and
    uploading. A password check wants the other shape: somebody logging in
    correctly must never be the reason the next person is refused, so the
-   check and the count are two calls — `overLimit` asks without counting,
+   check and the count are two calls: `overLimit` asks without counting,
    `recordMiss` counts a failure once it has happened. */
 export async function overLimit(env, key, windowMs, max) {
   const row = await env.DB.prepare(

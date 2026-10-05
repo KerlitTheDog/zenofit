@@ -14,7 +14,7 @@
 -- name_updated_at is what makes a rename converge instead of flap. Two
 -- devices that both hold a profile will both push a name at some point, and
 -- without a stamp the last writer to reconnect wins regardless of who typed
--- more recently — so a phone coming back from a week in flight mode would
+-- more recently, so a phone coming back from a week in flight mode would
 -- quietly undo a rename made on the laptop yesterday. It is the CLIENT's
 -- clock, like items.client_updated_at, and it is used the same way: only to
 -- refuse to go backwards, never to merge.

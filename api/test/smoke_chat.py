@@ -258,7 +258,7 @@ check("with the history still in it", len(r.get("messages", [])) >= 2, r.get("me
 print("\n== the OTHER person writing brings a removed chat back too ==")
 # The confirm promises "writing to them again brings this same chat back". It
 # used to be true only for the person who removed it: the other side wrote
-# into a thread that reached nobody — no list entry, no badge, no push —
+# into a thread that reached nobody (no list entry, no badge, no push),
 # while their own screen showed it sent.
 s, r = call("DELETE", "/v1/chats/" + btid, token=blocker["token"])
 check("removed from my list again", s == 200, (s, r))

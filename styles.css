@@ -446,7 +446,7 @@ input[type="date"].pb-input::-webkit-date-and-time-value{
   display:flex; align-items:center; justify-content:center; text-align:center;
   font-size:11px; letter-spacing:.06em; text-transform:uppercase; font-weight:600; }
 /* A message is long-pressed for its menu (copy, unsend), so the browser's
-   own long-press — text selection, the iOS callout, dragging the image out —
+   own long-press (text selection, the iOS callout, dragging the image out)
    must not get there first. Copy is in the menu instead. */
 .pb-msg{ -webkit-touch-callout:none; -webkit-user-select:none; user-select:none; }
 .pb-msg img{ -webkit-user-drag:none; }

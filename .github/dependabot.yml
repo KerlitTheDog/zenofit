@@ -1,0 +1,12 @@
+# Dependency watch for the Worker (api/), once a week. Dependabot opens a
+# pull request per update and nothing merges itself: a release still goes
+# through the order in CLAUDE.md, with the eight smoke suites run against a
+# local wrangler dev first. The front end has no package manager on purpose;
+# lucide.min.js and fonts/ are vendored files, updated by hand (CLAUDE.md
+# says how).
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/api"
+    schedule:
+      interval: "weekly"

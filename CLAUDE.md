@@ -27,6 +27,8 @@ Bump `VERSION` in `sw.js` whenever a shell file changes, or the deploy reaches p
 
 Note: this local folder is the source of truth. Editing files directly on the GitHub website risks those edits being overwritten by the next push from here.
 
+Dependabot (`.github/dependabot.yml`) opens a pull request each week for an npm update in `api/`. Nothing merges by itself: a dependency bump is a change like any other, pulled here and tested against a local `wrangler dev` with all eight suites before it ships. The front end has no package manager; `lucide.min.js` and `fonts/` are updated by hand, as the Architecture section says.
+
 # Project overview
 
 Powerbuild Tracker (product name "Zenofit") is a mobile-first powerbuilding/progressive-overload tracker: workouts, planned sessions, weekly volume, PRs, and body measurements. It's a **faithful port of a spreadsheet** ("AbsoluteMain.xlsx"): the header comment in `app.js` maps each spreadsheet formula to its JS equivalent (week number, muscle-group lookup, est. 1RM, cardio score, "vs. Your Best" badges, dashboard rows, weekly volume, deload radar, body trend). When changing any of that logic, check the comment block at the top of `app.js` for the spreadsheet formula it's meant to reproduce.

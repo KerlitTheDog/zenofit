@@ -8,7 +8,7 @@
    Scope note: this file must stay in the repo root. A service worker can only
    control pages at or below its own URL, and the app lives at /zenofit/.       */
 
-const VERSION = "zenofit-v35";
+const VERSION = "zenofit-v36";
 /* Fetched photos, keyed by id (see the PHOTOS block in app.js). Not part of
    the shell and not versioned with it: a photo's id IS its content, so a
    new build has nothing to invalidate, and clearing it on every deploy
@@ -22,6 +22,7 @@ const SHELL = [
   "./standards.js",
   "./zenofit-cloud.js",
   "./app.js",
+  "./lucide.min.js",
   "./logoC.png",
   "./icon-192.png",
   "./icon-512.png",
@@ -60,8 +61,8 @@ function closeUnmatchedTimers() {
 }
 
 /* Stale-while-revalidate for our own files: the app paints from cache at once,
-   and the next launch has the fresh copy. Cross-origin (fonts, lucide) is left
-   to the browser.
+   and the next launch has the fresh copy. Cross-origin (the fonts) is left to
+   the browser.
 
    ── AND THE PAGE IS TOLD WHEN WHAT IT IS RUNNING IS NO LONGER CURRENT ──
    The re-fetch behind a launch quietly put the new bytes in the cache, so by

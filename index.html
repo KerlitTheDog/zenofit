@@ -54,8 +54,12 @@
 </head>
 <body>
   <div id="app"></div>
-  <!-- Lucide icons (same icon set the JSX prototype used) -->
-  <script src="https://unpkg.com/lucide@0.462.0/dist/umd/lucide.min.js"></script>
+  <!-- Lucide icons (same icon set the JSX prototype used), v0.462.0, served
+       from this repo and not from a CDN: a script from another server runs
+       with the account token in reach, and this one now cannot change under
+       us. lucide.LICENSE.txt is its licence. Another version means that
+       version's dist/umd/lucide.min.js from npm, byte for byte. -->
+  <script src="lucide.min.js"></script>
   <!-- i18n.js first: app.js calls T() while it renders the first frame.
        standards.js is pure data (the strength-standards tables) and is read
        by the Progress tab's second segment, so it has to be in before app.js

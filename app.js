@@ -5581,6 +5581,29 @@ function shareFileType() {
   return shareType;
 }
 
+/* ── ONE SHARE SHEET AT A TIME ──────────────────────────────────────────
+   navigator.share() refuses a second call while the first sheet is still
+   up (InvalidStateError), and every caller read that refusal as "sharing
+   does not work here" and fell back: a backup apologised and downloaded
+   itself, the CSV and a picture downloaded, an invite copied its link and
+   said so, all behind a sheet that was working. A quick second tap does
+   exactly that, before the sheet has even appeared. So a share in flight
+   is remembered and a tap during it is ignored (shareSheet answers null),
+   and InvalidStateError is read as the same answer, never as a failure.
+   It is still called straight from the tap, with nothing awaited first. */
+let shareOpen = false;
+function shareSheet(data) {
+  if (shareOpen) return null;
+  shareOpen = true;
+  let p;
+  try { p = navigator.share(data); }
+  catch (e) { shareOpen = false; throw e; }
+  const done = () => { shareOpen = false; };
+  if (p && typeof p.then === "function") p.then(done, done); else done();
+  return p;
+}
+const shareAlreadyUp = (e) => !!e && e.name === "InvalidStateError";
+
 /* Nothing is awaited before navigator.share(): the call has to happen inside
    the tap that started it or the browser drops the gesture and refuses. */
 function shareFile(name, text) {
@@ -5588,12 +5611,12 @@ function shareFile(name, text) {
   if (!type) return downloadText(name, text);
   const file = new File([text], name, { type });
   let p;
-  try { p = navigator.share({ files: [file], title: name }); }
+  try { p = shareSheet({ files: [file], title: name }); }
   catch (e) { console.error("share failed", e); return shareFellBack(name, text); }
   if (p && p.catch) p.catch((e) => {
     /* dismissing the sheet is an answer, not a failure, and saying anything
        about it would be the app arguing with a decision */
-    if (e && (e.name === "AbortError" || e.name === "NotAllowedError")) return;
+    if (e && (e.name === "AbortError" || e.name === "NotAllowedError" || shareAlreadyUp(e))) return;
     console.error("share failed", e);
     shareFellBack(name, text);
   });
@@ -10668,8 +10691,12 @@ async function inviteShare() {
   const url = inviteLink();
   const text = T("invite.text");
   try {
-    if (navigator.share) { await navigator.share({ title: "Zenofit", text, url }); return; }
-  } catch (e) { if (e && e.name === "AbortError") return; }
+    if (navigator.share) {
+      const p = shareSheet({ title: "Zenofit", text, url });
+      if (p) await p;
+      return;
+    }
+  } catch (e) { if (e && (e.name === "AbortError" || shareAlreadyUp(e))) return; }
   chatCopyText(url);
   appToast(T("invite.copied"), "var(--green)");
   render();
@@ -10833,7 +10860,8 @@ function exportCsv() {
   try {
     const file = new File([text], name, { type });
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
-      navigator.share({ files: [file], title: name }).catch((e) => { if (!e || e.name !== "AbortError") downloadBlob(name, new Blob([text], { type })); });
+      const p = shareSheet({ files: [file], title: name });
+      if (p) p.catch((e) => { if (!e || (e.name !== "AbortError" && !shareAlreadyUp(e))) downloadBlob(name, new Blob([text], { type })); });
       return;
     }
   } catch { /* no share sheet for files here */ }
@@ -19757,10 +19785,10 @@ const actions = {
     if (!picCanShare()) { picDownload(); return; }
     const file = new File([picBlob], picFileName(s), { type: picBlob.type });
     let p;
-    try { p = navigator.share({ files: [file], text: (s.alt ? s.alt + " · " : "") + appBaseUrl() }); }
+    try { p = shareSheet({ files: [file], text: (s.alt ? s.alt + " · " : "") + appBaseUrl() }); }
     catch (e) { console.error("share failed", e); picDownload(); return; }
     if (p && p.catch) p.catch((e) => {
-      if (e && (e.name === "AbortError" || e.name === "NotAllowedError")) return;
+      if (e && (e.name === "AbortError" || e.name === "NotAllowedError" || shareAlreadyUp(e))) return;
       console.error("share failed", e);
       picDownload();
     });

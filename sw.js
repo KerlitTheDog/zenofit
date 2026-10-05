@@ -8,7 +8,7 @@
    Scope note: this file must stay in the repo root. A service worker can only
    control pages at or below its own URL, and the app lives at /zenofit/.       */
 
-const VERSION = "zenofit-v36";
+const VERSION = "zenofit-v37";
 /* Fetched photos, keyed by id (see the PHOTOS block in app.js). Not part of
    the shell and not versioned with it: a photo's id IS its content, so a
    new build has nothing to invalidate, and clearing it on every deploy
@@ -23,6 +23,27 @@ const SHELL = [
   "./zenofit-cloud.js",
   "./app.js",
   "./lucide.min.js",
+  "./fonts/barlow-400-latin-ext.woff2",
+  "./fonts/barlow-400-latin.woff2",
+  "./fonts/barlow-400-vietnamese.woff2",
+  "./fonts/barlow-500-latin-ext.woff2",
+  "./fonts/barlow-500-latin.woff2",
+  "./fonts/barlow-500-vietnamese.woff2",
+  "./fonts/barlow-600-latin-ext.woff2",
+  "./fonts/barlow-600-latin.woff2",
+  "./fonts/barlow-600-vietnamese.woff2",
+  "./fonts/barlow-700-latin-ext.woff2",
+  "./fonts/barlow-700-latin.woff2",
+  "./fonts/barlow-700-vietnamese.woff2",
+  "./fonts/barlow-condensed-500-latin-ext.woff2",
+  "./fonts/barlow-condensed-500-latin.woff2",
+  "./fonts/barlow-condensed-500-vietnamese.woff2",
+  "./fonts/barlow-condensed-600-latin-ext.woff2",
+  "./fonts/barlow-condensed-600-latin.woff2",
+  "./fonts/barlow-condensed-600-vietnamese.woff2",
+  "./fonts/barlow-condensed-700-latin-ext.woff2",
+  "./fonts/barlow-condensed-700-latin.woff2",
+  "./fonts/barlow-condensed-700-vietnamese.woff2",
   "./logoC.png",
   "./icon-192.png",
   "./icon-512.png",
@@ -61,8 +82,9 @@ function closeUnmatchedTimers() {
 }
 
 /* Stale-while-revalidate for our own files: the app paints from cache at once,
-   and the next launch has the fresh copy. Cross-origin (the fonts) is left to
-   the browser.
+   and the next launch has the fresh copy. Everything the app draws with is
+   ours now, fonts and icons included; the only cross-origin requests left
+   are the API's, and they are left to the browser.
 
    ── AND THE PAGE IS TOLD WHEN WHAT IT IS RUNNING IS NO LONGER CURRENT ──
    The re-fetch behind a launch quietly put the new bytes in the cache, so by

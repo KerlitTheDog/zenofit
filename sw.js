@@ -8,7 +8,7 @@
    Scope note: this file must stay in the repo root. A service worker can only
    control pages at or below its own URL, and the app lives at /zenofit/.       */
 
-const VERSION = "zenofit-v37";
+const VERSION = "zenofit-v38";
 /* Fetched photos, keyed by id (see the PHOTOS block in app.js). Not part of
    the shell and not versioned with it: a photo's id IS its content, so a
    new build has nothing to invalidate, and clearing it on every deploy
@@ -17,6 +17,8 @@ const PHOTO_CACHE = "zenofit-photos";
 const SHELL = [
   "./",
   "./index.html",
+  "./theme.js",
+  "./sw-register.js",
   "./styles.css",
   "./i18n.js",
   "./standards.js",

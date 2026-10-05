@@ -26,7 +26,10 @@
      a local one first (window.ZENOFIT_API = "http://127.0.0.1:8787" before
      this script loads). That override exists so a change to the API can be
      driven from a real browser against `wrangler dev` before it is anywhere
-     near the live database; nothing in the app ever sets it. */
+     near the live database; nothing in the app ever sets it. It has to be
+     set from a same-origin FILE loaded before this one: the Content Security
+     Policy in index.html refuses an inline script, and only lets the page
+     talk to the live API and to port 8787 on this machine. */
   const API = (typeof window !== "undefined" && window.ZENOFIT_API) || "https://zenofit-api.kerlit.workers.dev";
   const DEVICE_KEY = "zenofit:device";
   const PUSH_KEY = "zenofit:push";

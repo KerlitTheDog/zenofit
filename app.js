@@ -4314,8 +4314,8 @@ async function rosterSync(opts) {
    the account does: a friend logging in on a borrowed phone must not be
    handed the last person's conversations while the first poll is still in
    flight. */
-function chatReset() {
-  chatForget();
+function chatReset(keep) {
+  if (!keep) chatForget();
   ui.chatThread = null; ui.chatMenu = null; ui.chatFind = ""; ui.chatResults = null;
   ui.chatMsgMenu = null; ui.chatAttach = null; ui.chatView = null; ui.chatImage = null; ui.shareTo = null;
 }
@@ -4328,7 +4328,11 @@ function chatReset() {
 async function enterAccount() {
   const me = signedInAs();
   if (!me) return;
-  chatReset();
+  /* a chat cache built for this same account (kept by a sign-out under us,
+     see leaveAccount) is picked back up; anybody else's goes */
+  let ownCache = false;
+  try { ownCache = (JSON.parse(localStorage.getItem(CHAT_KEY) || "null") || {}).userId === me.userId; } catch { /* not ours */ }
+  chatReset(ownCache);
   ownerNameLearn(me.userId, me.username);
   profiles = loadProfiles();
   state = loadState();
@@ -4400,14 +4404,22 @@ async function flushAccount() {
    disk: every profile's save stays under its key, this account's list
    stays under its own, and logging back in brings all of it straight back.
    Until then the only way to any of it is Storage check, behind this
-   account's password. */
-function leaveAccount() {
+   account's password.
+
+   `revoked`: signed out UNDER us, because the server no longer knows this
+   phone's token (logged out elsewhere, or unused for half a year, see
+   sweepTokens). There is nothing to tell the server, the chat cache stays
+   too (a half-typed or unsent message is still there after logging back
+   in; a cache built for somebody else is dropped by chatRead anyway), the
+   push subscription goes from this phone, and the login screen says why. */
+function leaveAccount(revoked) {
   if (ui.workoutSheet) closeWorksheet();
   writeNow();
   clearTimeout(syncPushTimer); syncPushTimer = null;
   const C = window.ZenofitCloud;
-  if (C) C.signOut();
-  chatReset();
+  if (C && revoked) { C.forgetAccount(); C.disablePush(); }
+  else if (C) C.signOut();
+  chatReset(revoked);
   profiles = { userId: null, active: null, list: [] };
   state = defaultState();
   closeEverything();
@@ -4415,9 +4427,17 @@ function leaveAccount() {
   ui.tab = "home";
   ui.rosterLoading = false;
   ui.syncError = null;
-  ui.login = freshLogin();
+  ui.login = revoked ? { ...freshLogin(), notice: T("login.signedOut") } : freshLogin();
   render();
 }
+/* several requests can hear the same 401 at once: the first one signs out */
+window.addEventListener("zenofit:signed-out", (e) => {
+  const userId = e && e.detail && e.detail.userId;
+  setTimeout(() => {
+    const me = signedInAs();
+    if (me && (!userId || me.userId === userId)) leaveAccount(true);
+  }, 0);
+});
 
 /* ── AN ACCOUNT THAT IS GONE LEAVES NOTHING OF ITSELF ON THIS PHONE ────
    Logging out keeps every save exactly where it is (see leaveAccount);
@@ -4859,7 +4879,6 @@ async function chatPoll(opts) {
     /* Silent by design, exactly as syncQuiet is: an unattended poll that
        raises an alert is a phone interrupting a set to say the wifi is
        bad. A thread that is OPEN says so on its own screen instead. */
-    if (e && e.status === 401) chatForget();
     if (ui.chatThread) { ui.chatThread.error = chatErrText(e); chatRepaint(); }
     return { ok: false, error: e };
   } finally {
@@ -5162,7 +5181,6 @@ async function chatOpenFetch(threadId) {
     await chatMarkRead(threadId);
     chatRepaint();
   } catch (e) {
-    if (e && e.status === 401) chatForget();
     if (ui.chatThread && ui.chatThread.threadId === threadId) {
       ui.chatThread.loading = false;
       ui.chatThread.error = chatErrText(e);
@@ -5366,7 +5384,6 @@ async function chatDeliver(threadId, clientId) {
        server's to report, and this is the moment they changed */
     chatLastPoll = 0;
   } catch (e) {
-    if (e && e.status === 401) chatForget();
     const still = chatMsgs(threadId).find((m) => m.clientId === clientId);
     if (still) { delete still.pending; still.failed = true; still.error = chatErrText(e); }
     chatWrite();

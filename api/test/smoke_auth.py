@@ -320,6 +320,22 @@ if os.environ.get("ZENOFIT_SWEEP") and LOCAL:
 else:
     print("\n(the counter-sweep checks need a local wrangler dev: set ZENOFIT_SWEEP=1, see the top of this file)")
 
+if os.environ.get("ZENOFIT_TOKENS") and LOCAL:
+    # Run ALONE, against `wrangler dev --test-scheduled --var TOKEN_IDLE_MS:3000`:
+    # the sweep ends every login idle that long, the rest of this run's too.
+    print("\n== a login unused for long enough ends (local only, run alone) ==")
+    IDLE = "zt_idle_" + tag
+    s, b = call("POST", "/v1/auth/register", body={"username": IDLE, "key": derive(IDLE, PW)})
+    old = b.get("token")
+    time.sleep(4)
+    s, b = call("POST", "/v1/auth/login", body={"username": IDLE, "key": derive(IDLE, PW)})
+    fresh = b.get("token")
+    urllib.request.urlopen(urllib.request.Request(API + "/__scheduled?cron=23+3+*+*+*"), timeout=30).read()
+    s, b = call("GET", "/v1/me", token=old)
+    check("the login left unused is ended by the sweep", s == 401 and b.get("error") == "unauthorized", (s, b))
+    s, b = call("GET", "/v1/me", token=fresh)
+    check("while the one used a moment ago is not", s == 200, (s, b))
+
 print("\n%d passed, %d failed" % (len(PASS), len(FAIL)))
 if FAIL:
     print("\nFAILED:")

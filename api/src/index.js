@@ -1463,14 +1463,31 @@ async function purgeProfiles(env, now = Date.now()) {
   return { items: r[0].meta.changes, profiles: r[3].meta.changes };
 }
 
+/* ── A LOGIN NOBODY HAS USED FOR HALF A YEAR ENDS ─────────────────────
+   A token is a login on one device, and it used to stay good for ever.
+   One unused for TOKEN_IDLE_MS (180 days) is deleted, and that device
+   finds itself signed out the next time it asks anything, with everything
+   on it kept (`zenofit:signed-out` in app.js). A push subscription filed
+   under a user with no login left anywhere goes too, or a phone nobody is
+   signed in to would go on showing that account's messages. One batch. */
+const TOKEN_IDLE_MS = 180 * 24 * 60 * 60 * 1000;
+async function sweepTokens(env, now = Date.now()) {
+  const r = await env.DB.batch([
+    env.DB.prepare("DELETE FROM tokens WHERE COALESCE(last_seen_at, created_at) < ?").bind(now - limitOf(env, "TOKEN_IDLE_MS", TOKEN_IDLE_MS)),
+    env.DB.prepare("DELETE FROM push_subs WHERE user_id NOT IN (SELECT user_id FROM tokens)"),
+  ]);
+  return { tokens: r[0].meta.changes, pushSubs: r[1].meta.changes };
+}
+
 export default {
   /* Once a day (the cron in wrangler.toml): photos nothing has held for the
      whole grace period, and chat photos no message shows (photos.js); the
      rate-limit counters whose windows are long over, which hold IP
-     addresses and usernames (limits.js); and profiles deleted a month ago
-     (above). Each on its own, so one failing never stops the others. */
+     addresses and usernames (limits.js); profiles deleted a month ago and
+     logins unused for half a year (above). Each on its own, so one failing
+     never stops the others. */
   async scheduled(event, env, ctx) {
-    for (const [name, job] of [["photo sweep", sweepPhotos], ["limit sweep", sweepLimits], ["profile purge", purgeProfiles]]) {
+    for (const [name, job] of [["photo sweep", sweepPhotos], ["limit sweep", sweepLimits], ["profile purge", purgeProfiles], ["login sweep", sweepTokens]]) {
       ctx.waitUntil(job(env)
         .then((r) => console.log(name, JSON.stringify(r)))
         .catch((e) => console.error(name + " failed", e && e.message ? e.message : e)));

@@ -70,6 +70,7 @@
       err.status = res.status;
       err.code = data && data.error;
       if (err.code === "account_deleted") accountGone(device);
+      else if (err.status === 401 && err.code === "unauthorized" && !(opts && opts.noAuth)) signedOut(device);
       throw err;
     }
     return data;
@@ -82,6 +83,16 @@
      app, which takes the account off this phone (accountErased in app.js).
      Only if the token that was refused is still the one stored here: a
      request can come back after somebody else has signed in. */
+  /* The server no longer knows this phone's token (logged out elsewhere,
+     or unused for half a year): the app treats it as logged out and keeps
+     everything (leaveAccount in app.js). Only for the token still stored. */
+  function signedOut(device) {
+    const now = read(DEVICE_KEY);
+    if (!device || !device.token || !now || now.token !== device.token) return;
+    try { window.dispatchEvent(new CustomEvent("zenofit:signed-out", { detail: { userId: device.userId || null } })); }
+    catch { /* no window to tell */ }
+  }
+
   function accountGone(device) {
     const now = read(DEVICE_KEY);
     if (!device || !device.token || !now || now.token !== device.token) return;

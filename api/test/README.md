@@ -55,6 +55,12 @@ the tester's own address:
     ZENOFIT_BUDGET=1   smoke_photos.py fills the photo store to its ceiling and
                        empties it again (needs ZENOFIT_SWEEP=1 as well, and
                        `--var PHOTO_BUDGET_CHARS:4000000` on the same wrangler dev).
+    ZENOFIT_TOKENS=1   smoke_auth.py checks that a login left unused is ended by
+                       the sweep. Run it ALONE, against `wrangler dev
+                       --test-scheduled --var TOKEN_IDLE_MS:3000`: that sweep
+                       ends every login idle for three seconds, the rest of the
+                       run's too, so the cleanup cannot delete the bare devices
+                       it made (it says so).
 
 A full run counts against the ceilings on the address it comes from (28 devices
 and 26 registrations per run), so three full runs fit in one hour.

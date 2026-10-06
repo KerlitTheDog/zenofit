@@ -1441,23 +1441,40 @@ async function route(request, env, url, ctx) {
   return fail(404, "not_found", "No route for " + method + " " + p);
 }
 
+/* ── A DELETED PROFILE LEAVES FOR GOOD AFTER THIRTY DAYS ──────────────
+   Deleting a profile only marks it (deleted_at), and its rows, codes and
+   grants used to stay on the server until the whole account was deleted:
+   most of the database was training somebody had deleted. A profile
+   deleted more than PROFILE_PURGE_MS ago now goes with all of them. To
+   every route a deleted profile already looked like one that was never
+   there (accessFor, the listing and a code all treat it as gone), so this
+   changes nothing a phone can see; the delete confirm says it in words.
+   Photo holdings were dropped at the delete itself. One batch. */
+const PROFILE_PURGE_MS = 30 * 24 * 60 * 60 * 1000;
+async function purgeProfiles(env, now = Date.now()) {
+  const cutoff = now - limitOf(env, "PROFILE_PURGE_MS", PROFILE_PURGE_MS);
+  const old = "SELECT id FROM profiles WHERE deleted_at IS NOT NULL AND deleted_at < ?";
+  const r = await env.DB.batch([
+    env.DB.prepare(`DELETE FROM items WHERE profile_id IN (${old})`).bind(cutoff),
+    env.DB.prepare(`DELETE FROM seeds WHERE profile_id IN (${old})`).bind(cutoff),
+    env.DB.prepare(`DELETE FROM grants WHERE profile_id IN (${old})`).bind(cutoff),
+    env.DB.prepare("DELETE FROM profiles WHERE deleted_at IS NOT NULL AND deleted_at < ?").bind(cutoff),
+  ]);
+  return { items: r[0].meta.changes, profiles: r[3].meta.changes };
+}
+
 export default {
   /* Once a day (the cron in wrangler.toml): photos nothing has held for the
-     whole grace period, and chat photos no message shows (photos.js); and
-     the rate-limit counters whose windows are long over, which hold IP
-     addresses and usernames (limits.js). Each on its own, so one failing
-     never stops the other. Four queries in all. */
+     whole grace period, and chat photos no message shows (photos.js); the
+     rate-limit counters whose windows are long over, which hold IP
+     addresses and usernames (limits.js); and profiles deleted a month ago
+     (above). Each on its own, so one failing never stops the others. */
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(
-      sweepPhotos(env)
-        .then((r) => console.log("photo sweep", JSON.stringify(r)))
-        .catch((e) => console.error("photo sweep failed", e && e.message ? e.message : e))
-    );
-    ctx.waitUntil(
-      sweepLimits(env)
-        .then((r) => console.log("limit sweep", JSON.stringify(r)))
-        .catch((e) => console.error("limit sweep failed", e && e.message ? e.message : e))
-    );
+    for (const [name, job] of [["photo sweep", sweepPhotos], ["limit sweep", sweepLimits], ["profile purge", purgeProfiles]]) {
+      ctx.waitUntil(job(env)
+        .then((r) => console.log(name, JSON.stringify(r)))
+        .catch((e) => console.error(name + " failed", e && e.message ? e.message : e)));
+    }
   },
 
   async fetch(request, env, ctx) {

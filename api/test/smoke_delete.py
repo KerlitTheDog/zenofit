@@ -31,7 +31,7 @@ password-limit check runs only against a local `wrangler dev`
 fifteen minutes and covers DELETE /v1/me, so against production it would
 stop the cleanup deleting that account.
 """
-import json, os, urllib.request, urllib.error, hashlib, secrets, base64
+import json, os, urllib.request, urllib.error, hashlib, secrets, base64, time
 import cleanup   # deletes what this run makes, at exit
 
 API = os.environ.get("ZENOFIT_API", "https://zenofit-api.kerlit.workers.dev")
@@ -243,6 +243,23 @@ if os.environ.get("ZENOFIT_LIMITS") and LOCAL:
     check("and the account is still there", s == 200, (s, b))
 else:
     print("\n(the password-limit check needs a local wrangler dev: set ZENOFIT_LIMITS=1, see the top of this file)")
+
+if os.environ.get("ZENOFIT_SWEEP") and LOCAL:
+    print("\n== a deleted profile leaves the server after the purge (local only) ==")
+    # Needs `--var PROFILE_PURGE_MS:2000`: invisible to every other route by
+    # design, so it is read off what deleting the account finds left.
+    eve = account("zd_eve")
+    s, p = call("POST", "/v1/profiles", eve["token"], {"name": "gone soon"})
+    s, b = call("POST", "/v1/profiles/%s/items" % p["profileId"], eve["token"], {"items": [
+        item("log", "E1", {"exercise": "Squat", "weight": 60}), item("log", "E2", {"exercise": "Squat", "weight": 62})]})
+    s, b = call("DELETE", "/v1/profiles/" + p["profileId"], eve["token"])
+    check("a profile with two rows is deleted", s == 200, (s, b))
+    time.sleep(3)
+    urllib.request.urlopen(urllib.request.Request(API + "/__scheduled?cron=23+3+*+*+*"), timeout=30).read()
+    s, b = call("DELETE", "/v1/me", eve["token"], {"key": derive(eve["name"], PW)})
+    check("and once the purge has run, nothing of it is left to delete", s == 200 and b.get("profiles") == 0 and b.get("items") == 0, (s, b))
+else:
+    print("\n(the profile-purge check needs a local wrangler dev: set ZENOFIT_SWEEP=1, see the top of this file)")
 
 print("\n== the other two go the same way ==")
 for who in (bob, cat):

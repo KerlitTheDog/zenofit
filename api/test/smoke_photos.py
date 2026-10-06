@@ -35,6 +35,7 @@ The cases worth holding:
     it is refused (403 account_required) before the photo is even read
 """
 import os
+import cleanup   # deletes what this run makes, at exit
 import json, urllib.request, urllib.error, sys, hashlib, base64, uuid, time
 
 # Override to run against a local `wrangler dev`:
@@ -55,7 +56,9 @@ def call(method, path, token=None, body=None):
     try:
         with urllib.request.urlopen(req, data, timeout=30) as r:
             raw = r.read().decode()
-            return r.status, (json.loads(raw) if raw else {}), dict(r.headers)
+            parsed = json.loads(raw) if raw else {}
+            cleanup.note(method, path, body, r.status, parsed)
+            return r.status, parsed, dict(r.headers)
     except urllib.error.HTTPError as e:
         raw = e.read().decode()
         try:

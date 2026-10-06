@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Black-box test of the Zenofit API, Phase 2 + 3."""
 import os
+import cleanup   # deletes what this run makes, at exit
 import json, urllib.request, urllib.error, sys
 
 # Override to run against a local `wrangler dev`:
@@ -21,7 +22,9 @@ def call(method, path, token=None, body=None, origin=None):
     try:
         with urllib.request.urlopen(req, data, timeout=20) as r:
             raw = r.read().decode()
-            return r.status, (json.loads(raw) if raw else {}), dict(r.headers)
+            parsed = json.loads(raw) if raw else {}
+            cleanup.note(method, path, body, r.status, parsed)
+            return r.status, parsed, dict(r.headers)
     except urllib.error.HTTPError as e:
         raw = e.read().decode()
         try: parsed = json.loads(raw) if raw else {}

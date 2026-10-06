@@ -21,6 +21,7 @@ The ceiling on searches per account is checked only against a local
 smoke_auth.py: it searches until refused.
 """
 import os
+import cleanup   # deletes what this run makes, at exit
 import json, urllib.request, urllib.error, sys, hashlib, time, uuid
 
 # Override to run against a local `wrangler dev`:
@@ -41,7 +42,9 @@ def call(method, path, token=None, body=None):
     try:
         with urllib.request.urlopen(req, data, timeout=30) as r:
             raw = r.read().decode()
-            return r.status, (json.loads(raw) if raw else {})
+            parsed = json.loads(raw) if raw else {}
+            cleanup.note(method, path, body, r.status, parsed)
+            return r.status, parsed
     except urllib.error.HTTPError as e:
         raw = e.read().decode()
         try:

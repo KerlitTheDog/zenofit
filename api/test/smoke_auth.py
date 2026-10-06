@@ -10,8 +10,10 @@ does the same. If these two ever disagree the app will look broken while every
 test here passes, so the parameters live in one obvious place at the top.
 
 The ceilings on making identities (devices, registrations, name checks, per
-address per hour) are checked only against a local `wrangler dev`, because
-tripping one against production would lock the tester's own address:
+address per hour) and on guessing a password are checked only against a
+local `wrangler dev`, because tripping one against production would lock the
+tester's own address (and a guessed-at account could not be deleted at the
+end, see cleanup.py):
 
     ZENOFIT_API=http://127.0.0.1:8787 ZENOFIT_LIMITS=1 python3 test/smoke_auth.py
 
@@ -27,6 +29,7 @@ long over, can only be set off locally too, with a short keep:
     ZENOFIT_API=http://127.0.0.1:8787 ZENOFIT_SWEEP=1 python3 test/smoke_auth.py
 """
 import json, os, urllib.request, urllib.error, hashlib, secrets, time
+import cleanup   # deletes what this run makes, at exit
 
 API = os.environ.get("ZENOFIT_API", "https://zenofit-api.kerlit.workers.dev")
 PASS, FAIL = [], []
@@ -51,7 +54,9 @@ def call(method, path, token=None, body=None, addr=None):
     try:
         with urllib.request.urlopen(req, data, timeout=30) as r:
             raw = r.read().decode()
-            return r.status, (json.loads(raw) if raw else {})
+            parsed = json.loads(raw) if raw else {}
+            cleanup.note(method, path, body, r.status, parsed)
+            return r.status, parsed
     except urllib.error.HTTPError as e:
         raw = e.read().decode()
         try: parsed = json.loads(raw) if raw else {}
@@ -189,25 +194,6 @@ check("while the account's other devices stay signed in", s == 200, (s, b))
 s, b = call("POST", "/v1/auth/logout")
 check("logging out with no token is refused, not a crash", s == 401, (s, b))
 
-print("\n== a password can only be guessed so fast ==")
-GUESS = "zt_guess_" + tag
-s, b = call("POST", "/v1/auth/register", body={"username": GUESS, "key": derive(GUESS, PW)})
-check("an account to guess at", s == 201, (s, b))
-codes = []
-for i in range(10):
-    s, b = call("POST", "/v1/auth/login", body={"username": GUESS, "key": "%064x" % (i + 1)})
-    codes.append(s)
-check("ten wrong passwords are each just wrong", codes == [401] * 10, codes)
-s, b = call("POST", "/v1/auth/login", body={"username": GUESS, "key": "%064x" % 99})
-check("the eleventh is refused as too many", s == 429 and b.get("error") == "too_many_attempts", (s, b))
-s, b = call("POST", "/v1/auth/verify", body={"username": GUESS, "key": derive(GUESS, PW)})
-check("and Storage check's verify shares the count, right password or not", s == 429, (s, b))
-s, b = call("POST", "/v1/auth/login", body={"username": CLAIM, "key": derive(CLAIM, PW)})
-check("an account nobody is guessing at still logs in", s == 200, (s, b))
-for _ in range(3):
-    s, b = call("POST", "/v1/auth/login", body={"username": CLAIM, "key": derive(CLAIM, PW)})
-check("and right passwords are never counted against anyone", s == 200, (s, b))
-
 LOCAL = API.startswith("http://127.0.0.1") or API.startswith("http://localhost")
 
 def fresh_addr():
@@ -215,6 +201,31 @@ def fresh_addr():
     return "10.%d.%d.%d" % tuple(secrets.randbelow(250) + 1 for _ in range(3))
 
 if os.environ.get("ZENOFIT_LIMITS") and LOCAL:
+    print("\n== a password can only be guessed so fast (local only) ==")
+    # Local only since the suites clean up after themselves: a guessed-at
+    # account is locked for that name and address for fifteen minutes, and
+    # so is DELETE /v1/me, so against production it could not be deleted at
+    # the end. Guessed at from an address of its own, the cleanup's
+    # requests are not the ones it locked.
+    a = fresh_addr()
+    GUESS = "zt_guess_" + tag
+    s, b = call("POST", "/v1/auth/register", addr=fresh_addr(), body={"username": GUESS, "key": derive(GUESS, PW)})
+    check("an account to guess at", s == 201, (s, b))
+    codes = []
+    for i in range(10):
+        s, b = call("POST", "/v1/auth/login", addr=a, body={"username": GUESS, "key": "%064x" % (i + 1)})
+        codes.append(s)
+    check("ten wrong passwords are each just wrong", codes == [401] * 10, codes)
+    s, b = call("POST", "/v1/auth/login", addr=a, body={"username": GUESS, "key": "%064x" % 99})
+    check("the eleventh is refused as too many", s == 429 and b.get("error") == "too_many_attempts", (s, b))
+    s, b = call("POST", "/v1/auth/verify", addr=a, body={"username": GUESS, "key": derive(GUESS, PW)})
+    check("and Storage check's verify shares the count, right password or not", s == 429, (s, b))
+    s, b = call("POST", "/v1/auth/login", addr=a, body={"username": CLAIM, "key": derive(CLAIM, PW)})
+    check("an account nobody is guessing at still logs in", s == 200, (s, b))
+    for _ in range(3):
+        s, b = call("POST", "/v1/auth/login", addr=a, body={"username": CLAIM, "key": derive(CLAIM, PW)})
+    check("and right passwords are never counted against anyone", s == 200, (s, b))
+
     print("\n== making identities has a ceiling per address (local only) ==")
     CAP = 1000   # a ceiling above this is not a ceiling worth testing for
 
@@ -277,7 +288,7 @@ if os.environ.get("ZENOFIT_LIMITS") and LOCAL:
     s, b = call("POST", "/v1/auth/login", addr="2001:db8:6:1:ffff::1", body={"username": G6, "key": "%064x" % 99})
     check("wrong passwords from ten addresses in one /64 are one guesser", codes == [401] * 10 and s == 429, (codes, s, b))
 else:
-    print("\n(the identity-ceiling checks need a local wrangler dev: set ZENOFIT_LIMITS=1, see the top of this file)")
+    print("\n(the password-guessing and identity-ceiling checks need a local wrangler dev: set ZENOFIT_LIMITS=1, see the top of this file)")
 
 if os.environ.get("ZENOFIT_SWEEP") and LOCAL:
     print("\n== a spent counter leaves with the daily sweep (local only) ==")

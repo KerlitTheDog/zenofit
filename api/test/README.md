@@ -22,10 +22,17 @@ Run all eight after every `wrangler deploy`:
     python3 test/smoke_delete.py   # deleting an account: the password, what goes and what stays,
                                    # every token told `account_deleted`, the name free again
 
-Each creates throwaway devices and profiles, exercises its routes, and deletes
-the profiles at the end. The devices are left behind; they are a few rows and
-cost nothing. `smoke_delete.py` deletes its accounts outright, through the
-route it tests, except the one its password-limit check locks for a while.
+Each creates throwaway accounts, devices and profiles and exercises its
+routes, and every one of them is deleted again when the suite exits, pass or
+fail: each suite's `call()` hands its replies to `cleanup.py`, which writes
+down what `POST /v1/devices` and `/v1/auth/register` made and deletes it at
+exit through `DELETE /v1/me`, the route a person uses (an account whose token
+was logged out signs in again first). Its last printed line says how many were
+deleted, and names any that were not. The checks that lock an account for
+fifteen minutes (guessing a password, in `smoke_auth.py` and
+`smoke_delete.py`) run only locally with `ZENOFIT_LIMITS=1`, from an address of
+their own, because the lock covers `DELETE /v1/me` too and would stop the
+cleanup deleting that account.
 
 Any of them runs against a local `wrangler dev` instead:
 

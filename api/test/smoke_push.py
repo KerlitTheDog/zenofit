@@ -7,6 +7,7 @@ service takes over: the key is served, a subscription is stored, a timer is
 accepted, bad times are refused, and cancelling works.
 """
 import json, urllib.request, urllib.error, urllib.parse, sys, time, base64, os
+import cleanup   # deletes what this run makes, at exit
 
 # Override to run against a local `wrangler dev`:
 #   ZENOFIT_API=http://127.0.0.1:8787 python3 test/smoke_push.py
@@ -24,7 +25,9 @@ def call(method, path, token=None, body=None):
     try:
         with urllib.request.urlopen(req, data, timeout=25) as r:
             raw = r.read().decode()
-            return r.status, (json.loads(raw) if raw else {})
+            parsed = json.loads(raw) if raw else {}
+            cleanup.note(method, path, body, r.status, parsed)
+            return r.status, parsed
     except urllib.error.HTTPError as e:
         raw = e.read().decode()
         try: parsed = json.loads(raw) if raw else {}

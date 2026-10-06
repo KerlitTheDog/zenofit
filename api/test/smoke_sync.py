@@ -7,6 +7,7 @@ that comes back as an absence instead of a tombstone, and a stale push
 overwriting a newer row.
 """
 import os
+import cleanup   # deletes what this run makes, at exit
 import json, urllib.request, urllib.error, sys, time
 
 # Override to run against a local `wrangler dev`:
@@ -25,7 +26,9 @@ def call(method, path, token=None, body=None):
     try:
         with urllib.request.urlopen(req, data, timeout=30) as r:
             raw = r.read().decode()
-            return r.status, (json.loads(raw) if raw else {})
+            parsed = json.loads(raw) if raw else {}
+            cleanup.note(method, path, body, r.status, parsed)
+            return r.status, parsed
     except urllib.error.HTTPError as e:
         raw = e.read().decode()
         try: parsed = json.loads(raw) if raw else {}

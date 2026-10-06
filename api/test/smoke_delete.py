@@ -25,11 +25,14 @@ deleted. The checks are what that has to mean from the OUTSIDE:
     the old tokens do not open
   - the password check shares login's limits, so this is no way round them
 
-Like the other suites it makes throwaway accounts, and unlike them it deletes
-almost all of them again on the way out. `dan`, the account the limit check
-locks for fifteen minutes, is left behind.
+Like every suite it deletes what it makes on the way out (cleanup.py). The
+password-limit check runs only against a local `wrangler dev`
+(ZENOFIT_LIMITS=1), from an address of its own: the lock it sets lasts
+fifteen minutes and covers DELETE /v1/me, so against production it would
+stop the cleanup deleting that account.
 """
 import json, os, urllib.request, urllib.error, hashlib, secrets, base64
+import cleanup   # deletes what this run makes, at exit
 
 API = os.environ.get("ZENOFIT_API", "https://zenofit-api.kerlit.workers.dev")
 PASS, FAIL = [], []
@@ -39,8 +42,9 @@ PW = "correct horse battery"
 def derive(username, password):
     return hashlib.pbkdf2_hmac("sha256", password.encode(), ("zenofit:" + username.lower()).encode(), 210000, 32).hex()
 
-def call(method, path, token=None, body=None):
+def call(method, path, token=None, body=None, addr=None):
     req = urllib.request.Request(API + path, method=method)
+    if addr: req.add_header("CF-Connecting-IP", addr)   # local only, see the top
     req.add_header("User-Agent", "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/128 Mobile Safari/537.36")
     if token: req.add_header("Authorization", "Bearer " + token)
     data = None
@@ -50,7 +54,9 @@ def call(method, path, token=None, body=None):
     try:
         with urllib.request.urlopen(req, data, timeout=30) as r:
             raw = r.read().decode()
-            return r.status, (json.loads(raw) if raw else {})
+            parsed = json.loads(raw) if raw else {}
+            cleanup.note(method, path, body, r.status, parsed)
+            return r.status, parsed
     except urllib.error.HTTPError as e:
         raw = e.read().decode()
         try: parsed = json.loads(raw) if raw else {}
@@ -222,16 +228,21 @@ check("is deleted on its token alone: it has nothing else", s == 200 and b.get("
 s, b = call("GET", "/v1/profiles", DEV)
 check("and is told so afterwards", s == 401 and b.get("error") == "account_deleted", (s, b))
 
-print("\n== a password can only be guessed so fast, here too ==")
-dan = account("zd_dan")
-codes = [call("DELETE", "/v1/me", dan["token"], {"key": "%064x" % (i + 1)})[0] for i in range(10)]
-check("ten wrong passwords are each just wrong", codes == [403] * 10, codes)
-s, b = call("DELETE", "/v1/me", dan["token"], {"key": derive(dan["name"], PW)})
-check("the eleventh is refused as too many, right password or not", s == 429 and b.get("error") == "too_many_attempts", (s, b))
-s, b = call("POST", "/v1/auth/login", body={"username": dan["name"], "key": derive(dan["name"], PW)})
-check("because it shares login's count", s == 429, (s, b))
-s, b = call("GET", "/v1/profiles", dan["token"])
-check("and the account is still there", s == 200, (s, b))
+LOCAL = API.startswith("http://127.0.0.1") or API.startswith("http://localhost")
+if os.environ.get("ZENOFIT_LIMITS") and LOCAL:
+    print("\n== a password can only be guessed so fast, here too (local only) ==")
+    a = "10.%d.%d.%d" % tuple(secrets.randbelow(250) + 1 for _ in range(3))
+    dan = account("zd_dan")
+    codes = [call("DELETE", "/v1/me", dan["token"], {"key": "%064x" % (i + 1)}, addr=a)[0] for i in range(10)]
+    check("ten wrong passwords are each just wrong", codes == [403] * 10, codes)
+    s, b = call("DELETE", "/v1/me", dan["token"], {"key": derive(dan["name"], PW)}, addr=a)
+    check("the eleventh is refused as too many, right password or not", s == 429 and b.get("error") == "too_many_attempts", (s, b))
+    s, b = call("POST", "/v1/auth/login", body={"username": dan["name"], "key": derive(dan["name"], PW)}, addr=a)
+    check("because it shares login's count", s == 429, (s, b))
+    s, b = call("GET", "/v1/profiles", dan["token"])
+    check("and the account is still there", s == 200, (s, b))
+else:
+    print("\n(the password-limit check needs a local wrangler dev: set ZENOFIT_LIMITS=1, see the top of this file)")
 
 print("\n== the other two go the same way ==")
 for who in (bob, cat):

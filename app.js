@@ -6146,8 +6146,9 @@ const chip = (children, color, style = "") =>
 const sectionTitle = (children, right = "") =>
   `<div style="display:flex;align-items:baseline;justify-content:space-between;margin:2px 2px 10px"><div class="pb-label">${children}</div>${right}</div>`;
 
+/* `token` names the slot in the source, for grep; only the caption is drawn */
 const placeholder = (token, height, children = "") =>
-  `<div class="pb-placeholder" style="height:${height}px"><div style="padding:8px">${children || token}<div style="font-size:9px;margin-top:2px;opacity:.7">${children ? token : "swap me in code"}</div></div></div>`;
+  `<div class="pb-placeholder" style="height:${height}px"><div style="padding:8px">${children}</div></div>`;
 
 /* The unit dropdown that lives inside a weight field's label: tap "kg" and
    pick whatever the machine in front of you is stamped in. The calculator

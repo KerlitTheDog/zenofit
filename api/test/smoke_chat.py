@@ -79,6 +79,14 @@ her = account("ada")
 him = account("bob")
 nosy = account("eve")
 
+print("\n== chat needs an account, not just a device ==")
+s, r = call("POST", "/v1/devices", body={"displayName": None})
+bare = r.get("token")
+s, r = call("GET", "/v1/users/search?q=" + her["name"], token=bare)
+check("a device that never registered cannot search", s == 403 and r.get("error") == "account_required", (s, r))
+s, r = call("POST", "/v1/chats", token=bare, body={"userId": her["id"]})
+check("nor open a conversation", s == 403 and r.get("error") == "account_required", (s, r))
+
 print("\n== finding somebody by name ==")
 s, r = call("GET", "/v1/users/search?q=" + her["name"], token=him["token"])
 found = [u for u in r.get("users", []) if u["userId"] == her["id"]]
@@ -97,11 +105,6 @@ check("one character is refused rather than answered", s == 200 and r["users"] =
 
 s, r = call("GET", "/v1/users/search?q=" + him["name"], token=him["token"])
 check("you never find yourself", not any(u["userId"] == him["id"] for u in r.get("users", [])), r)
-
-s, b = call("POST", "/v1/devices", body={"displayName": "unclaimed"})
-unclaimed_token = b["token"]
-s, r = call("GET", "/v1/users/search?q=" + her["name"], token=unclaimed_token)
-check("an unregistered device can still search", s == 200, (s, r))
 
 print("\n== opening a chat is find-or-create ==")
 s, t1 = call("POST", "/v1/chats", token=him["token"], body={"userId": her["id"]})

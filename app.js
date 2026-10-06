@@ -4537,10 +4537,10 @@ window.addEventListener("zenofit:account-deleted", (e) => {
    the account it was built for, and signing in as a different person
    drops it rather than showing one person's messages to another).
 
-   IT NEEDS AN ACCOUNT, not just a device. A device token is enough to
-   search (so the screen works while somebody is still deciding to sign
-   up), but a person who never registered has no username, so there is
-   nothing for anybody to find them under.                              */
+   IT NEEDS AN ACCOUNT, not just a device, and the server refuses every
+   chat route to a token with no username behind it (403
+   account_required): a person who never registered has no username, so
+   there is nothing for anybody to find them under.                     */
 
 const CHAT_KEY = "zenofit:chat";
 /* Per thread, in the cache. A conversation people actually have runs to

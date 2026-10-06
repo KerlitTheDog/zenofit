@@ -518,8 +518,11 @@ async function route(request, env, url, ctx) {
    * It is handed this file's reply helpers rather than growing its own, and
    * `waitUntil` so a message can be stored and answered without waiting on
    * a push service. Returns null when the path is not one of its own, and
-   * the list below carries on.                                            */
+   * the list below carries on. Every chat route needs an ACCOUNT: a device
+   * token costs nothing to mint and has no name to be found or answered
+   * under, and the app only ever opens chat signed in.                    */
   if (seg[0] === "v1" && (seg[1] === "chats" || (seg[1] === "users" && seg[2] === "search"))) {
+    if (!user.username) return fail(403, "account_required", "Sign in to an account to use chat.");
     const res = await chatRoute({
       request, env, url, method, seg, user,
       json, fail, readJson, newId, sendToUser,

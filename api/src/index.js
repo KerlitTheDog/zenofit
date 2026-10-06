@@ -136,7 +136,7 @@ const tooManyLogins = () =>
    wrangler.toml, so they move without a release; these are the fallback.
 
    Sized against the two things that must keep working. A full run of all
-   eight smoke suites from one address mints 28 devices and makes 26
+   eight smoke suites from one address mints 28 devices and makes 24
    registrations that count (measured; count again when a suite grows),
    so three runs fit in one hour. And a gym signing up a whole class on
    its own wifi, which is one address: one registration and one or two

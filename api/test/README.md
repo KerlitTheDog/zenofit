@@ -63,7 +63,7 @@ the tester's own address:
                        it made (it says so).
 
 A full run counts against the ceilings on the address it comes from (28 devices
-and 26 registrations per run), so three full runs fit in one hour.
+and 24 registrations per run), so three full runs fit in one hour.
 
 Everything at once, locally:
 

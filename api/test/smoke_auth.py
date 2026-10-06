@@ -262,6 +262,20 @@ if os.environ.get("ZENOFIT_LIMITS") and LOCAL:
     check("an IPv6 address shares its /64's ceiling", s == 429 and s2 == 429, (n, s, s2, b2))
     s, b = call("POST", "/v1/devices", body={}, addr="2001:db8:5:8::1")
     check("and the next /64 has its own", s == 201, (s, b))
+
+    # A wrong login counts only against a name that has an account: every
+    # new person's first, refused login is a name nobody owns, and a gym
+    # signing a class up on one wifi must not lock that wifi out.
+    a = fresh_addr()
+    codes = [call("POST", "/v1/auth/login", addr=a, body={"username": "zl_" + secrets.token_hex(5), "key": "%064x" % 1})[0] for _ in range(105)]
+    check("105 refused logins for names nobody owns are never too many", codes == [401] * 105, codes[-3:])
+    s, b = call("POST", "/v1/auth/login", addr=a, body={"username": NAME, "key": derive(NAME, PW)})
+    check("and that address still logs in", s == 200, (s, b))
+    G6 = "zl_" + secrets.token_hex(5)
+    s, b = call("POST", "/v1/auth/register", addr=fresh_addr(), body={"username": G6, "key": derive(G6, PW)})
+    codes = [call("POST", "/v1/auth/login", addr="2001:db8:6:1::%x" % (i + 1), body={"username": G6, "key": "%064x" % (i + 1)})[0] for i in range(10)]
+    s, b = call("POST", "/v1/auth/login", addr="2001:db8:6:1:ffff::1", body={"username": G6, "key": "%064x" % 99})
+    check("wrong passwords from ten addresses in one /64 are one guesser", codes == [401] * 10 and s == 429, (codes, s, b))
 else:
     print("\n(the identity-ceiling checks need a local wrangler dev: set ZENOFIT_LIMITS=1, see the top of this file)")
 

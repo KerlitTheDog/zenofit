@@ -98,14 +98,20 @@ const cleanName = (v, fallback = null) =>
    per address AND name (the account being guessed at from one place), and
    per address alone (one password tried against many names). Login and
    Storage check's verify share the counters, or one would be the way
-   round the other. */
+   round the other. Only a miss on a name that HAS an account is counted:
+   every new person's first, refused login is a name nobody owns (the form
+   always tries to log in first), so counting those locked a gym's whole
+   wifi out after a hundred sign-ups, and a name nobody owns has nothing to
+   guess. The reply is the same either way; whether a name is taken is no
+   secret (/v1/auth/available answers it). The address is addressKey's, so
+   an IPv6 guesser cannot reset the count by walking its own /64. */
 const LOGIN_WINDOW_MS = 15 * 60_000;
 const LOGIN_MAX_PER_NAME = 10;
 const LOGIN_MAX_PER_ADDRESS = 100;
 const clientAddress = (request) =>
   request.headers.get("CF-Connecting-IP") || request.headers.get("X-Forwarded-For") || "local";
 const loginKeys = (request, usernameLc) => {
-  const ip = clientAddress(request);
+  const ip = addressKey(request);
   return { name: "login:" + ip + ":" + (usernameLc || "?"), addr: "login:" + ip };
 };
 async function loginBlocked(env, keys) {
@@ -369,16 +375,16 @@ async function route(request, env, url, ctx) {
     const keys = loginKeys(request, username && username.toLowerCase());
     if (await loginBlocked(env, keys)) return tooManyLogins();
 
-    /* One reply for every way this can fail, and the same amount of work
-       done either way: a wrong username and a wrong password have to be
-       indistinguishable, or the endpoint is a list of who has an account. */
+    /* One reply for every way this can fail: a wrong username and a wrong
+       password get the same answer. (Only a real name's miss is counted,
+       see the block above loginKeys.) */
     const row = username && key
       ? await env.DB.prepare("SELECT id, username, pw_hash, pw_salt FROM users WHERE username_lc = ?").bind(username.toLowerCase()).first()
       : null;
     const salt = (row && row.pw_salt) || "00000000000000000000000000000000";
     const attempt = await hashKey(salt, key || "0".repeat(64));
     if (!row || !row.pw_hash || !sameHash(attempt, row.pw_hash)) {
-      await loginMissed(env, keys);
+      if (row) await loginMissed(env, keys);
       return fail(401, "bad_login", "That username and password do not match an account.");
     }
 
@@ -412,7 +418,7 @@ async function route(request, env, url, ctx) {
     const salt = (row && row.pw_salt) || "00000000000000000000000000000000";
     const attempt = await hashKey(salt, key || "0".repeat(64));
     if (!row || !row.pw_hash || !sameHash(attempt, row.pw_hash)) {
-      await loginMissed(env, keys);
+      if (row) await loginMissed(env, keys);
       return fail(401, "bad_login", "That username and password do not match an account.");
     }
     return json({ userId: row.id, username: row.username });

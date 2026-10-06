@@ -6984,24 +6984,26 @@ function renderLoginGate() {
       return `<div class="pb-card2" style="display:flex;gap:9px;align-items:flex-start;padding:12px 14px;margin-bottom:16px;font-size:12.5px;line-height:1.55;color:var(--muted)">
         ${icon("user-plus", 15, 'style="flex-shrink:0;margin-top:1px;color:var(--gold)"')}<span>${T("link.invited", { name: esc(pStr(l.invite, 24)) })}</span></div>`;
     })()}
+    <form id="loginForm" novalidate style="display:flex;flex-direction:column">
     ${field(T("acct.username"),
       `<input class="pb-input" data-bind="loginName" value="${esc(f.username)}" placeholder="${esc(T("acct.usernamePh"))}" autocapitalize="none" autocorrect="off" autocomplete="username" spellcheck="false" maxlength="24" data-autofocus>`)}
     ${field(T("acct.password"),
-      `<input class="pb-input" type="password" data-bind="loginPass" value="${esc(f.password)}" autocapitalize="none" autocorrect="off" autocomplete="current-password" spellcheck="false">`)}
+      `<input class="pb-input" type="password" data-bind="loginPass" value="${esc(f.password)}" autocapitalize="none" autocorrect="off" autocomplete="${f.confirmCreate ? "new-password" : "current-password"}" spellcheck="false">`)}
     <div id="loginErr" style="font-size:12.5px;color:var(--red);margin:-4px 0 12px;line-height:1.5;display:${f.error ? "block" : "none"}">${f.error ? esc(f.error) : ""}</div>
     <div id="loginMain" style="display:${f.confirmCreate ? "none" : "block"}">
-      <button id="loginGoBtn" data-action="login-go" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
+      <button id="loginGoBtn" type="submit" data-action="login-go" ${ok && !f.confirmCreate ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
         ${icon("log-in", 16)} ${T(f.busy ? "acct.working" : "login.go")}
       </button>
     </div>
     <div id="loginConfirm" class="pb-card2" style="display:${f.confirmCreate ? "block" : "none"};padding:14px">
       <div style="font-size:13.5px;line-height:1.55;margin-bottom:12px">${T("login.noAccount", { name: `<b>${esc(name)}</b>` })}</div>
-      <button data-action="login-create" ${f.busy ? "disabled" : ""} class="pb-btn pb-gold" style="width:100%;padding:12px 0;font-size:14.5px;opacity:${f.busy ? 0.45 : 1}">
+      <button type="button" data-action="login-create" ${f.busy ? "disabled" : ""} class="pb-btn pb-gold" style="width:100%;padding:12px 0;font-size:14.5px;opacity:${f.busy ? 0.45 : 1}">
         ${icon("user-plus", 16)} ${T(f.busy ? "acct.working" : "login.create")}
       </button>
-      <button data-action="login-cancel" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;font-size:13.5px;margin-top:8px">${T("login.cancel")}</button>
+      <button type="button" data-action="login-cancel" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;font-size:13.5px;margin-top:8px">${T("login.cancel")}</button>
       <div style="font-size:11.5px;color:var(--faint);margin-top:10px;line-height:1.55">${T("acct.passwordHint")}</div>
     </div>
+    </form>
     <div style="font-size:11.5px;color:var(--faint);margin-top:16px;line-height:1.6">${T("login.hint")}</div>
     <div style="font-size:11.5px;color:var(--faint);margin-top:8px;line-height:1.6">${T("acct.warning")}</div>
   </div>`;
@@ -7014,7 +7016,9 @@ function updateLoginForm() {
   const f = ui.login;
   if (!f) return;
   const btn = document.getElementById("loginGoBtn");
-  if (btn) { const ok = loginReady(f); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
+  if (btn) { const ok = loginReady(f); btn.disabled = !ok || f.confirmCreate; btn.style.opacity = ok ? 1 : 0.45; }
+  const pw = document.querySelector('[data-bind="loginPass"]');
+  if (pw) pw.autocomplete = f.confirmCreate ? "new-password" : "current-password";
   const err = document.getElementById("loginErr");
   if (err) { err.textContent = f.error || ""; err.style.display = f.error ? "block" : "none"; }
   const main = document.getElementById("loginMain");
@@ -19999,6 +20003,11 @@ const READ_OK = new Set([
 function toastReadOnly() {
   try { alert(T("sync.roBlocked")); } catch { /* no UI to say it in */ }
 }
+
+/* The login fields are a real <form>, so Enter (or a phone keyboard's Go)
+   presses Log in and password managers see a login. Nothing in this app is
+   ever actually submitted: the button's own click has done the work. */
+document.addEventListener("submit", (e) => e.preventDefault());
 
 document.addEventListener("click", (e) => {
   const el = e.target.closest("[data-action]");

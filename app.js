@@ -9913,7 +9913,7 @@ function renderChatView() {
       ${vid ? `<div style="margin-bottom:18px">
           <div class="pb-label" style="margin-bottom:6px">${T("ex.tutorial")}</div>
           <div style="position:relative;width:100%;padding-bottom:56.25%;border-radius:14px;overflow:hidden;border:1px solid var(--border);background:#000">
-            <iframe src="https://www.youtube.com/embed/${vid}" title="Tutorial video" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen loading="lazy" style="position:absolute;inset:0;width:100%;height:100%;border:0"></iframe>
+            <iframe src="https://www.youtube-nocookie.com/embed/${vid}" title="Tutorial video" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen loading="lazy" style="position:absolute;inset:0;width:100%;height:100%;border:0"></iframe>
           </div>
         </div>` : link ? `<div style="margin-bottom:18px">
           <div class="pb-label" style="margin-bottom:6px">${T("ex.tutorial")}</div>
@@ -11816,7 +11816,7 @@ function exWindowViewBody(ex, hist) {
       ? `<div style="margin-bottom:18px">
           <div class="pb-label" style="margin-bottom:6px">${T("ex.tutorial")}</div>
           <div style="position:relative;width:100%;padding-bottom:56.25%;border-radius:14px;overflow:hidden;border:1px solid var(--border);background:#000">
-            <iframe src="https://www.youtube.com/embed/${vid}" title="Tutorial video" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen loading="lazy" style="position:absolute;inset:0;width:100%;height:100%;border:0"></iframe>
+            <iframe src="https://www.youtube-nocookie.com/embed/${vid}" title="Tutorial video" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen loading="lazy" style="position:absolute;inset:0;width:100%;height:100%;border:0"></iframe>
           </div>
         </div>`
       : (cleanHref(ex.video)

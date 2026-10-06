@@ -9,10 +9,10 @@
        why theme.js and sw-register.js are files. Inline STYLES are allowed,
        because the templates put a style attribute on nearly everything.
        It talks to the API (and to a local Worker on port 8787, which is
-       what a test points the app at) and frames nothing but YouTube, for
+       what a test points the app at) and frames nothing but YouTube's no-cookie player, for
        the tutorial videos. Any new origin, and any inline script, changes
        this line in the same commit. -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' https://zenofit-api.kerlit.workers.dev http://127.0.0.1:8787 http://localhost:8787; frame-src https://www.youtube.com; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' https://zenofit-api.kerlit.workers.dev http://127.0.0.1:8787 http://localhost:8787; frame-src https://www.youtube-nocookie.com; worker-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
   <!-- viewport-fit=cover lets the app paint under the notch and the home
        indicator; app.js then measures env(safe-area-inset-*) and hands the
        numbers to the layout, so content stays out from under them (see the

@@ -63,6 +63,11 @@ for bad, why in [
     ({}, "empty"),
     ({"endpoint": "http://insecure.example/x", "keys": {"p256dh": "a", "auth": "b"}}, "non-https"),
     ({"endpoint": "https://fcm.googleapis.com/x"}, "missing keys"),
+    # a push is only ever sent to a real push service: an https endpoint on
+    # any other host is refused before it is ever stored
+    ({"endpoint": "https://evil.example.com/collect", "keys": {"p256dh": b64u(65), "auth": b64u(16)}}, "non-push-service host"),
+    # the keys are fixed-size crypto, not a place to park a payload
+    ({"endpoint": "https://fcm.googleapis.com/fcm/send/" + b64u(24), "keys": {"p256dh": "A" * 5000, "auth": b64u(16)}}, "oversized key"),
 ]:
     s, b = call("POST", "/v1/push/subscribe", token=tok, body=bad)
     check("rejects %s subscription" % why, s == 400, (s, b))
@@ -81,6 +86,18 @@ s, b = call("POST", "/v1/push/subscribe", token=tok, body=fake)
 check("re-subscribing does not duplicate", s == 201, (s, b))
 s, b = call("GET", "/v1/push/status", token=tok)
 check("still exactly one subscription", b.get("subscriptions") == 1, b)
+
+print("\n== one account keeps only its newest few devices ==")
+# A stream of subscribe calls cannot grow the table without bound: beyond
+# the cap the oldest give way, and the one just written is never dropped.
+capper, _ = device("many devices")
+for i in range(25):
+    s, b = call("POST", "/v1/push/subscribe", token=capper,
+                body={"endpoint": "https://fcm.googleapis.com/fcm/send/cap%02d_%s" % (i, b64u(12)),
+                      "keys": {"p256dh": b64u(65), "auth": b64u(16)}})
+    assert s == 201, (s, b)
+s, b = call("GET", "/v1/push/status", token=capper)
+check("subscriptions are capped at 20", s == 200 and b.get("subscriptions") == 20, (s, b))
 
 print("\n== which kinds this device wants ==")
 s, b = call("POST", "/v1/push/subscribe", token=tok, body=dict(fake, off=["chat", "nonsense"]))
@@ -121,7 +138,7 @@ def login(name):
     assert s == 200, (s, b)
     return b["token"]
 anna, bert = person("pa"), person("pb")
-phone = {"endpoint": "https://example.com/push/" + b64u(16), "keys": {"p256dh": fake["keys"]["p256dh"], "auth": fake["keys"]["auth"]}}
+phone = {"endpoint": "https://updates.push.services.mozilla.com/wpush/v2/" + b64u(16), "keys": {"p256dh": fake["keys"]["p256dh"], "auth": fake["keys"]["auth"]}}
 a1, a2 = login(anna), login(anna)
 s, b = call("POST", "/v1/push/subscribe", token=a1, body=phone)
 check("anna's phone is subscribed", s == 201, (s, b))

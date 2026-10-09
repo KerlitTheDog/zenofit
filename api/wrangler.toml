@@ -47,6 +47,7 @@ LIMIT_DEVICES_PER_HOUR = "100"     # POST /v1/devices, per address
 LIMIT_REGISTER_PER_HOUR = "100"    # POST /v1/auth/register, per address
 LIMIT_AVAILABLE_PER_HOUR = "200"   # GET /v1/auth/available, per address
 LIMIT_SEARCH_PER_HOUR = "300"      # GET /v1/users/search, per account
+LIMIT_PROFILES_PER_HOUR = "300"    # POST /v1/profiles, per address
 
 # The ceiling on ALL photo data in the database, in characters of data URL:
 # 60% of the free plan's 500 MB. Past it an upload is refused (507

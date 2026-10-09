@@ -259,6 +259,25 @@ for pid in (a["profileId"], c["profileId"]):
 for pid in (l1["profileId"], l2["profileId"]):
     call("DELETE", "/v1/profiles/" + pid, token=legacy)
 
+print("\n== reordering a long list stays within the query budget ==")
+# The order route used to run an accessFor (a query) plus an update PER
+# profile, so a list of more than ~25 blew past D1's 50-queries-per-request
+# ceiling and the reorder failed outright in production. It now reads what
+# the account may order in two queries and writes in batches. (Local wrangler
+# does not enforce that ceiling, so this is a regression guard that bites at
+# release, against the real limit.)
+big, _ = device("reorder owner")
+pids = []
+for i in range(26):
+    s, b = call("POST", "/v1/profiles", token=big, body={"name": "P%02d" % i, "position": i})
+    assert s == 201, (s, b)
+    pids.append(b["profileId"])
+rev = list(reversed(pids))
+s, r = call("POST", "/v1/profiles/order", token=big, body={"order": rev})
+check("a 26-profile reorder succeeds", s == 200 and r.get("ordered") == 26, (s, r))
+s, lst = call("GET", "/v1/profiles", token=big)
+check("the stored order is the one asked for", ids(lst) == rev, ids(lst))
+
 print("\n%d passed, %d failed" % (len(PASS), len(FAIL)))
 if FAIL:
     print("FAILED:")

@@ -148,6 +148,36 @@ const SIGNUP_WINDOW_MS = 60 * 60_000;
 const DEFAULT_DEVICES_PER_HOUR = 100;
 const DEFAULT_REGISTER_PER_HOUR = 100;
 const DEFAULT_AVAILABLE_PER_HOUR = 200;
+/* Making a profile is cheap and was unbounded: one device token (and a
+   token costs nothing to mint) could loop POST /v1/profiles and fill the
+   table with rows and seeds nobody owns, so every write starts failing for
+   everyone on the free plan's daily budget. Counted per address the way the
+   signup ceilings are, generous enough that a gym class each naming a first
+   profile on one wifi, and three full runs of the smoke suites, both fit. */
+const DEFAULT_PROFILES_PER_HOUR = 300;
+/* A rest timer booked with the server creates a Durable Object and a row;
+   nothing capped how many, so a loop could spend the DO and write budget.
+   A person starts one per set, so a minute's worth is single figures. */
+const TIMER_WINDOW_MS = 60_000;
+const TIMER_MAX_PER_WINDOW = 30;
+/* A push is only ever sent to one of these, so a subscription that names
+   anywhere else is not a real one: the browsers' four push services, by the
+   host suffix each uses. Without this the Worker would POST the encrypted
+   payload to any https host a request named. */
+const PUSH_ENDPOINT_HOSTS = [".googleapis.com", ".push.services.mozilla.com", ".notify.windows.com", ".push.apple.com"];
+const pushEndpointOk = (endpoint) => {
+  if (typeof endpoint !== "string" || !endpoint.startsWith("https://") || endpoint.length > 2048) return false;
+  let host;
+  try { host = new URL(endpoint).hostname; } catch { return false; }
+  return PUSH_ENDPOINT_HOSTS.some((s) => host.endsWith(s));
+};
+/* One account is a handful of devices. A ceiling so a flood of subscribe
+   calls cannot grow the table without bound; the oldest give way. */
+const MAX_SUBS_PER_USER = 20;
+/* A test push is a button in the notifications window; this is the ceiling
+   on a script hitting the route in a loop, never something a person meets. */
+const TEST_WINDOW_MS = 60 * 60_000;
+const TEST_MAX_PER_WINDOW = 30;
 
 /* The address a ceiling is kept under. An IPv6 address counts by its /64,
    the block one household or one server is handed: counting each /128
@@ -652,19 +682,33 @@ async function route(request, env, url, ctx) {
     if (!order) return fail(400, "bad_request", "Send { order: [profileId, ...] }.");
     if (order.length > 200) return fail(400, "too_many", "That is not a profile list.");
 
+    /* What this account may order, read in TWO queries rather than an
+       accessFor (two queries) per profile: a list of 200 ids times two is
+       400 queries, past D1's 50-per-request ceiling, so reordering a long
+       list failed outright. The writes then go in batches of 50, inside the
+       same ceiling. */
     const now = Date.now();
+    const ownedRows = await env.DB.prepare(
+      "SELECT id FROM profiles WHERE owner_id = ? AND deleted_at IS NULL"
+    ).bind(user.id).all();
+    const owned = new Set((ownedRows.results || []).map((r) => r.id));
+    const grantRows = await env.DB.prepare(
+      "SELECT profile_id FROM grants WHERE user_id = ? AND revoked_at IS NULL"
+    ).bind(user.id).all();
+    const granted = new Set((grantRows.results || []).map((r) => r.profile_id));
+
+    const stmts = [];
     const done = [];
     for (let i = 0; i < order.length; i++) {
-      const { level } = await accessFor(env, user.id, order[i]);
-      if (level === "owner") {
-        await env.DB.prepare("UPDATE profiles SET position = ?, updated_at = ? WHERE id = ?")
-          .bind(i, now, order[i]).run();
-      } else if (canRead(level)) {
-        await env.DB.prepare("UPDATE grants SET position = ? WHERE profile_id = ? AND user_id = ? AND revoked_at IS NULL")
-          .bind(i, order[i], user.id).run();
+      const id = order[i];
+      if (owned.has(id)) {
+        stmts.push(env.DB.prepare("UPDATE profiles SET position = ?, updated_at = ? WHERE id = ?").bind(i, now, id));
+      } else if (granted.has(id)) {
+        stmts.push(env.DB.prepare("UPDATE grants SET position = ? WHERE profile_id = ? AND user_id = ? AND revoked_at IS NULL").bind(i, id, user.id));
       } else continue;
-      done.push(order[i]);
+      done.push(id);
     }
+    for (let i = 0; i < stmts.length; i += 50) await env.DB.batch(stmts.slice(i, i + 50));
     return json({ ordered: done.length, profileIds: done, updatedAt: now });
   }
 
@@ -702,6 +746,11 @@ async function route(request, env, url, ctx) {
         position: had.position, nameUpdatedAt: had.name_updated_at, createdAt: had.created_at, existing: true });
     };
     if (clientKey) { const again = await sameCreate(); if (again) return again; }
+
+    /* Only a real create is counted (the retry above returned already), so
+       a lost reply resent on the next roster pass costs nothing. */
+    if (await limited(env, "signup:profile:" + addressKey(request), SIGNUP_WINDOW_MS,
+        limitOf(env, "LIMIT_PROFILES_PER_HOUR", DEFAULT_PROFILES_PER_HOUR))) return tooManySignups();
 
     try {
       await env.DB.prepare(
@@ -993,7 +1042,13 @@ async function route(request, env, url, ctx) {
     const endpoint = typeof body.endpoint === "string" ? body.endpoint : "";
     const keys = body.keys || {};
 
-    if (!endpoint.startsWith("https://") || !keys.p256dh || !keys.auth) {
+    /* The host has to be a real push service (a push is only ever sent to
+       one), and the keys are fixed-size crypto, not a place to park data:
+       a p256dh is 65 bytes and an auth 16, both base64, so 256 characters
+       is roomy and a megabyte is not a subscription. */
+    if (!pushEndpointOk(endpoint) ||
+        typeof keys.p256dh !== "string" || keys.p256dh.length > 256 ||
+        typeof keys.auth !== "string" || keys.auth.length > 256) {
       return fail(400, "bad_subscription", "That is not a usable push subscription.");
     }
 
@@ -1012,6 +1067,14 @@ async function route(request, env, url, ctx) {
       typeof body.platform === "string" ? body.platform.slice(0, 20) : null,
       Date.now(), offKinds(body.off)
     ).run();
+
+    /* Keep only this account's newest few devices, so a stream of subscribe
+       calls cannot grow the table without end. The one just written is the
+       newest, so it is never the one dropped. */
+    await env.DB.prepare(
+      "DELETE FROM push_subs WHERE user_id = ? AND id NOT IN " +
+      "(SELECT id FROM push_subs WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT ?)"
+    ).bind(user.id, user.id, MAX_SUBS_PER_USER).run().catch(() => {});
 
     return json({ subscribed: true, off: offList(offKinds(body.off)) }, 201);
   }
@@ -1062,6 +1125,9 @@ async function route(request, env, url, ctx) {
   /* Sends immediately. The only honest way to find out whether push survives
      this particular phone, in a pocket, with the screen off. */
   if (p === "/v1/push/test" && method === "POST") {
+    if (await limited(env, "push:test:" + user.id, TEST_WINDOW_MS, TEST_MAX_PER_WINDOW)) {
+      return fail(429, "too_fast", "Too many test notifications. Wait a few minutes.");
+    }
     const body = await readJson(request).catch(() => ({}));
     const result = await sendToUser(env, user.id, {
       title: cleanName(body.title, "Zenofit"),
@@ -1088,6 +1154,9 @@ async function route(request, env, url, ctx) {
   }
 
   if (p === "/v1/timers" && method === "POST") {
+    if (await limited(env, "timer:" + user.id, TIMER_WINDOW_MS, TIMER_MAX_PER_WINDOW)) {
+      return fail(429, "too_fast", "Too many timers at once. Wait a moment.");
+    }
     const body = await readJson(request).catch(() => ({}));
     const now = Date.now();
 
@@ -1133,10 +1202,14 @@ async function route(request, env, url, ctx) {
     const endpoint = typeof body.endpoint === "string" && body.endpoint.startsWith("https://") && body.endpoint.length <= 2048
       ? body.endpoint : null;
 
+    /* The payload column is written NULL: nothing reads it (the alarm gets
+       its title, body, ref and endpoint from the schedule call to the
+       Durable Object, GET /v1/timers returns none of it), and a client could
+       otherwise store up to a row's worth of anything here, unbounded. */
     await env.DB.prepare(
       "INSERT INTO timers (id, user_id, label, fire_at, status, payload, created_at) " +
-      "VALUES (?, ?, ?, ?, 'scheduled', ?, ?)"
-    ).bind(timerId, user.id, label, fireAt, JSON.stringify(body.payload || null), now).run();
+      "VALUES (?, ?, ?, ?, 'scheduled', NULL, ?)"
+    ).bind(timerId, user.id, label, fireAt, now).run();
 
     const stub = env.TIMER.get(env.TIMER.idFromName(timerId));
     await stub.fetch("https://do/schedule", {

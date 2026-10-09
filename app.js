@@ -3593,6 +3593,41 @@ function photoSlot(id, style, opts = {}) {
   return `<div data-photo-slot="${esc(id)}" data-fit="${fit}" style="${style};overflow:hidden;display:flex;align-items:center;justify-content:center;background:var(--surface2);color:var(--faint)">${icon(opts.icon || "image", opts.iconSize || 18)}</div>`;
 }
 
+/* ── AN EXERCISE'S LIBRARY PHOTO, AS A THUMBNAIL FOR ANY LIST ─────────
+   The library list has always drawn a lift's photo; every other list that
+   names a lift (the picker, the day being built, the log, the Progress
+   lifts, the entry window's own header) wants the same picture beside the
+   name. `exThumb` is that one square, given a library ROW, in the four
+   states the library list knew: the picture when the phone holds it, a
+   slot that fills itself in place when it arrives from the store
+   (`photoPaint`, never a render), a dashed marker for one still on an old
+   device (only with `away`, since a list of lifts you did reads worse
+   peppered with boxes for photos that are not here), and nothing at all
+   when there is no photo. `nameThumb` is the same starting from a stored
+   NAME, through a name->row map rebuilt only when the library array itself
+   changes, so drawing a long log is not a `find()` per row. It reads the
+   library and writes nothing, so it is safe on any READ_OK surface. */
+let _libByNameArr = null, _libByNameMap = null;
+function libByName(name) {
+  const lib = state.library;
+  if (_libByNameArr !== lib) { _libByNameArr = lib; _libByNameMap = new Map((lib || []).map((x) => [x.name, x])); }
+  return _libByNameMap.get(name) || null;
+}
+function exThumb(ex, size = 34, opts = {}) {
+  if (!ex) return "";
+  const r = opts.radius != null ? opts.radius : 8;
+  const box = `width:${size}px;height:${size}px;border-radius:${r}px;flex-shrink:0`;
+  const ic = opts.iconSize || Math.max(12, Math.round(size * 0.4));
+  if (isPhotoData(ex.image))
+    return `<img src="${esc(ex.image)}" alt="" style="${box};object-fit:cover;display:block;border:1px solid var(--border)">`;
+  if (photoComing(ex))
+    return photoSlot(ex.photoId, box + ";border:1px solid var(--border)", { iconSize: ic });
+  if (opts.away && photoAway(ex))
+    return `<span title="${esc(T("ex.photoAway"))}" style="${box};border:1.5px dashed var(--border);display:flex;align-items:center;justify-content:center;color:var(--faint)">${icon("image-off", ic)}</span>`;
+  return "";
+}
+const nameThumb = (name, size = 34, opts = {}) => exThumb(libByName(name), size, opts);
+
 const photoUpRead = () => {
   try { const v = JSON.parse(localStorage.getItem(PHOTO_UP_KEY) || "[]"); return new Set(Array.isArray(v) ? v : []); }
   catch { return new Set(); }
@@ -7472,6 +7507,7 @@ function renderHistory(log, library, badges, settings, unit) {
       return `<div style="display:flex;align-items:center;border-bottom:1px solid var(--border-soft)">
         <button data-action="edit-entry" data-id="${e.id}" style="flex:1;min-width:0;text-align:left;padding:11px 4px 11px 14px;display:flex;gap:10px;align-items:center;color:var(--text)">
           <div style="width:4px;align-self:stretch;border-radius:2px;background:${colorFor(muscle)}"></div>
+          ${nameThumb(e.exercise, 34)}
           <div style="flex:1;min-width:0">
             <div style="display:flex;align-items:center;gap:5px;min-width:0">
               ${chain ? icon("link", 11, 'style="color:var(--blue);flex-shrink:0"') : ""}
@@ -8835,6 +8871,7 @@ function renderGoalRow(r, unit, last, active) {
   return `<div data-action="select-progress" data-name="${esc(r.name)}" style="padding:12px 14px;border-bottom:${last ? "none" : "1px solid var(--border-soft)"};background:${active ? "rgba(233,185,73,.05)" : "transparent"};cursor:pointer">
     <div style="display:flex;align-items:center;gap:8px">
       <div style="width:8px;height:8px;border-radius:4px;background:${colorFor(r.muscle)};flex-shrink:0"></div>
+      ${nameThumb(r.name, 28)}
       <div style="font-weight:600;font-size:14px;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(exLabel(r.name))}</div>
       <div class="pb-num" style="font-weight:700;font-size:17px;color:var(--text)">
         ${r.best ?? "—"}<span style="font-size:10.5px;color:var(--muted);font-weight:600"> ${metricUnit(r.kind || DEFAULT_KIND, unit)}</span>
@@ -11017,17 +11054,9 @@ function renderLibraryList(library) {
     <div class="pb-card" style="overflow:hidden">
       ${nestVariations(rows).map((ex, i, arr) => `<button data-action="open-exercise-window" data-name="${esc(ex.name)}" style="width:100%;display:flex;align-items:center;gap:10px;padding:11px 14px 11px ${nested(ex) ? 30 : 14}px;text-align:left;color:var(--text);border-bottom:${i < arr.length - 1 ? "1px solid var(--border-soft)" : "none"}">
         ${nested(ex) ? icon("corner-down-right", 13, 'style="color:var(--faint);flex-shrink:0;margin-right:-2px"') : ""}
-        ${ex.image
-          ? `<img src="${esc(ex.image)}" alt="" style="width:38px;height:38px;border-radius:8px;object-fit:cover;flex-shrink:0;border:1px solid var(--border)">`
-          : photoComing(ex)
-          /* on its way from the photo store: the slot fills itself in place
-             when it lands, and photoPass writes it into the row */
-          ? photoSlot(ex.photoId, "width:38px;height:38px;border-radius:8px;flex-shrink:0;border:1px solid var(--border)", { iconSize: 15 })
-          : photoAway(ex)
-          /* the same 38px the photo would have taken, so a shared library
-             does not comb itself into two differently-indented columns */
-          ? `<span title="${esc(T("ex.photoAway"))}" style="width:38px;height:38px;border-radius:8px;flex-shrink:0;border:1.5px dashed var(--border);display:flex;align-items:center;justify-content:center;color:var(--faint)">${icon("image-off", 15)}</span>`
-          : ""}
+        ${/* photo, on-its-way slot, or the dashed marker that keeps a shared
+             library from combing into two differently-indented columns */
+          exThumb(ex, 38, { away: true, iconSize: 15 })}
         <div style="flex:1;min-width:0">
           <div style="font-weight:600;font-size:14px">${nested(ex) ? esc(ex.variantName || ex.name) : esc(exLabelOf(ex))}${newFlag(ex)}</div>
           <div style="font-size:11.5px;color:var(--faint)">${esc(exFieldOf(ex, "equipment"))}</div>
@@ -12379,6 +12408,7 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
       <button data-action="edit-draft-entry" data-id="${e.id}" style="flex:1;min-width:0;display:flex;align-items:center;gap:10px;padding:12px 4px 12px 14px;text-align:left;color:var(--text)">
         ${chain ? icon("corner-down-right", 12, 'style="color:var(--blue);flex-shrink:0;margin-right:-4px"') : ""}
         <div style="width:4px;align-self:stretch;border-radius:2px;background:${colorFor(groupOfEntry(e, library))}"></div>
+        ${nameThumb(e.exercise, 34)}
         <div style="flex:1;min-width:0">
           <div style="font-weight:600;font-size:14px">${esc(exLabel(e.exercise))}</div>
           <div style="font-size:12px;color:${empty ? (res ? "var(--muted)" : "var(--gold)") : "var(--muted)"}">
@@ -14042,6 +14072,7 @@ function renderPickerList(library) {
         return `<div style="display:flex;align-items:center;border-bottom:${i < arr.length - 1 ? "1px solid var(--border-soft)" : "none"}">
         <button data-action="pick-exercise" data-id="${ex.id}" style="flex:1;min-width:0;display:flex;align-items:center;gap:10px;padding:12px 4px 12px ${nested ? 30 : 14}px;text-align:left;color:var(--text)">
           ${nested ? icon("corner-down-right", 13, 'style="color:var(--faint);flex-shrink:0;margin-right:-2px"') : ""}
+          ${exThumb(ex, 34)}
           <div style="flex:1;min-width:0">
             <div style="font-weight:600;font-size:14px">${nested ? esc(ex.variantName || exLabelOf(ex)) : esc(exLabelOf(ex))}</div>
             <div style="font-size:11.5px;color:var(--faint)">${esc(exFieldOf(ex, "equipment"))}</div>
@@ -14600,6 +14631,7 @@ function renderEntryFields(form, unit) {
   return fullScreen(70, `
     <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 6px">
       <button data-action="close-entry" style="color:var(--muted);padding:4px">${icon("arrow-left", 21)}</button>
+      ${nameThumb(f.exercise, 38)}
       <div style="flex:1">
         <div class="pb-num" style="font-size:18px;font-weight:700;line-height:1.15">${esc(exLabel(f.exercise))}</div>
         <div style="font-size:11.5px;color:var(--faint)">${planning ? T("plan.entrySub")

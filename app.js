@@ -3,21 +3,6 @@
    Faithful port of "AbsoluteMain.xlsx" (Powerbuilding Progressive Overload
    Tracker). All spreadsheet formulas are reimplemented in the helpers below.
 
-   ┌─────────────────────── PLACEHOLDER INDEX ───────────────────────────┐
-   │ Search for these tokens to swap in real assets later:               │
-   │                                                                     │
-   │ 1. PLACEHOLDER_BODY_GRAPH_SLOT: future measurement graphs, Body     │
-   │    tab bottom                                                       │
-   │                                                                     │
-   │ Done: the Home logo and the tab-header brand mark now use           │
-   │ logoC.png; the reserved Home banner slot was removed (the deload    │
-   │ alert is the only banner that renders there); the Profile's         │
-   │ Program Planner slot is gone (the deload calendar in Weekly Volume  │
-   │ covers the part that matters); PLACEHOLDER_RANKS_SLOT is gone:      │
-   │ the Progress tab's second segment is the strength standards         │
-   │ lookup now (see the STRENGTH STANDARDS block and standards.js).     │
-   └─────────────────────────────────────────────────────────────────────┘
-
    Spreadsheet → code map:
    · Week number        = MAX(1, INT((date-start)/7)+1)        → weekOf()
    · Muscle group       = INDEX/MATCH on Exercise Library      → muscleOf()
@@ -6197,10 +6182,6 @@ const chip = (children, color, style = "") =>
 
 const sectionTitle = (children, right = "") =>
   `<div style="display:flex;align-items:baseline;justify-content:space-between;margin:2px 2px 10px"><div class="pb-label">${children}</div>${right}</div>`;
-
-/* `token` names the slot in the source, for grep; only the caption is drawn */
-const placeholder = (token, height, children = "") =>
-  `<div class="pb-placeholder" style="height:${height}px"><div style="padding:8px">${children}</div></div>`;
 
 /* The unit dropdown that lives inside a weight field's label: tap "kg" and
    pick whatever the machine in front of you is stamped in. The calculator
@@ -15038,9 +15019,6 @@ function renderBody(body, unit) {
     <div style="font-size:12px;color:var(--faint);line-height:1.55;margin:0 4px 14px">
       ${T("body.footer")}
     </div>
-
-    <!-- PLACEHOLDER_BODY_GRAPH_SLOT: future measurement graphs -->
-    ${placeholder("PLACEHOLDER_BODY_GRAPH_SLOT", 90, T("body.graphSlot"))}
     <div style="height:14px"></div>
   </div>`;
 }

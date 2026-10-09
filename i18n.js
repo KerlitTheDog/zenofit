@@ -1136,6 +1136,11 @@ UI.en = {
   "body.notes": "Notes",
   "body.saveBtn": "Save check-in",
   "body.confirmDelete": "Delete this check-in?",
+  "body.trend": "Trend",
+  "body.chartTwo": "Two check-ins with this measurement and the line starts drawing.",
+  "body.chartTap": "Tap any point on the line to read the check-in behind it.",
+  "body.sincePrev": "{n} since {date}",
+  "body.firstWith": "The first check-in that measured this.",
 
   /* ── profile ────────────────────────────────────────────────────── */
   "profiles.title": "Profiles",
@@ -2402,6 +2407,11 @@ UI.uk = {
   "body.notes": "Нотатки",
   "body.saveBtn": "Зберегти замір",
   "body.confirmDelete": "Видалити цей замір?",
+  "body.trend": "Динаміка",
+  "body.chartTwo": "Два заміри з цим показником, і лінія почне малюватися.",
+  "body.chartTap": "Торкніться будь-якої точки на лінії, щоб побачити замір за нею.",
+  "body.sincePrev": "{n} порівняно з {date}",
+  "body.firstWith": "Перший замір цього показника.",
 
   "profiles.title": "Профілі",
   "profiles.confirmLeave": "Прибрати «{name}» із ваших профілів?\n\nЦей профіль належить комусь іншому, тож нічого з його даних не видаляється. Ви просто втрачаєте доступ до нього на всіх пристроях, де ввійшли.",
@@ -3659,6 +3669,11 @@ UI.sv = {
   "body.notes": "Anteckningar",
   "body.saveBtn": "Spara avstämning",
   "body.confirmDelete": "Ta bort den här avstämningen?",
+  "body.trend": "Trend",
+  "body.chartTwo": "Två avstämningar med det här måttet så börjar linjen ritas.",
+  "body.chartTap": "Tryck på en punkt på linjen för att läsa avstämningen bakom den.",
+  "body.sincePrev": "{n} sedan {date}",
+  "body.firstWith": "Den första avstämningen som mätte det här.",
 
   "profiles.title": "Profiler",
   "profiles.confirmLeave": "Ta bort ”{name}” från dina profiler?\n\nDen tillhör någon annan, så inget av deras raderas. Du förlorar bara åtkomsten, på alla enheter du är inloggad på.",

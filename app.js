@@ -1570,15 +1570,53 @@ function monthGrid(monthStr) {
 
 function bodyTrend(body) {
   const rows = [...body].sort((a, b) => (a.date < b.date ? -1 : 1));
-  const withBW = rows.filter((r) => r.weight !== "" && r.weight != null);
-  const first = withBW[0]?.weight ?? null;
-  const last = withBW[withBW.length - 1]?.weight ?? null;
+  /* read the way the graph under these stats reads them (bodyNum), so the
+     two can never disagree about which check-ins weighed anything */
+  const withBW = rows.filter((r) => bodyNum(r.weight) != null);
+  const first = withBW.length ? bodyNum(withBW[0].weight) : null;
+  const last = withBW.length ? bodyNum(withBW[withBW.length - 1].weight) : null;
   return {
     first, last,
     change: first != null && last != null && withBW.length > 1
       ? Math.round((last - first) * 10) / 10 : null,
     count: rows.length,
   };
+}
+
+/* ── THE BODY, AS A LINE ───────────────────────────────────────────────
+   What a check-in can measure, in the order its form asks. Bodyweight is in
+   the profile's unit, exactly as the stats above it are; the tape is in
+   whatever the person measures in (the form says cm/in and nothing is ever
+   converted), so those graphs carry no unit at all rather than a wrong one.
+   A measurement is a positive number or nothing: a blank field, a zero and
+   anything that will not parse are a check-in that did not measure it, not
+   a point at the bottom of the graph. A comma decimal is read as a point,
+   because a synced row may come from a phone that typed one. */
+const BODY_METRICS = ["weight", "waist", "chest", "arm", "thigh", "glutes"];
+const bodyNum = (v) => {
+  if (v == null || v === "") return null;
+  const n = +String(v).replace(",", ".");
+  return Number.isFinite(n) && n > 0 ? Math.round(n * 100) / 100 : null;
+};
+/* the form's own label ("Waist (cm/in)"), and the same with its bracket
+   taken off for a chip ("Waist"), so every language names a measurement
+   the way its form already does */
+const bodyMetricLabel = (m, unit) => T("body." + m, { unit });
+const bodyMetricShort = (m, unit) => bodyMetricLabel(m, unit).replace(/\s*\([^)]*\)\s*$/, "");
+/* One measurement's points, oldest first: what the line engine draws. */
+function bodySeries(body, m) {
+  return (body || [])
+    .filter((r) => r && bodyNum(r[m]) != null)
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : String(a.id).localeCompare(String(b.id))))
+    .map((r) => ({ x: fmtShort(r.date), y: bodyNum(r[m]), e: r, badge: null }));
+}
+/* Which measurements have anything to draw, and which one is on screen:
+   the one picked, while it still has data, else the first that does
+   (bodyweight, for nearly everybody). */
+function bodyChartInfo(body) {
+  const metrics = BODY_METRICS.filter((m) => (body || []).some((r) => r && bodyNum(r[m]) != null));
+  const metric = metrics.includes(ui.bodyMetric) ? ui.bodyMetric : (metrics[0] || null);
+  return { metrics, metric, series: metric ? bodySeries(body, metric) : [] };
 }
 
 /* ───────────────────────────── STORAGE ─────────────────────────────── */
@@ -6076,11 +6114,13 @@ const ui = {
   /* the progress graph is an instrument, not a picture: chartView is the
      slice of the series on screen (float index bounds), chartSel the entry
      whose dot is open, chartFull which graph has taken over the screen.
-     There are two graphs ("main" on the Progress tab and "ex" inside the
-     exercise window) and each keeps its own zoom and its own selection. */
-  chartView: { main: null, ex: null },   // {lo, hi}, null means "the whole series"
-  chartSel: { main: null, ex: null },    // id of the logged entry behind the selected dot
-  chartFull: null,      // "main" | "ex" | null
+     There are three graphs ("main" on the Progress tab, "ex" inside the
+     exercise window, "body" in Body measurements) and each keeps its own
+     zoom and its own selection. */
+  chartView: { main: null, ex: null, body: null },   // {lo, hi}, null means "the whole series"
+  chartSel: { main: null, ex: null, body: null },    // id of the entry (or check-in) behind the selected dot
+  chartFull: null,      // "main" | "ex" | "body" | null
+  bodyMetric: null,     // which measurement the body graph draws; null means the first with data
   calc: { weight: "", reps: "", unit: null },  // the 1RM calculator's fields
   calcResult: null,     // {weight, reps, oneRM, unit}, the last calculation
   goalEditing: null,    // exercise name whose goal is being edited
@@ -6125,7 +6165,8 @@ function resetTransient() {
   ui.progSeg = "progress";
   ui.progressSelected = null;
   ui.progressQ = "";
-  ui.chartView = { main: null, ex: null }; ui.chartSel = { main: null, ex: null }; ui.chartFull = null;
+  ui.chartView = { main: null, ex: null, body: null }; ui.chartSel = { main: null, ex: null, body: null }; ui.chartFull = null;
+  ui.bodyMetric = null;
   ui.goalEditing = null;
   ui.volGoalEditing = null;
   ui.libraryQ = "";
@@ -6286,13 +6327,14 @@ function setAccordion(card, open) {
 
 
 /* Chart data captured during render, drawn after mount. `line` is the
-   Progress tab's graph, `exLine` the copy inside the exercise window; they
-   are separate so one can be open on top of the other without either one
-   redrawing itself with the other's lift. */
-let chartState = { line: null, exLine: null, bar: null };
+   Progress tab's graph, `exLine` the copy inside the exercise window and
+   `bodyLine` the one in Body measurements; they are separate so one can be
+   open on top of another without either redrawing itself with the other's
+   series. */
+let chartState = { line: null, exLine: null, bodyLine: null, bar: null };
 
 /* the series a given graph is showing, by scope */
-const lineOf = (scope) => (scope === "ex" ? chartState.exLine : chartState.line);
+const lineOf = (scope) => (scope === "ex" ? chartState.exLine : scope === "body" ? chartState.bodyLine : chartState.line);
 
 /* ═══════════════════════ TRANSITION ENGINE ═════════════════════════
    The whole app re-renders on every interaction, so animations must only
@@ -6608,7 +6650,11 @@ function render() {
   const badges = computeBadges(log);
   const currentWeek = weekOf(todayStr(), settings.startDate);
   if (ui.volumeWeek == null) ui.volumeWeek = currentWeek;
-  chartState = { line: null, exLine: null, bar: null };
+  chartState = { line: null, exLine: null, bodyLine: null, bar: null };
+  /* here, not inside the Body window: the window is drawn after the
+     fullscreen chart in the overlay list below, and a fullscreen copy of
+     the body graph needs its series before then */
+  bodyChartPrep(body, unit);
 
   const tab = ui.tab;
   const titles = { log: T("title.log"), progress: T("title.progress"), library: T("title.library"), timer: T("title.timers"), chat: T("title.chat") };
@@ -8745,6 +8791,7 @@ function chartToolbarInner(full, scope = "main") {
 function renderPointDetail(scope = "main") {
   const line = lineOf(scope);
   if (!line) return "";
+  if (scope === "body") return renderBodyPointDetail(line);
   const p = line.data.find((d) => d.e.id === ui.chartSel[scope]);
   if (!p)
     return `<div style="font-size:11.5px;color:var(--faint);line-height:1.5;padding:6px 10px 2px;text-align:center">${T("chart.tapHint")}</div>`;
@@ -8785,6 +8832,58 @@ function renderPointDetail(scope = "main") {
   </div>`;
 }
 
+/* What one dot of the body graph is: the check-in behind it. The number,
+   how far it moved since the check-in before that measured the same thing
+   (in no colour: a smaller waist and a bigger arm are both the point, so
+   neither direction is good or bad), everything else that check-in
+   measured, its note, and the way into it to correct a number. */
+function renderBodyPointDetail(line) {
+  const i = line.data.findIndex((d) => d.e.id === ui.chartSel.body);
+  if (i < 0)
+    return `<div style="font-size:11.5px;color:var(--faint);line-height:1.5;padding:6px 10px 2px;text-align:center">${T("body.chartTap")}</div>`;
+  const p = line.data[i], r = p.e, prev = line.data[i - 1];
+  const unit = state.settings.units;
+  const u = line.unit ? " " + line.unit : "";
+  const delta = prev ? Math.round((p.y - prev.y) * 100) / 100 : null;
+  const since = prev
+    ? T("body.sincePrev", { n: (delta > 0 ? "+" : "") + delta + u, date: esc(fmtShort(prev.e.date)) })
+    : T("body.firstWith");
+  const others = BODY_METRICS
+    .filter((m) => m !== line.metric && bodyNum(r[m]) != null)
+    .map((m) => chip(`${esc(bodyMetricShort(m, unit))} ${bodyNum(r[m])}${m === "weight" ? " " + unit : ""}`))
+    .join("");
+  return `<div class="pb-card2" style="margin:6px 4px 2px;padding:12px 13px">
+    <div style="display:flex;align-items:baseline;gap:8px">
+      <div style="font-weight:700;font-size:14px;flex:1;min-width:0">${fmtDate(r.date, { weekday: "short", day: "numeric", month: "short", year: "numeric" })}</div>
+      <div class="pb-num" style="font-weight:700;font-size:19px;color:var(--gold);flex-shrink:0">${p.y}${line.unit ? `<span style="font-size:10.5px;color:var(--muted);font-weight:600"> ${esc(line.unit)}</span>` : ""}</div>
+    </div>
+    <div style="font-size:12.5px;color:var(--muted);margin-top:3px">${since}</div>
+    ${others ? `<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:9px">${others}</div>` : ""}
+    ${r.notes ? `<div style="font-size:12.5px;color:var(--text);margin-top:9px;line-height:1.5">“${esc(r.notes)}”</div>` : ""}
+    ${syncReadOnly() ? "" : `<button data-action="edit-body" data-id="${esc(r.id)}" class="pb-btn pb-ghost" style="width:100%;padding:9px 0;font-size:12.5px;margin-top:10px">${icon("pencil", 13)} ${T("body.editCheckin")}</button>`}
+  </div>`;
+}
+
+/* The body graph's series, worked out before the overlays are drawn (see
+   the call in render()). A dot whose check-in is gone cannot stay
+   selected, and a fullscreen copy of a graph that is no longer on screen
+   (the window closed, or the measurement now has under two points) folds
+   away rather than waiting to spring open the next time. */
+function bodyChartPrep(body, unit) {
+  if (ui.showBody) {
+    const { metric, series } = bodyChartInfo(body);
+    if (series.length >= 2) {
+      chartState.bodyLine = {
+        data: series, goal: null, metric,
+        unit: metric === "weight" ? unit : "",
+        title: bodyMetricLabel(metric, unit), sub: T("title.body"),
+      };
+    }
+    if (ui.chartSel.body && !series.some((d) => d.e.id === ui.chartSel.body)) ui.chartSel.body = null;
+  }
+  if (!chartState.bodyLine && ui.chartFull === "body") ui.chartFull = null;
+}
+
 /* Fullscreen: the same chart, the same selection, just given the whole
    phone. Opened from the toolbar, closed back to exactly where it was. */
 function renderChartFull() {
@@ -8795,8 +8894,8 @@ function renderChartFull() {
     <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px;border-bottom:1px solid var(--border-soft)">
       <button data-action="chart-exit-full" data-scope="${scope}" style="color:var(--muted);padding:4px">${icon("x", 21)}</button>
       <div style="flex:1;min-width:0">
-        <div class="pb-num" style="font-size:17px;font-weight:700;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(exLabel(line.name))}</div>
-        <div style="font-size:11.5px;color:var(--faint)">${metricLabel(line.kind || (line.cardio ? "cardio" : DEFAULT_KIND), line.unit)}</div>
+        <div class="pb-num" style="font-size:17px;font-weight:700;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(line.title != null ? line.title : exLabel(line.name))}</div>
+        <div style="font-size:11.5px;color:var(--faint)">${line.sub != null ? esc(line.sub) : metricLabel(line.kind || (line.cardio ? "cardio" : DEFAULT_KIND), line.unit)}</div>
       </div>
     </div>
     <div style="padding:10px 8px 0">${chartToolbar(true, scope)}</div>
@@ -14997,11 +15096,12 @@ function renderBody(body, unit) {
           <div style="flex:1">
             <div style="font-weight:600;font-size:14px">${fmtDate(r.date)}</div>
             <div style="font-size:12px;color:var(--muted);margin-top:2px">
-              ${[["Waist", r.waist], ["Chest", r.chest], ["Arm", r.arm], ["Thigh", r.thigh], ["Glutes", r.glutes]]
-                .filter(([, v]) => v).map(([k, v]) => `${k} ${esc(v)}`).join(" · ") || "—"}
+              ${/* named the way the form names them, in the app's language:
+                    these were English words written into the template */
+                BODY_METRICS.slice(1).filter((m) => bodyNum(r[m]) != null).map((m) => `${esc(bodyMetricShort(m, unit))} ${bodyNum(r[m])}`).join(" · ") || "—"}
             </div>
           </div>
-          ${r.weight ? `<div class="pb-num" style="font-weight:700;font-size:18px">${esc(r.weight)}<span style="font-size:10.5px;color:var(--muted)"> ${unit}</span></div>` : ""}
+          ${bodyNum(r.weight) != null ? `<div class="pb-num" style="font-weight:700;font-size:18px">${bodyNum(r.weight)}<span style="font-size:10.5px;color:var(--muted)"> ${unit}</span></div>` : ""}
           ${icon("chevron-right", 15, 'style="color:var(--faint)"')}
         </button>`).join("")}
       </div>`;
@@ -15014,12 +15114,48 @@ function renderBody(body, unit) {
       ${stat(T("body.checkins"), t.count)}
     </div>
 
+    ${renderBodyTrend(body, unit)}
+
     ${list}
 
     <div style="font-size:12px;color:var(--faint);line-height:1.55;margin:0 4px 14px">
       ${T("body.footer")}
     </div>
     <div style="height:14px"></div>
+  </div>`;
+}
+
+/* ── THE TREND, AS A GRAPH ────────────────────────────────────────────
+   The stats above say where bodyweight started and where it is; this is
+   how it got there, and the same for every tape measurement. It is the
+   Progress tab's graph (the "body" scope of the line engine, its series
+   put in chartState.bodyLine by bodyChartPrep), so pinch, pan, fullscreen
+   and tap-a-dot all behave as they do for a lift. A chip per measurement
+   that has ever been taken, and none when only one has: a single chip is a
+   button with nothing to choose. Nothing at all with no measurement yet,
+   since the empty card below already says what a check-in is. Like the
+   rest of this window it writes nothing: picking a measurement is looking. */
+function renderBodyTrend(body, unit) {
+  const { metrics, metric, series } = bodyChartInfo(body);
+  if (!metric) return "";
+  const chips = metrics.length > 1
+    ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px">
+        ${metrics.map((m) => {
+          const on = m === metric;
+          return `<button data-action="body-metric" data-id="${m}" aria-pressed="${on}" class="pb-chip" style="padding:6px 12px;font-size:12.5px;color:${on ? "var(--gold-ink)" : "var(--muted)"};background:${on ? "var(--gold)" : "var(--surface2)"};border-color:${on ? "var(--gold)" : "var(--border)"}">${esc(bodyMetricShort(m, unit))}</button>`;
+        }).join("")}
+      </div>`
+    : "";
+  return `<div style="margin-bottom:16px">
+    ${sectionTitle(T("body.trend"), `<span style="font-size:11px;color:var(--faint)">${esc(bodyMetricLabel(metric, unit))}</span>`)}
+    ${chips}
+    <div class="pb-card" style="padding:14px 8px 8px">
+      ${series.length >= 2
+        ? `${chartToolbar(false, "body")}
+           <div data-linechart="body" style="position:relative;width:100%;height:200px;touch-action:pan-y"></div>
+           <div data-linedetail="body">${renderPointDetail("body")}</div>`
+        : `<div style="height:110px;display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:13px;text-align:center;padding:0 24px;line-height:1.5">${T("body.chartTwo")}</div>`}
+    </div>
   </div>`;
 }
 
@@ -16735,8 +16871,9 @@ function drawCharts() {
       chart drawn twice; they can't drift apart.
 
    The scope is the value of the [data-linechart] attribute: "main" for the
-   Progress tab's graph and "ex" for the copy at the bottom of the exercise
-   window. Each scope has its own series (chartState.line / .exLine), its
+   Progress tab's graph, "ex" for the copy at the bottom of the exercise
+   window and "body" for a measurement in the Body window. Each scope has its
+   own series (chartState.line / .exLine / .bodyLine), its
    own zoom (ui.chartView[scope]) and its own selected dot, so the exercise
    window can sit on top of the Progress tab without either one hijacking
    the other. Every function down here takes the scope with it.
@@ -16757,7 +16894,7 @@ let chartClipId = 0;              // unique <clipPath> ids, one per painted copy
 /* The last vertical domain each scope was actually painted with, so a gesture
    that starts moving the y axis has somewhere to start from. It is written on
    every paint, which always happens before a finger can land. */
-const chartYSeen = { main: null, ex: null };
+const chartYSeen = { main: null, ex: null, body: null };
 
 /* ── how far you're allowed to go ─────────────────────────────────────
    The graph used to stop dead at the first and last session, which reads
@@ -18240,6 +18377,8 @@ const actions = {
     }
   },
   "open-body": () => { ui.showBody = true; render(); },
+  /* another measurement is another series: its zoom and its dot start over */
+  "body-metric": (el) => { ui.bodyMetric = el.dataset.id; ui.chartView.body = null; ui.chartSel.body = null; render(); },
   "close-body": () => { ui.showBody = false; ui.bodyForm = null; render(); },
   "new-body": () => { ui.bodyForm = newBodyRow(); ui.bodyFormWasNew = true; render(); },
   /* There is only ever one workout for today (see sheetForDay), and these two
@@ -19973,7 +20112,7 @@ const READ_OK = new Set([
   "cal-day", "cal-next", "cal-prev", "vol-next", "vol-prev", "toggle-accordion",
   "open-exercise-window", "exwin-close", "exwin-cancel", "open-log-day", "log-day",
   "open-picker", "close-picker", "overlay-close", "close-worksheet", "close-entry",
-  "close-body", "open-body", "close-storage", "open-storage", "storage-export", "storage-share",
+  "close-body", "open-body", "body-metric", "close-storage", "open-storage", "storage-export", "storage-share",
   "storage-adopt", "open-groups",
   "open-profile", "close-profile", "open-profiles", "close-profiles", "profile-switch",
   "profile-menu", "profile-add", "profile-duplicate", "profile-delete", "profile-form-save",

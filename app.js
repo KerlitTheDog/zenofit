@@ -1583,6 +1583,38 @@ function bodyTrend(body) {
   };
 }
 
+/* The bodyweight a daily weigh-in is actually telling you. One reading is
+   water, salt and last night's dinner and can sit a kilo or two off either
+   way, so somebody weighing in most days reads the AVERAGE of the last
+   seven days (today included; a day weighed twice counts once, as its
+   mean) and how far it moved against the seven days before: this week's
+   average minus last week's, which is the number a cut is steered by.
+   Each needs two weighed days or it is a reading, not an average, and
+   Latest already shows that; so a once-a-week check-in never sees this,
+   and neither does somebody who stopped weighing a while ago. In the
+   profile's unit, like every bodyweight here; the percentage is of last
+   week's average. */
+function bodyWeekly(body, today = todayStr()) {
+  const byDay = {};
+  for (const r of body || []) {
+    const w = r && bodyNum(r.weight);
+    if (w != null && r.date) (byDay[r.date] = byDay[r.date] || []).push(w);
+  }
+  const mean = (a) => a.reduce((s, v) => s + v, 0) / a.length;
+  const week = (from, to) => Object.keys(byDay).filter((d) => d >= from && d <= to).map((d) => mean(byDay[d]));
+  const cur = week(addDays(today, -6), today);
+  if (cur.length < 2) return null;
+  const prev = week(addDays(today, -13), addDays(today, -7));
+  const avg = mean(cur);
+  const rate = prev.length >= 2 ? avg - mean(prev) : null;
+  return {
+    avg: Math.round(avg * 10) / 10,
+    days: cur.length,
+    rate: rate == null ? null : Math.round(rate * 100) / 100,
+    pct: rate == null ? null : Math.round((rate / mean(prev)) * 1000) / 10,
+  };
+}
+
 /* ── THE BODY, AS A LINE ───────────────────────────────────────────────
    What a check-in can measure, in the order its form asks. Bodyweight is in
    the profile's unit, exactly as the stats above it are; the tape is in
@@ -15084,6 +15116,8 @@ function renderBodyWindow(body, unit) {
 
 function renderBody(body, unit) {
   const t = bodyTrend(body);
+  const wk = bodyWeekly(body);
+  const signed = (n) => (n > 0 ? "+" : "") + n;
   const rows = [...body].sort((a, b) => (a.date < b.date ? 1 : -1));
 
   const list = rows.length === 0
@@ -15107,12 +15141,16 @@ function renderBody(body, unit) {
       </div>`;
 
   return `<div class="" style="padding:12px 16px 0">
-    <div style="display:flex;gap:8px;margin-bottom:16px">
+    <div style="display:flex;gap:8px;margin-bottom:${wk ? 8 : 16}px">
       ${stat(T("body.starting"), t.first ?? "—", unit)}
       ${stat(T("body.latest"), t.last ?? "—", unit)}
-      ${stat(T("body.change"), t.change == null ? "—" : (t.change > 0 ? "+" : "") + t.change, unit, t.change > 0 ? "var(--green)" : t.change < 0 ? "var(--blue)" : "")}
+      ${stat(T("body.change"), t.change == null ? "—" : signed(t.change), unit, t.change > 0 ? "var(--green)" : t.change < 0 ? "var(--blue)" : "")}
       ${stat(T("body.checkins"), t.count)}
     </div>
+    ${wk ? `<div style="display:flex;gap:8px;margin-bottom:16px">
+      ${stat(T("body.avg7"), wk.avg, `${unit} · ${T("body.avgDays", { n: wk.days })}`)}
+      ${stat(T("body.perWeek"), wk.rate == null ? "—" : signed(wk.rate), wk.rate == null ? T("body.perWeekWait") : `${unit} · ${signed(wk.pct)}%`, wk.rate > 0 ? "var(--green)" : wk.rate < 0 ? "var(--blue)" : "")}
+    </div>` : ""}
 
     ${renderBodyTrend(body, unit)}
 

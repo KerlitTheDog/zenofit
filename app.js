@@ -8314,7 +8314,7 @@ function renderProgress(log, library, goals, badges, settings, unit) {
 }
 
 /* ═════════════════════ STRENGTH STANDARDS ══════════════════════════
-   The second segment of the Progress tab. The first segment is you
+   The third segment of the Progress tab. The second segment is you
    against yourself; this one is you against everybody else: the
    StrengthLevel tables in standards.js, which say what a man or a woman
    of a given bodyweight lifts at each of five levels. The app draws
@@ -17206,7 +17206,6 @@ function paintLineChart(wrap) {
       const [a, b] = [...chartPointers.values()];
       const dist = Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
       const g = chartGesture;
-      const span0 = g.win.hi - g.win.lo;
       /* replayed from where the pinch started rather than accumulated frame
          by frame, so pinching out and back in lands where it began */
       ui.chartView[scope] = { lo: g.win.lo, hi: g.win.hi, yLo: g.y.lo, yHi: g.y.hi };
@@ -20280,7 +20279,7 @@ function handleBind(el) {
     else if (bind === "pic.date" && picDays().includes(v)) { s.date = v; render(); picBuild(); }
     else if (bind === "pic.month" && picMonths().includes(v)) { s.month = v; render(); picBuild(); }
   } else if (bind === "chatFind") {
-    /* Lower-cased as it is typed, for the reason `acctName` gives: it is
+    /* Lower-cased as it is typed, for the reason `loginName` gives: it is
        compared as `username_lc` anyway, and a name that reads back
        differently from what you typed is a name you will mistrust. Same
        rule about the caret, too: NOTHING here calls render(), because

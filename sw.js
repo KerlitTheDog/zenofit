@@ -8,7 +8,7 @@
    Scope note: this file must stay in the repo root. A service worker can only
    control pages at or below its own URL, and the app lives at /zenofit/.       */
 
-const VERSION = "zenofit-v52";
+const VERSION = "zenofit-v53";
 /* Fetched photos, keyed by id (see the PHOTOS block in app.js). Not part of
    the shell and not versioned with it: a photo's id IS its content, so a
    new build has nothing to invalidate, and clearing it on every deploy
@@ -27,28 +27,20 @@ const SHELL = [
   "./lucide.min.js",
   "./fonts/barlow-400-latin-ext.woff2",
   "./fonts/barlow-400-latin.woff2",
-  "./fonts/barlow-400-vietnamese.woff2",
   "./fonts/barlow-500-latin-ext.woff2",
   "./fonts/barlow-500-latin.woff2",
-  "./fonts/barlow-500-vietnamese.woff2",
   "./fonts/barlow-600-latin-ext.woff2",
   "./fonts/barlow-600-latin.woff2",
-  "./fonts/barlow-600-vietnamese.woff2",
   "./fonts/barlow-700-latin-ext.woff2",
   "./fonts/barlow-700-latin.woff2",
-  "./fonts/barlow-700-vietnamese.woff2",
   "./fonts/barlow-condensed-500-latin-ext.woff2",
   "./fonts/barlow-condensed-500-latin.woff2",
-  "./fonts/barlow-condensed-500-vietnamese.woff2",
   "./fonts/barlow-condensed-600-latin-ext.woff2",
   "./fonts/barlow-condensed-600-latin.woff2",
-  "./fonts/barlow-condensed-600-vietnamese.woff2",
   "./fonts/barlow-condensed-700-latin-ext.woff2",
   "./fonts/barlow-condensed-700-latin.woff2",
-  "./fonts/barlow-condensed-700-vietnamese.woff2",
   "./logoC.png",
   "./icon-192.png",
-  "./icon-512.png",
   "./manifest.webmanifest",
 ];
 
@@ -94,7 +86,7 @@ function closeUnmatchedTimers() {
    cache that already matched it, answered "nothing changed", and the page
    carried on running the old build. When a re-fetched SHELL file comes back
    different from the copy just served, every window hears so (shell-updated,
-   see updateReady in index.html), which is the one moment anything knows. */
+   see updateReady in sw-register.js), which is the one moment anything knows. */
 const SHELL_URLS = new Set(SHELL.map((p) => new URL(p, self.location.href).href));
 
 function tellWindows(msg) {

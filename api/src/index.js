@@ -570,13 +570,6 @@ async function route(request, env, url, ctx) {
     if (res) return res;
   }
 
-  if (p === "/v1/me" && method === "PUT") {
-    const body = await readJson(request).catch(() => ({}));
-    const name = cleanName(body.displayName);
-    await env.DB.prepare("UPDATE users SET display_name = ? WHERE id = ?").bind(name, user.id).run();
-    return json({ userId: user.id, displayName: name });
-  }
-
   /* ---- profiles ---------------------------------------------------------- */
 
   /* Everything you can see: what you made, plus what you joined.

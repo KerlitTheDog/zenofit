@@ -444,11 +444,7 @@
    * 2.8 seconds. Sending an absolute time computed from Date.now() hands that
    * error straight to the server, and the alarm lands early or late by exactly
    * that much. Sending a duration lets the server resolve it against its own
-   * clock, and the phone's is never consulted.
-   *
-   * lastDrift is kept for diagnostics only. Nothing depends on it. */
-  let lastDrift = null;
-
+   * clock, and the phone's is never consulted. */
   async function scheduleTimer(opts) {
     if (!hasDevice()) return null;
 
@@ -469,17 +465,12 @@
     else return null;
 
     try {
-      const res = await call("POST", "/v1/timers", payload);
-      if (res && typeof res.serverNow === "number") lastDrift = res.serverNow - Date.now();
-      return res;
+      return await call("POST", "/v1/timers", payload);
     } catch (e) {
       console.warn("scheduleTimer failed", e);
       return null;
     }
   }
-
-  /* Positive means the server is ahead of this device. Diagnostics only. */
-  const clockDrift = () => lastDrift;
 
   async function cancelTimer(timerId) {
     if (!timerId || !hasDevice()) return false;
@@ -575,10 +566,7 @@
      the one that moved and six round trips is how that lands half-applied. */
   const setProfileOrder = (ids) => call("POST", "/v1/profiles/order", { order: ids });
   const deleteProfile  = (id) => call("DELETE", "/v1/profiles/" + id);
-  const listSeeds      = (id) => call("GET", "/v1/profiles/" + id + "/seeds");
-  const createSeed     = (id, level) => call("POST", "/v1/profiles/" + id + "/seeds", { level: level || "write" });
   const rotateSeeds    = (id, level) => call("POST", "/v1/profiles/" + id + "/seeds", { level: level || "write", rotate: true });
-  const revokeSeed     = (seed) => call("DELETE", "/v1/seeds/" + encodeURIComponent(seed));
   const joinWithSeed   = (seed) => call("POST", "/v1/join", { seed });
   const listGrants     = (id) => call("GET", "/v1/profiles/" + id + "/grants");
   const revokeGrant    = (id, userId) => call("DELETE", "/v1/profiles/" + id + "/grants/" + userId);
@@ -691,10 +679,10 @@
     isStandalone, isIOS, pushBlockedReason,
     enablePush, refilePush, disablePush, pushEnabled, testPush, pushEndpoint, setPushPrefs, pushStatus,
     photoId, photoHave, photoPut, photoGet,
-    scheduleTimer, cancelTimer, clockDrift,
+    scheduleTimer, cancelTimer,
     pullChanges, pushChanges,
     listProfiles, createProfile, renameProfile, deleteProfile, setProfileOrder,
-    listSeeds, createSeed, rotateSeeds, revokeSeed, joinWithSeed,
+    rotateSeeds, joinWithSeed,
     listGrants, revokeGrant, setGrantLevel, leaveProfile,
     searchUsers, listChats, openChat, fetchMessages, sendMessage, unsendMessage, uploadChatPhoto, discardChatPhoto,
     markChatRead, muteChat, leaveChat, listBlocks, blockUser, unblockUser,

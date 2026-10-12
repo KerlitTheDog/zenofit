@@ -1,8 +1,9 @@
 (function () {
   if (!("serviceWorker" in navigator)) return;
 
-  /* Phase 5 will read this: sw.js posts notification clicks here so the app
-     can jump to the timer that fired. Queued until app.js claims it.
+  /* sw.js posts notification clicks here so the app can jump to whatever
+     the notification was about. Queued until app.js claims it
+     (claimSWClicks).
      `updated` says a newer build than the one running is ready (see
      updateReady), and `wantReload` that somebody asked for it: Refresh in
      app.js reads both. */
@@ -14,6 +15,12 @@
     if (typeof h === "function") h(e.data.data);
     else window.__zenofitSW.pendingClicks.push(e.data.data);
   });
+
+  /* The banner speaks the app's language: T() is i18n.js's, loaded before
+     this file. The English is only for a page where it is not there. */
+  function say(key, en) {
+    try { return typeof T === "function" ? T(key) : en; } catch (e) { return en; }
+  }
 
   function banner() {
     if (document.getElementById("sw-update-bar")) return;
@@ -27,9 +34,9 @@
       "padding:10px 12px;border-radius:12px;font:500 14px/1.3 system-ui,sans-serif;" +
       "background:#1e2027;color:#eaeaf0;box-shadow:0 6px 24px rgba(0,0,0,.45);";
     var msg = document.createElement("span");
-    msg.textContent = "A new version is ready.";
+    msg.textContent = say("update.ready", "A new version is ready.");
     var btn = document.createElement("button");
-    btn.textContent = "Reload";
+    btn.textContent = say("update.reload", "Reload");
     btn.style.cssText =
       "flex:0 0 auto;border:0;border-radius:9px;padding:8px 14px;" +
       "font:600 14px system-ui,sans-serif;background:#4f7cff;color:#fff;";
@@ -40,8 +47,7 @@
       else reloadOnce();
     };
     var dismiss = document.createElement("button");
-    dismiss.textContent = "Later";
-    dismiss.setAttribute("aria-label", "Dismiss");
+    dismiss.textContent = say("update.later", "Later");
     dismiss.style.cssText =
       "flex:0 0 auto;border:0;background:none;color:#9aa0ad;" +
       "font:500 14px system-ui,sans-serif;padding:8px 4px;";

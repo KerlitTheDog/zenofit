@@ -579,7 +579,7 @@ const metricOf = (e) => {
 const metricUnit = (k, unit) =>
   k === "cardio" ? T("unit.pts")
     : k === "bodyweight" ? T("unit.reps")
-    : k === "hold" ? T("unit.secs")
+    : k === "hold" ? ""
     : unit || state.settings.units;
 
 /* and what to call it: an estimated one-rep max is a claim only the
@@ -655,9 +655,23 @@ const scoreWorthShowing = (kind) => kind === "strength" || kind === "cardio";
 /* `unit` omitted falls back to the default; `unit` given as "" means print
    no unit at all, which is how a row of sets says "kg" once at the end
    instead of after every one of them (planTargetLine). */
+/* A HOLD IS READ AS A CLOCK. It is stored in whole seconds (s.secs) and
+   always has been, but nobody thinks of a dead hang as "80 s": it is 1:20,
+   the same face the timers and the stopwatch wear. So every hold number the
+   app prints goes through these two, and needs no unit after it, which is
+   why metricUnit has none for a hold. A signed figure (a difference) keeps
+   its sign in front of the clock. */
+const fmtHold = (n) => (+n < 0 ? "-" : "") + fmtClock(Math.abs(+n || 0));
+const metricShow = (k, m) => (k === "hold" && m != null && m !== "" && isFinite(+m) ? fmtHold(m) : m);
+/* ...and the same figure ready for a sentence: "87.5 kg", "12 reps", "1:20" */
+const metricWithUnit = (k, m, unit) => {
+  const u = metricUnit(k, unit);
+  return u ? `${metricShow(k, m)} ${u}` : `${metricShow(k, m)}`;
+};
+
 const setLine = (s, kind = DEFAULT_KIND, unit) =>
   kind === "bodyweight" ? T("unit.nReps", { n: esc(s.reps) })
-    : kind === "hold" ? T("unit.nSecs", { n: esc(s.secs) })
+    : kind === "hold" ? fmtHold(s.secs)
     : `${esc(s.reps)} × ${esc(s.weight)}${(unit == null ? state.settings.units : unit) ? " " + (unit == null ? state.settings.units : unit) : ""}`;
 
 const filledSets = (e) => (e.setList || []).filter((s) => setHasData(s, kindOf(e)));
@@ -2528,6 +2542,7 @@ function patch(p) { state = { ...state, ...p }; persist(); render(); }
    pointing at rows that no longer exist. */
 function closeEverything() {
   ui.workoutSheet = null; ui.entryForm = null; ui.setForm = null; ui.picking = false;
+  ui.targetForm = null; ui.swLog = null;
   ui.pickerQ = ""; ui.pickerQuick = null;
   ui.exWin = null; ui.exWinEdit = false; ui.exWinDraft = null; ui.exWinAttach = null;
   ui.showProfile = false; ui.profileDraft = null; ui.profileLangWas = null;
@@ -5774,6 +5789,7 @@ function importBackup(text) {
 
   /* every open form points at records that no longer exist */
   ui.workoutSheet = null; ui.entryForm = null; ui.setForm = null;
+  ui.targetForm = null; ui.swLog = null;
   ui.bodyForm = null; ui.exWin = null; ui.exWinDraft = null; ui.exWinAttach = null;
   ui.presetForm = null; ui.presetView = null; ui.groupForm = null;
   ui.groupSheet = false; ui.timerForm = null; ui.deloadForm = null;
@@ -6101,6 +6117,9 @@ const ui = {
   pickerFilter: "All",  // one muscle group, or All: the picker's chip strip (see pickerChips)
   entryForm: null,      // {f, isDraft}
   setForm: null,        // {s, isNew}, the single-set editor inside a Detailed entry
+  targetForm: null,     // {sets, unit, minutes, intensity}, planning the open entry's sets (renderTargetForm)
+  flashSets: null,      // [set id], rows to light up on the next frame (flashSetRows)
+  swLog: null,          // {date, mode, picks}, putting the stopwatch's time on a lift (renderSwLog)
   timerForm: null,      // {t, isNew}, the custom-timer editor
   timerToast: null,     // {id,name}, "time's up" banner, shown on any tab
   exWin: null,          // exercise detail window: {name} for an existing lift, or {isNew:true}
@@ -6248,6 +6267,41 @@ const esc = (s) => String(s ?? "")
    (est. 1RM, volume, PRs, goals, graphs) reads one canonical form.     */
 
 const NUM = 'type="text" inputmode="decimal" autocomplete="off" data-num';
+
+/* ── THE TIME BOX: typed like a phone's timer ─────────────────────────
+   A hold used to be typed in seconds, so a dead hang of a minute and twenty
+   had to be turned into 80 in your head first. DUR is one field with a
+   number pad whose digits fill in from the right as h:mm:ss, the way a
+   kitchen or phone timer is set: 4, 5 reads 0:45 and 1, 2, 0 reads 1:20.
+   No hours box to skip past, no minutes box to remember to fill.
+
+   What is STORED does not change: whole seconds, in the same field as
+   ever, so nothing on record moves and everything that reads a hold reads
+   it exactly as before. "80" typed is 0:80, which is 80 seconds and comes
+   back as 1:20 the next time the field is drawn. handleBind does the
+   rewriting (see `data-dur` there); the field is drawn with durValue. */
+const DUR = 'type="text" inputmode="numeric" autocomplete="off" data-dur';
+const durClean = (d) => String(d || "").replace(/\D/g, "").replace(/^0+/, "").slice(0, 6);
+/* digits → seconds: the last two are seconds, the two before minutes */
+const durFromDigits = (d) => {
+  const n = +durClean(d) || 0;
+  return Math.floor(n / 10000) * 3600 + (Math.floor(n / 100) % 100) * 60 + (n % 100);
+};
+/* digits → what the box shows: "45" 0:45, "120" 1:20, "10000" 1:00:00 */
+const durShow = (d) => {
+  const p = durClean(d);
+  if (!p) return "";
+  const q = p.padStart(3, "0"), ss = q.slice(-2), rest = q.slice(0, -2);
+  return rest.length > 2 ? `${rest.slice(0, -2)}:${rest.slice(-2)}:${ss}` : `${+rest}:${ss}`;
+};
+/* stored seconds → the box, normalised (80 → 1:20) */
+const durValue = (secs) => {
+  const t = Math.round(+secs);
+  if (!(t > 0)) return "";
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), s = t % 60;
+  const two = (n) => String(n).padStart(2, "0");
+  return durShow(h ? `${h}${two(m)}${two(s)}` : `${m}${two(s)}`);
+};
 
 /* the stored form of a typed number: 82,5 → 82.5 */
 const decimalize = (v) => String(v ?? "").replace(/,/g, ".");
@@ -6816,6 +6870,8 @@ function render() {
   if (ui.entryForm) html += renderEntryFields(ui.entryForm, unit);
   /* the set editor speaks the unit of the exercise it belongs to, not the default */
   if (ui.setForm) html += renderSetForm(ui.setForm, ui.entryForm ? unitOf(ui.entryForm.f) : unit);
+  if (ui.targetForm) html += renderTargetForm();
+  if (ui.swLog) html += renderSwLog(library, log);
   if (ui.timerForm) html += renderTimerForm(ui.timerForm);
   if (ui.exWin) html += renderExerciseWindow(library);
   /* after the exercise window, never before it: the picker is opened from
@@ -6873,6 +6929,7 @@ function render() {
      scroll is measured against */
   fitScrollFooters();
   if (ui.logJump) flashLogDay();
+  if (ui.flashSets) flashSetRows();
   if (ui.stdJump) flashStdResult();
   /* after the icons too: the send button and the bubbles own glyphs are
      part of what the scroll height is measured from, and the composer has
@@ -7592,7 +7649,7 @@ function renderHistory(log, library, badges, settings, unit) {
             ${e.notes ? `<div style="font-size:11.5px;color:var(--faint);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">“${esc(e.notes)}”</div>` : ""}
           </div>
           <div style="text-align:right;flex-shrink:0">
-            ${b.metric != null ? `<div class="pb-num" style="font-weight:700;font-size:17px;color:${b.badge === "pr" ? "var(--gold)" : "var(--text)"}">${b.metric}<span style="font-size:10.5px;color:var(--muted);font-weight:600"> ${metricUnit(kindOf(e), unit)}</span></div>` : ""}
+            ${b.metric != null ? `<div class="pb-num" style="font-weight:700;font-size:17px;color:${b.badge === "pr" ? "var(--gold)" : "var(--text)"}">${metricShow(kindOf(e), b.metric)}<span style="font-size:10.5px;color:var(--muted);font-weight:600"> ${metricUnit(kindOf(e), unit)}</span></div>` : ""}
             ${BADGE_SHORT[b.badge] ? `<div style="font-size:10.5px;font-weight:700;color:${b.badge === "pr" ? "var(--gold)" : "var(--muted)"}">${BADGE_SHORT[b.badge]}</div>` : ""}
           </div>
         </button>
@@ -8846,7 +8903,7 @@ function renderPointDetail(scope = "main") {
     <div style="display:flex;align-items:baseline;gap:8px">
       <div style="font-weight:700;font-size:14px;flex:1;min-width:0">${fmtDate(e.date, { weekday: "short", day: "numeric", month: "short", year: "numeric" })}</div>
       ${p.badge && BADGE_SHORT[p.badge] ? chip(BADGE_SHORT[p.badge], p.badge === "pr" ? "var(--gold)" : "") : ""}
-      <div class="pb-num" style="font-weight:700;font-size:19px;color:var(--gold);flex-shrink:0">${p.y}<span style="font-size:10.5px;color:var(--muted);font-weight:600"> ${line.unit}</span></div>
+      <div class="pb-num" style="font-weight:700;font-size:19px;color:var(--gold);flex-shrink:0">${metricShow(line.kind, p.y)}<span style="font-size:10.5px;color:var(--muted);font-weight:600"> ${line.unit}</span></div>
     </div>
     <div style="font-size:12.5px;color:var(--muted);margin-top:3px">${entrySummary(e, eUnit, true)}</div>
     ${sets.length ? `<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:9px">
@@ -8979,15 +9036,17 @@ function renderGoalRow(r, unit, last, active) {
   const editing = ui.goalEditing === r.name;
   const hit = r.goal != null && r.best != null && r.best >= r.goal;
   const status = r.goal == null ? T("prog.setGoal") : hit ? T("prog.goalHit") : r.best == null ? T("prog.logToStart")
-    : T("prog.goalToGo", { n: Math.round((r.goal - r.best) * 10) / 10, unit: metricUnit(r.kind || DEFAULT_KIND, unit) });
+    : T("prog.goalToGo", { n: metricWithUnit(r.kind || DEFAULT_KIND, Math.round((r.goal - r.best) * 10) / 10, unit) });
 
   const goalControls = editing
     ? `<span data-stopprop style="display:flex;gap:6px;align-items:center">
-        <input class="pb-input" ${NUM} data-bind="goal" value="${esc(ui.goalVal)}" placeholder="—" style="width:78px;padding:5px 8px;font-size:13px" data-autofocus>
+        ${r.kind === "hold"
+          ? `<input class="pb-input" ${DUR} data-bind="goal" value="${durValue(ui.goalVal)}" placeholder="0:00" style="width:78px;padding:5px 8px;font-size:13px" data-autofocus>`
+          : `<input class="pb-input" ${NUM} data-bind="goal" value="${esc(ui.goalVal)}" placeholder="—" style="width:78px;padding:5px 8px;font-size:13px" data-autofocus>`}
         <button data-action="save-goal" data-name="${esc(r.name)}" class="pb-btn pb-gold" style="width:30px;height:30px;border-radius:8px">${icon("check", 15)}</button>
       </span>`
     : `<button data-action="edit-goal" data-name="${esc(r.name)}" class="pb-chip" style="color:var(--gold);border-color:rgba(233,185,73,.35);background:rgba(233,185,73,.08)">
-        ${icon("pencil", 11)} ${T("prog.goal")} ${r.goal != null ? `· ${r.goal}` : ""}
+        ${icon("pencil", 11)} ${T("prog.goal")} ${r.goal != null ? `· ${metricShow(r.kind, r.goal)}` : ""}
       </button>`;
 
   return `<div data-action="select-progress" data-name="${esc(r.name)}" style="padding:12px 14px;border-bottom:${last ? "none" : "1px solid var(--border-soft)"};background:${active ? "rgba(233,185,73,.05)" : "transparent"};cursor:pointer">
@@ -8996,7 +9055,7 @@ function renderGoalRow(r, unit, last, active) {
       ${nameThumb(r.name, 28)}
       <div style="font-weight:600;font-size:14px;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(exLabel(r.name))}</div>
       <div class="pb-num" style="font-weight:700;font-size:17px;color:var(--text)">
-        ${r.best ?? "—"}<span style="font-size:10.5px;color:var(--muted);font-weight:600"> ${metricUnit(r.kind || DEFAULT_KIND, unit)}</span>
+        ${metricShow(r.kind, r.best) ?? "—"}<span style="font-size:10.5px;color:var(--muted);font-weight:600"> ${metricUnit(r.kind || DEFAULT_KIND, unit)}</span>
       </div>
       <button data-action="open-exercise-window" data-name="${esc(r.name)}" title="${T("log.exerciseDetails")}" style="flex-shrink:0;color:var(--faint);padding:2px">${icon("info", 15)}</button>
     </div>
@@ -9844,7 +9903,7 @@ async function chatBuildThing(kind, ref) {
     const value = Math.round(b.m * 10) / 10;
     const snap = ex ? await chatSnapOf(ex, ups) : { name: ref };
     return {
-      body: T("chat.kind.record") + ": " + (ex ? exLabelOf(ex) : ref) + " · " + trimNum(value) + " " + metricUnit(k, units),
+      body: T("chat.kind.record") + ": " + (ex ? exLabelOf(ex) : ref) + " · " + metricWithUnit(k, trimNum(value), units),
       payload: {
         v: 1, ex: snap, kind: k, units, value, date: b.date,
         set: { reps: set.reps, weight: set.weight, secs: set.secs, minutes: set.minutes, intensity: set.intensity },
@@ -9935,7 +9994,7 @@ function chatSetText(kind, st, unit) {
   const s = st || {};
   if (kind === "cardio") return T("sug.cardioSet", { min: esc(pStr(String(s.minutes ?? ""), 8)), rpe: esc(pStr(String(s.intensity ?? ""), 4)) });
   if (kind === "bodyweight") return T("unit.nReps", { n: esc(pStr(String(s.reps ?? ""), 8)) });
-  if (kind === "hold") return T("unit.nSecs", { n: esc(pStr(String(s.secs ?? ""), 8)) });
+  if (kind === "hold") return fmtHold(pStr(String(s.secs ?? ""), 8));
   return `${esc(pStr(String(s.reps ?? ""), 8))} × ${esc(pStr(String(s.weight ?? ""), 10))} ${esc(pStr(unit, 4))}`;
 }
 
@@ -10040,7 +10099,7 @@ function chatThingCard(m) {
     return head(tile("trophy", ink), esc(snapLabel(snap)), T("chat.bestSet", { set: chatSetText(k, p.set, pStr(p.setUnit, 4)) })) +
       `<div style="display:flex;align-items:flex-end;gap:12px;padding:0 12px 11px">
         <div style="flex-shrink:0">
-          <div class="pb-num" style="font-size:24px;font-weight:700;line-height:1;color:var(--gold)">${value != null ? esc(trimNum(value)) : "—"}<span style="font-size:12px;color:var(--muted);font-weight:600"> ${esc(unit)}</span></div>
+          <div class="pb-num" style="font-size:24px;font-weight:700;line-height:1;color:var(--gold)">${value != null ? esc(metricShow(k, trimNum(value))) : "—"}<span style="font-size:12px;color:var(--muted);font-weight:600"> ${esc(unit)}</span></div>
           <div style="font-size:10.5px;color:var(--faint);margin-top:4px">${esc(metricLabel(k, pStr(p.units, 4) || state.settings.units))}</div>
         </div>
         <div style="flex:1;min-width:0">${chatSpark(pts, 38, "var(--gold)")}</div>
@@ -10289,14 +10348,14 @@ function renderChatView() {
       </div>
       <div class="pb-card" style="padding:16px 15px;margin-bottom:12px;border-color:rgba(233,185,73,.45)">
         <div class="pb-label" style="margin-bottom:5px">${esc(metricLabel(k, units))}</div>
-        <div class="pb-num" style="font-size:38px;font-weight:700;line-height:1;color:var(--gold)">${value != null ? esc(trimNum(value)) : "—"}<span style="font-size:15px;color:var(--muted);font-weight:600"> ${esc(unit)}</span></div>
+        <div class="pb-num" style="font-size:38px;font-weight:700;line-height:1;color:var(--gold)">${value != null ? esc(metricShow(k, trimNum(value))) : "—"}<span style="font-size:15px;color:var(--muted);font-weight:600"> ${esc(unit)}</span></div>
         <div style="font-size:12.5px;color:var(--muted);margin-top:8px">${T("chat.bestSet", { set: chatSetText(k, p.set, pStr(p.setUnit, 4)) })}${date ? " · " + fmtShort(date) : ""}</div>
         ${pts.length > 1 ? `<div style="margin-top:14px">${chatSpark(pts, 90, "var(--gold)", true)}</div>
           <div style="display:flex;justify-content:space-between;font-size:10.5px;color:var(--faint);margin-top:6px"><span>${firstDate ? fmtShort(firstDate) : ""}</span><span>${date ? fmtShort(date) : ""}</span></div>` : ""}
       </div>
       <div style="display:flex;gap:8px;margin-bottom:14px">
         ${stat(T("chat.sessions"), String(pNum(p.sessions) ?? "—"))}
-        ${gain != null ? stat(T("chat.sinceFirst"), (gain > 0 ? "+" : "") + esc(trimNum(gain)), esc(unit), gain > 0 ? "var(--green)" : "") : ""}
+        ${gain != null ? stat(T("chat.sinceFirst"), (gain > 0 ? "+" : "") + esc(metricShow(k, trimNum(gain))), esc(unit), gain > 0 ? "var(--green)" : "") : ""}
       </div>
       <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 2px">${T("chat.recordHint")}</div>
     `);
@@ -10976,11 +11035,17 @@ let appToastTimer = null;
 function appToast(text, ink) {
   ui.appToast = { text, ink: ink || "var(--gold)", at: Date.now() };
   clearTimeout(appToastTimer);
-  appToastTimer = setTimeout(() => { ui.appToast = null; if (!syncTyping()) render(); }, APP_TOAST_MS);
+  /* while somebody is typing a render would take their caret, so the line
+     is taken down by hand instead */
+  appToastTimer = setTimeout(() => {
+    ui.appToast = null;
+    if (!syncTyping()) render();
+    else { const el = app.querySelector("[data-apptoast]"); if (el) el.remove(); }
+  }, APP_TOAST_MS);
 }
 function renderAppToast() {
   const t = ui.appToast;
-  return `<div role="status" aria-live="polite" class="pb-sheet" style="position:absolute;left:14px;right:14px;top:calc(var(--pb-sat) + 12px);z-index:140;display:flex;justify-content:center;pointer-events:none">
+  return `<div data-apptoast role="status" aria-live="polite" class="pb-sheet" style="position:absolute;left:14px;right:14px;top:calc(var(--pb-sat) + 12px);z-index:140;display:flex;justify-content:center;pointer-events:none">
     <div style="pointer-events:auto;display:flex;align-items:center;gap:9px;max-width:100%;padding:10px 12px 10px 14px;border-radius:14px;background:var(--surface);border:1px solid var(--border);box-shadow:0 10px 30px rgba(0,0,0,.35)">
       <span style="font-size:13.5px;font-weight:600;color:${t.ink};line-height:1.35">${t.text}</span>
       <button data-action="app-toast-close" aria-label="${T("a11y.close")}" style="color:var(--muted);padding:2px;flex-shrink:0">${icon("x", 15)}</button>
@@ -12427,7 +12492,7 @@ function exWindowHistory(hist) {
           ? chip(T("kind." + (ses.rows[0] && ses.rows[0].kind || DEFAULT_KIND)), "var(--steel)")
           : BADGE_SHORT[ses.badge] ? chip(BADGE_SHORT[ses.badge], ses.badge === "pr" ? "var(--gold)" : "") : ""}
         ${ses.m != null ? `<div class="pb-num" style="font-weight:700;font-size:15px;flex-shrink:0;color:${ses.badge === "pr" ? "var(--gold)" : "var(--text)"}">
-          ${ses.m}<span style="font-size:10px;color:var(--muted);font-weight:600"> ${hist.unit}</span>
+          ${metricShow(hist.kind, ses.m)}<span style="font-size:10px;color:var(--muted);font-weight:600"> ${hist.unit}</span>
         </div>` : ""}
         ${icon("chevron-right", 14, 'style="color:var(--faint);flex-shrink:0"')}
       </div>
@@ -12774,10 +12839,12 @@ const TNP = (k, n) => plainOf(TN(k, n));
 /* a set, in plain words: numbers and a unit, never anything typed */
 function picSetText(s, kind, unit) {
   if (kind === "bodyweight") return TP("unit.nReps", { n: +s.reps });
-  if (kind === "hold") return TP("unit.nSecs", { n: +s.secs });
+  if (kind === "hold") return fmtHold(s.secs);
   return `${+s.reps} × ${picKg(s.weight)} ${unit}`.trim();
 }
 const picNum = (n) => trimNum(+n || 0);
+/* a lift's figure on a card: a hold is a clock, everything else a number */
+const picVal = (k, n) => (k === "hold" ? fmtHold(n) : picNum(n));
 /* a weight off the log, at the precision a plate tree can make (see
    weightAs): 106.25 is not 106.3 */
 const picKg = (n) => trimNum(+n || 0, 2);
@@ -13248,7 +13315,7 @@ const PIC_DRAW = {
     const strength = d.liftKind === "strength";
     const hide = strength && !s.weights;
     const pct = d.first > 0 ? Math.round((gain / d.first) * 100) : null;
-    const big = hide ? (pct != null ? (pct >= 0 ? "+" : "") + pct + "%" : "—") : picNum(d.now);
+    const big = hide ? (pct != null ? (pct >= 0 ? "+" : "") + pct + "%" : "—") : picVal(d.liftKind, d.now);
     y += Math.round((G.story ? 200 : 170) * G.k);
     x.fillStyle = P.accent; x.font = `700 ${Math.round(190 * G.k)}px ${PIC_FC}`;
     const bw = x.measureText(big).width;
@@ -13268,7 +13335,7 @@ const PIC_DRAW = {
     const since = gain > 0
       ? hide
         ? (s.dates ? TP("pic.upSincePct", { date: fmtShort(d.firstDate) }) : TNP("pic.sessionsN", d.sessions))
-        : s.dates ? TP("pic.upSince", { n: picNum(gain), unit: d.unit, date: fmtShort(d.firstDate) }) : TP("pic.up", { n: picNum(gain), unit: d.unit })
+        : s.dates ? TP("pic.upSince", { n: picVal(d.liftKind, gain), unit: d.unit, date: fmtShort(d.firstDate) }) : TP("pic.up", { n: picVal(d.liftKind, gain), unit: d.unit })
       : TNP("pic.sessionsN", d.sessions);
     x.fillText(picFit(x, since, G.cw, 1)[0], G.ax, y);
     if (s.chart && d.series.length >= 2) {
@@ -13319,7 +13386,7 @@ const PIC_DRAW = {
     const showSet = s.setLine && d.set && ((d.liftKind === "strength" && !d.single) || d.liftKind === "cardio");
     const base = Math.round((G.story ? 290 : G.square ? 220 : 250) * G.k);
     y = picCentre(y, base + (showSet ? Math.round(78 * G.k) : 0) + (s.dates ? Math.round(58 * G.k) : 0), Math.round(90 * G.k), G) + base;
-    const big = picNum(d.value);
+    const big = picVal(d.liftKind, d.value);
     let size = 280;
     x.font = `700 ${Math.round(size * G.k)}px ${PIC_FC}`;
     let bw = x.measureText(big).width;
@@ -13360,7 +13427,7 @@ const PIC_DRAW = {
       ? [[picKg(c.weight), P.accent, 230], [" " + c.unit, P.muted, 72], ["  × " + c.reps, P.ink, 150]]
       : c.kind === "bodyweight"
       ? [[String(c.reps), P.accent, 230], [" " + TP("unit.reps"), P.muted, 72]]
-      : [[String(c.secs), P.accent, 230], [" " + TP("unit.secs"), P.muted, 72]];
+      : [[fmtHold(c.secs), P.accent, 230]];
     const widths = parts.map(([t, , sz]) => { x.font = `700 ${Math.round(sz * G.k)}px ${PIC_FC}`; return x.measureText(t).width; });
     let total = widths.reduce((a, w) => a + w, 0);
     const scale = total > G.cw ? G.cw / total : 1;
@@ -13404,7 +13471,7 @@ const PIC_DRAW = {
       const h = rowH + grow;
       x.fillStyle = r.color;
       if (!G.center) { picRound(x, G.M, y + Math.round(18 * G.k), Math.round(10 * G.k), h - Math.round(46 * G.k), Math.round(5 * G.k)); x.fill(); }
-      const val = s.value === "set" && r.set ? r.set : `${picNum(r.m)} ${r.unit}`;
+      const val = s.value === "set" && r.set ? r.set : `${picVal(r.liftKind, r.m)} ${r.unit}`.trim();
       if (G.center) {
         x.fillStyle = P.ink; x.font = `600 ${Math.round(38 * G.k)}px ${PIC_FB}`;
         x.fillText(picFit(x, r.lift, G.cw, 1)[0], G.ax, y + Math.round(46 * G.k));
@@ -14422,13 +14489,14 @@ function entryComputed() {
    place while you type, and a freshly injected lucide placeholder has
    nothing to turn it into a glyph.                                     */
 function entryRefCols(metric, lastMetric, bestMetric) {
+  const k = ui.entryForm ? kindOf(ui.entryForm.f) : DEFAULT_KIND;
   const col = (label, ref) => {
     const v = ref == null || metric == null ? null
       : metric > ref ? "beat" : metric < ref ? "under" : "hit";
     return `<div>
       <div class="pb-label" style="font-size:9.5px;letter-spacing:.07em">${label}</div>
       <div class="pb-num" style="font-size:17px;font-weight:700;line-height:1.2;color:${
-        ref == null ? "var(--faint)" : v ? VERDICT_COLOR[v] : "var(--muted)"}">${ref ?? "—"}</div>
+        ref == null ? "var(--faint)" : v ? VERDICT_COLOR[v] : "var(--muted)"}">${metricShow(k, ref) ?? "—"}</div>
     </div>`;
   };
   return col(T("best.lastLabel"), lastMetric) + col(T("best.label"), bestMetric);
@@ -14514,7 +14582,7 @@ function renderSetList(f, unit, planning, isDraft) {
        score whether this slot went better than it did last time */
     const v = t ? setVerdict(s, t, k) : prev ? setProgress(s, prev, k) : null;
     const refShort = (r) => k === "bodyweight" ? T("unit.nReps", { n: esc(r.reps) })
-      : k === "hold" ? T("unit.nSecs", { n: esc(r.secs) })
+      : k === "hold" ? fmtHold(r.secs)
       /* two decimals, the same precision the row itself carries: a line
          that reads "last time 7 × 26.3" beside a verdict measured on 26.25
          is naming a weight nobody lifted */
@@ -14524,7 +14592,7 @@ function renderSetList(f, unit, planning, isDraft) {
       : "";
     const cont = drops.cont[i];
     return `${drops.head[i] ? `<div style="display:flex;align-items:center;gap:6px;margin:2px 2px 4px;font-size:10.5px;font-weight:700;letter-spacing:.07em;color:var(--steel)">${icon("chevrons-down", 12)} ${T("sets.dropset")}</div>` : ""}
-    <div class="pb-card" style="display:flex;align-items:center;margin-bottom:${cont || drops.cont[i + 1] ? 4 : 8}px;margin-left:${cont ? 16 : 0}px;overflow:hidden${blank ? ";border:1px dashed rgba(233,185,73,.55)" : ""}${cont ? ";border-left:2px solid var(--steel)" : ""}">
+    <div class="pb-card" data-setrow="${s.id}" style="display:flex;align-items:center;margin-bottom:${cont || drops.cont[i + 1] ? 4 : 8}px;margin-left:${cont ? 16 : 0}px;overflow:hidden${blank ? ";border:1px dashed rgba(233,185,73,.55)" : ""}${cont ? ";border-left:2px solid var(--steel)" : ""}">
       <button data-action="edit-set" data-id="${s.id}" style="flex:1;min-width:0;display:flex;align-items:center;gap:11px;padding:11px 4px 11px 12px;text-align:left;color:var(--text)">
         <div class="pb-num" style="width:24px;height:24px;border-radius:7px;background:${cont ? "transparent" : "var(--surface2)"};border:1px ${cont ? "dashed var(--steel)" : "solid var(--border)"};display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:700;color:var(--muted);flex-shrink:0">${cont ? icon("corner-down-right", 12) : i + 1}</div>
         <div style="flex:1;min-width:0">
@@ -14611,7 +14679,7 @@ function sugOption(o, smaller, unit, fill) {
     : T("sug.optRpe");
   const line = o.minutes != null
     ? T("sug.cardioSet", { min: o.minutes, rpe: o.intensity })
-    : o.secs != null ? T("unit.nSecs", { n: o.secs })
+    : o.secs != null ? fmtHold(o.secs)
     : o.weight == null ? T("unit.nReps", { n: o.reps })
     : `${o.reps} × ${sugWeight(o.weight)} ${unit}`;
   const data = o.minutes != null
@@ -14627,7 +14695,7 @@ function sugOption(o, smaller, unit, fill) {
     ${(() => {
       /* "11 reps → 11" is the option said twice; only a score you cannot
          read off the option itself earns the line (see scoreWorthShowing) */
-      const gives = o.secs == null && o.weight == null && o.minutes == null
+      const gives = o.weight == null && o.minutes == null
         ? "" : `<span style="font-size:10.5px;color:var(--faint)">${T("sug.gives", { n: o.m })}</span>`;
       return gives || smaller ? `<div style="display:flex;align-items:baseline;gap:5px;margin-top:1px">
         ${gives}${smaller ? `<span style="font-size:9.5px;color:var(--steel);white-space:nowrap">${T("sug.smaller")}</span>` : ""}
@@ -14653,10 +14721,10 @@ function renderSuggestion(form, unit) {
   const eUnit = cardio ? "" : s.unit;
   const last = cardio
     ? T("sug.cardioSet", { min: s.prev.minutes, rpe: s.prev.intensity })
-    : s.kind === "hold" ? T("unit.nSecs", { n: s.prev.secs })
+    : s.kind === "hold" ? fmtHold(s.prev.secs)
     : s.kind === "bodyweight" ? T("unit.nReps", { n: s.prev.reps })
     : `${s.prev.reps} × ${sugWeight(s.prev.weight)} ${eUnit}`;
-  const sUnit = metricUnit(s.kind === "step" ? "strength" : s.kind, unit);
+  const mk = s.kind === "step" ? "strength" : s.kind;
 
   const head = `<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:9px">
     <div class="pb-label" style="flex:1;min-width:0">${T("sug.title")}</div>
@@ -14666,16 +14734,15 @@ function renderSuggestion(form, unit) {
   if (s.done)
     return wrap(head + `<div style="display:flex;gap:9px;align-items:flex-start">
       ${icon("check-circle", 15, 'style="color:var(--green);flex-shrink:0;margin-top:1px"')}
-      <div style="flex:1;font-size:12.5px;color:var(--muted);line-height:1.5">${T("sug.ahead", { n: s.prev.m, now: s.now, unit: sUnit })}</div>
+      <div style="flex:1;font-size:12.5px;color:var(--muted);line-height:1.5">${T("sug.ahead", { n: metricWithUnit(mk, s.prev.m, unit), now: metricShow(mk, s.now) })}</div>
     </div>`);
 
-  const mUnit = sUnit;
   return wrap(head + `<div style="display:flex;gap:8px">
       ${s.options.map((o) => sugOption(o, o.kind === s.smaller, eUnit, "sug-use")).join("")}
     </div>
     <div style="font-size:11px;color:var(--faint);margin-top:9px;line-height:1.45">
       ${T(s.options.length > 1 ? (s.smaller ? "sug.hint" : "sug.hintTied") : "sug.hintOne",
-          { n: s.prev.m, unit: mUnit })}
+          { n: metricWithUnit(mk, s.prev.m, unit) })}
     </div>`);
 }
 
@@ -14768,10 +14835,119 @@ function renderPlanTarget(f, unit) {
     <div style="display:flex;align-items:baseline;gap:8px">
       <div class="pb-label" style="flex:1;min-width:0;color:var(--steel)">${T("plan.targetLabel")}</div>
       <div class="pb-num" style="font-size:14px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${planTargetLine(t, unit)}</div>
+      <button data-action="target-open" title="${T("target.edit")}" aria-label="${T("target.edit")}" style="flex-shrink:0;align-self:center;color:var(--faint);padding:2px 0 2px 6px">${icon("pencil", 14)}</button>
     </div>
     ${status}
     ${load}
   </div>`;
+}
+
+/* ── PLANNING YOUR SETS FROM WHERE YOU STAND ──────────────────────────
+   A plan used to be something you wrote on the Calendar days before. Most
+   targets are not: you walk up to the rack, look at last time, and decide
+   "three of ten at 80 today". That number lived in your head, and reaching
+   it was a moment the app never knew about.
+
+   So the entry window can plan its own sets, and what it writes is
+   EXACTLY a plan's target (`f.plan`, the shape planTargetOf builds), so
+   everything a planned lift already has comes with it for nothing: the
+   ghost rows with ✓ to log one as planned, the planned/beat/under word on
+   each set, the count above the list, the line on the day in your history.
+   It carries no `planFrom`, so prunePlans never mistakes it for a calendar
+   plan, and editing a calendar plan's target here edits the frozen copy on
+   this entry, never the plan.
+
+   There is no setting to switch it off, because there is nothing to switch
+   off: nothing appears until you plan something, the suggestion card is
+   back the moment you remove it, and under is never scolded (docs/sets.md).
+
+   Nothing here is ever the log. Copy last time loads the target, not a
+   set, the same tap-to-load rule as everywhere else. */
+const blankTargetSet = () => ({ reps: "", weight: "", secs: "" });
+
+function renderTargetForm() {
+  const tf = ui.targetForm, f = ui.entryForm && ui.entryForm.f;
+  if (!tf || !f) return "";
+  const k = kindOf(f);
+  const canCopy = !!lastOuting(f, ui.entryForm.isDraft);
+  const box = (bind, val, isTime) => isTime
+    ? `<input class="pb-input" ${DUR} data-bind="${bind}" value="${durValue(val)}" placeholder="0:00" style="width:100%;padding:9px 10px">`
+    : `<input class="pb-input" ${NUM} data-bind="${bind}" value="${esc(val)}" placeholder="—" style="width:100%;padding:9px 10px">`;
+  const small = (text) => `<span style="font-size:11.5px;color:var(--faint);flex-shrink:0">${text}</span>`;
+
+  const body = k === "cardio"
+    ? `<div style="display:flex;gap:10px">
+        <div style="flex:1">${field(T("entry.minutes"), box("target.minutes", tf.minutes))}</div>
+        <div style="flex:1">${field(T("entry.intensity"), box("target.intensity", tf.intensity))}</div>
+      </div>`
+    : `${tf.sets.map((s, i) => `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+          <span class="pb-num" style="width:22px;flex-shrink:0;text-align:center;font-size:12.5px;font-weight:700;color:var(--faint)">${i + 1}</span>
+          ${k === "hold" ? `<div style="flex:1">${box(`target.${i}.secs`, s.secs, true)}</div>`
+            : k === "bodyweight" ? `<div style="flex:1">${box(`target.${i}.reps`, s.reps)}</div>${small(T("unit.reps"))}`
+            : `<div style="flex:1">${box(`target.${i}.reps`, s.reps)}</div>${small("×")}
+               <div style="flex:1.2">${box(`target.${i}.weight`, s.weight)}</div>${small(esc(tf.unit))}`}
+          <button data-action="target-remove" data-i="${i}" aria-label="${T("sets.remove")}" style="flex-shrink:0;color:var(--red);padding:8px 4px">${icon("x", 16)}</button>
+        </div>`).join("")}
+      <button data-action="target-add" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;border-style:dashed;margin-bottom:12px">${icon("plus", 16)} ${T("sets.add")}</button>`;
+
+  return sheet(T("target.title"), "targetForm", `
+    <div style="font-size:12px;color:var(--muted);line-height:1.5;margin-bottom:14px">${T(k === "cardio" ? "target.hintCardio" : "target.hint")}</div>
+    ${body}
+    ${canCopy ? `<button data-action="target-last" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;margin-bottom:10px">${icon("history", 15)} ${T("target.copyLast")}</button>` : ""}
+    <button data-action="target-save" class="pb-btn pb-gold" style="width:100%;padding:14px 0;font-size:15px">${icon("target", 17)} ${T("target.save")}</button>
+    ${f.plan ? `<button data-action="target-clear" class="pb-btn" style="width:100%;padding:12px 0;margin-top:8px;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">${icon("trash-2", 15)} ${T("target.remove")}</button>` : ""}
+  `, 100);
+}
+
+/* THE MOMENT YOU REACH IT. The whole point of writing a number down before
+   the set is the second you find out you made it, so the app says so, once,
+   right then: a line at the top of the screen and the row lighting up. It
+   names the set and the number, because "you hit it" with nothing after it
+   is applause, and this is the fact you were waiting for. Hit is green,
+   beaten and all-of-them are gold, the same colours the verdicts wear.
+   Under says nothing at all, as it never does. */
+function targetMoment(f, setId) {
+  const t = f.plan, k = kindOf(f);
+  if (!t || !t.sets) return;
+  const filled = filledSets(f);
+  const i = filled.findIndex((s) => s.id === setId);
+  if (i < 0 || !t.sets[i]) return;
+  const v = setVerdict(filled[i], t.sets[i], k);
+  if (v !== "hit" && v !== "beat") return;
+  const res = entryPlanResult(f);
+  const all = res && res.done >= res.total && res.hit >= res.total;
+  ui.flashSets = [...(ui.flashSets || []), setId];
+  appToast(all ? T(res.beat ? "target.allBeat" : "target.allHit")
+    : T(v === "beat" ? "target.beat" : "target.hit", { i: i + 1, set: setLine(filled[i], k, unitOf(f)) }),
+    v === "beat" || all ? "var(--gold)" : "var(--green)");
+}
+
+/* the same moment for a cardio target, which is typed straight into the
+   entry form: said once per opening of the form, the first time the two
+   numbers reach it, and painted without a render (one would throw away
+   the field the caret is in) */
+function cardioTargetMoment() {
+  const form = ui.entryForm, f = form && form.f;
+  if (!f || form.cardioHit || !f.plan || f.plan.sets || kindOf(f) !== "cardio") return;
+  const v = cardioVerdict(f, f.plan);
+  if (v !== "hit" && v !== "beat") return;
+  form.cardioHit = true;
+  appToast(T(v === "beat" ? "target.cardioBeat" : "target.cardioHit"), v === "beat" ? "var(--gold)" : "var(--green)");
+  const old = app.querySelector("[data-apptoast]");
+  if (old) old.remove();
+  app.insertAdjacentHTML("beforeend", renderAppToast());
+  if (window.lucide) lucide.createIcons();
+}
+
+/* put the light on the row(s) a moment just named; spent on this frame, the
+   same way flashLogDay is, or every later render would replay it */
+function flashSetRows() {
+  const ids = ui.flashSets || [];
+  ui.flashSets = null;
+  for (const id of ids) {
+    const row = app.querySelector(`[data-setrow="${id}"]`);
+    if (row) row.classList.add("pb-flash");
+  }
 }
 
 function renderEntryFields(form, unit) {
@@ -14827,6 +15003,9 @@ function renderEntryFields(form, unit) {
     <div class="pb-scroll" data-scrollkey="entryform" style="flex:1;overflow-y:auto;padding:10px 16px calc(120px + var(--pb-sab))">
       ${!isDraft ? field("Date", `<input type="date" class="pb-input" data-bind="entry.date" value="${esc(f.date)}">`) : ""}
       ${f.plan ? renderPlanTarget(f, eUnit) : renderSuggestion(form, unit)}
+      ${f.plan || planning ? "" : `<button data-action="target-open" class="pb-btn pb-ghost" style="width:100%;padding:10px 0;font-size:13px;border-style:dashed;margin:-4px 0 14px;color:var(--steel)">
+        ${icon("target", 15)} ${T(cardio ? "target.openCardio" : "target.open")}
+      </button>`}
       ${renderLastTime(form)}
       ${inputs}
       ${superRow}
@@ -14837,7 +15016,7 @@ function renderEntryFields(form, unit) {
       <div class="pb-card2" style="padding:12px 14px;display:flex;align-items:flex-end;gap:12px;margin-top:4px">
         <div style="flex:1;min-width:0">
           <div class="pb-label">${kindOf(f) === "strength" ? T("entry.bestSet1rm", { unit }) : metricLabel(kindOf(f), unit)}</div>
-          <div id="entryMetric" class="pb-num" style="font-size:30px;font-weight:700;color:var(--gold);line-height:1.05">${metric ?? "—"}</div>
+          <div id="entryMetric" class="pb-num" style="font-size:30px;font-weight:700;color:var(--gold);line-height:1.05">${metricShow(kindOf(f), metric) ?? "—"}</div>
         </div>
         <div id="entryBadge" style="flex-shrink:0;display:flex;justify-content:flex-end;gap:15px;text-align:right">
           ${entryRefCols(metric, lastMetric, bestMetric)}
@@ -14954,14 +15133,15 @@ function bestEverMetric(f, isDraft) {
 function vsLastLine(m, ref) {
   if (!ref) return "";
   const i = ref.index + 1;
+  const k = ui.entryForm ? kindOf(ui.entryForm.f) : DEFAULT_KIND;
   /* last session ended before this position: no verdict, and said out loud
      rather than left as a gap, or the card looks like it failed to load */
   if (!ref.ran) return `<span style="color:var(--faint)">${T("vsSet.none", { i, date: fmtShort(ref.date) })}</span>`;
-  const base = `<span style="color:var(--faint)">${T("vsSet.base", { i, n: ref.m, date: fmtShort(ref.date) })}</span>`;
+  const base = `<span style="color:var(--faint)">${T("vsSet.base", { i, n: metricShow(k, ref.m), date: fmtShort(ref.date) })}</span>`;
   if (m == null) return base;
   const d = Math.round((m - ref.m) * 10) / 10;
   const v = d > 0 ? "beat" : d < 0 ? "under" : "hit";
-  const word = d === 0 ? T("vsSet.same", { i }) : T(d > 0 ? "vsSet.over" : "vsSet.under", { n: Math.abs(d), i });
+  const word = d === 0 ? T("vsSet.same", { i }) : T(d > 0 ? "vsSet.over" : "vsSet.under", { n: metricShow(k, Math.abs(d)), i });
   return `<span style="color:${VERDICT_COLOR[v]};font-weight:700">${word}</span> · ${base}`;
 }
 
@@ -14981,9 +15161,9 @@ function bestEverBlock(m, ref, unit) {
   const sub = pr ? T("best.newPr")
     : m == null ? fmtShort(ref.date)
     : m === ref.m ? T("best.matched")
-    : T("best.toGo", { n: trimNum(ref.m - m) });
+    : T("best.toGo", { n: metricShow(k, trimNum(ref.m - m)) });
   return `<div class="pb-label" style="font-size:9.5px;letter-spacing:.07em">${T("best.label")}</div>
-    <div class="pb-num" style="font-size:17px;font-weight:700;line-height:1.15;color:${pr ? "var(--gold)" : "var(--muted)"}">${ref.m}<span style="font-size:10px;font-weight:600;color:var(--faint)"> ${esc(metricUnit(k, unit))}</span></div>
+    <div class="pb-num" style="font-size:17px;font-weight:700;line-height:1.15;color:${pr ? "var(--gold)" : "var(--muted)"}">${metricShow(k, ref.m)}<span style="font-size:10px;font-weight:600;color:var(--faint)"> ${esc(metricUnit(k, unit))}</span></div>
     <div style="font-size:10px;line-height:1.35;margin-top:1px;color:${pr ? "var(--gold)" : "var(--faint)"}">${sub}</div>`;
 }
 
@@ -15018,7 +15198,7 @@ function renderSetForm(form, unit) {
   const numField = (label, bind, val, first) =>
     field(labelWith(label), `<input class="pb-input" ${NUM} data-bind="${bind}" value="${esc(val)}" placeholder="—"${first ? " data-autofocus" : ""}>`);
   const inputs = k === "bodyweight" ? numField(T("setForm.reps"), "set.reps", s.reps, true)
-    : k === "hold" ? numField(T("setForm.secs"), "set.secs", s.secs, true)
+    : k === "hold" ? field(labelWith(T("setForm.time")), `<input class="pb-input" ${DUR} data-bind="set.secs" value="${durValue(s.secs)}" placeholder="0:00" data-autofocus>`)
     : `<div style="display:flex;gap:10px">
         <div style="flex:1">${numField(T("setForm.reps"), "set.reps", s.reps, true)}</div>
         <div style="flex:1">${field(labelWith(T("setForm.weight"), unitSelect(unit)), `<input class="pb-input" ${NUM} data-bind="set.weight" value="${esc(s.weight)}" placeholder="—">`)}</div>
@@ -15073,7 +15253,7 @@ function renderSetForm(form, unit) {
       <div style="display:flex;align-items:flex-start;gap:12px">
         <div style="flex:1;min-width:0">
           <div class="pb-label">${metricLabel(k, unit)}</div>
-          <div id="setMetric" class="pb-num" style="font-size:26px;font-weight:700;color:var(--gold);line-height:1.05">${m ?? "—"}</div>
+          <div id="setMetric" class="pb-num" style="font-size:26px;font-weight:700;color:var(--gold);line-height:1.05">${metricShow(k, m) ?? "—"}</div>
         </div>
         ${bestRef ? `<div id="setBest" style="flex:0 0 auto;text-align:right;padding-left:12px;border-left:1px solid var(--border-soft)">${bestEverBlock(m, bestRef, unit)}</div>` : ""}
       </div>
@@ -15107,7 +15287,7 @@ function updateSetPreview() {
   const vs = document.getElementById("setVsLast");
   const best = document.getElementById("setBest");
   const btn = document.getElementById("setSaveBtn");
-  if (el) el.textContent = m ?? "—";
+  if (el) el.textContent = metricShow(k, m) ?? "—";
   if (vs) vs.innerHTML = vsLastLine(m, setRefs.vs);
   if (best) best.innerHTML = bestEverBlock(m, setRefs.best, setRefs.unit);
   if (btn) { const ok = setHasData(s, k); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
@@ -15146,11 +15326,12 @@ function updateEntryPreview() {
   const m = document.getElementById("entryMetric");
   const b = document.getElementById("entryBadge");
   const s = document.getElementById("entrySaveBtn");
-  if (m) m.textContent = metric ?? "—";
+  if (m) m.textContent = metricShow(kindOf(ui.entryForm.f), metric) ?? "—";
   /* redrawn whole rather than nudged: the two bars hold still while you
      type, but which side of them you are on does not, and the colour is
      the answer this row exists to give */
   if (b) b.innerHTML = entryRefCols(metric, lastMetric, bestMetric);
+  cardioTargetMoment();
   if (s) {
     s.disabled = !valid; s.style.opacity = valid ? 1 : 0.45;
     /* Rewritten only when it actually changes: lucide.createIcons() walks
@@ -16405,6 +16586,9 @@ function renderStopwatch() {
         ? btn("sw-stop", T("sw.pause"), "pause", "ghost", false)
         : btn("sw-start", T(idle ? "sw.start" : "sw.resume"), "play", "gold", false)}
     </div>
+    ${!running && now >= 1000 ? `<button data-action="sw-log-open" class="pb-btn pb-ghost" style="width:100%;padding:13px 0;font-size:14.5px;border-radius:13px;margin:-4px 0 14px;color:var(--gold);border-color:rgba(233,185,73,.45)">
+      ${icon("clipboard-plus", 16)} ${T("sw.logTo")}
+    </button>` : ""}
 
     ${laps.length ? `${sectionTitle(T("sw.laps"), `<span style="font-size:11px;color:var(--faint)">${T("sw.avg", { t: fmtStopwatch(laps[laps.length - 1] / laps.length) })}</span>`)}
       <div class="pb-card" style="overflow:hidden;margin-bottom:12px">${lapRows}</div>`
@@ -16416,6 +16600,86 @@ function renderStopwatch() {
     <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:12px 4px 10px">${T("sw.hint")}</div>
     <div style="height:10px"></div>
   </div>`;
+}
+
+/* ── THE CLOCK, PUT ON A LIFT ─────────────────────────────────────────
+   A dead hang timed on the stopwatch used to reach the log by reading the
+   digits and typing them into a set, which is exactly the conversion the
+   time box exists to spare you. So once it is stopped, the time can go
+   straight onto a timed lift, as the NEXT set of it on that day: a hang
+   already logged at 1:30 and this one at 1:20 is one lift with two sets,
+   never a second row of the same lift.
+
+   With laps, each lap can be its own set (time a few holds in one run,
+   lap at the end of each, pause between them), and any lap can be left
+   out, which is how a run that lapped its rests as well keeps them out of
+   the log. Splits are whole seconds, the precision a hold is stored at.
+
+   It still takes a tap to put it there, and then the ordinary Save on the
+   lift and the day, exactly as a set typed in by hand: the stopwatch
+   itself still writes nothing and is left as it was. */
+function swSplits(w) {
+  const marks = [...w.laps, swElapsed(w)];
+  const out = [];
+  marks.forEach((t, i) => {
+    const s = Math.round((t - (i ? marks[i - 1] : 0)) / 1000);
+    if (s >= 1) out.push(s);
+  });
+  return out;
+}
+/* the seconds the sheet is set to log, in order */
+function swLogTimes() {
+  const L = ui.swLog, w = swOf();
+  const splits = swSplits(w);
+  if (L && L.mode === "laps" && w.laps.length && splits.length > 1)
+    return splits.filter((_, i) => L.picks[i] !== false);
+  const total = Math.round(swElapsed(w) / 1000);
+  return total >= 1 ? [total] : [];
+}
+
+function renderSwLog(library, log) {
+  const L = ui.swLog, w = swOf();
+  const splits = swSplits(w);
+  const lapped = w.laps.length > 0 && splits.length > 1;
+  const mode = lapped ? L.mode : "total";
+  const times = swLogTimes();
+
+  const what = mode === "laps"
+    ? `<div class="pb-card" style="overflow:hidden;margin-bottom:14px">${splits.map((s, i) => {
+        const on = L.picks[i] !== false;
+        return `<button data-action="sw-log-tick" data-i="${i}" role="checkbox" aria-checked="${on}" style="width:100%;display:flex;align-items:center;gap:11px;padding:10px 13px;text-align:left;border-top:${i ? "1px solid var(--border-soft)" : "none"}">
+          <span style="width:18px;height:18px;border-radius:6px;flex-shrink:0;border:1px solid ${on ? "var(--gold)" : "var(--border)"};background:${on ? "var(--gold)" : "transparent"};display:flex;align-items:center;justify-content:center;color:var(--bg)">${on ? icon("check", 12) : ""}</span>
+          <span class="pb-num" style="width:22px;font-size:11.5px;font-weight:700;color:var(--faint)">${i + 1}</span>
+          <span class="pb-num" style="flex:1;font-size:15px;font-weight:700;color:${on ? "var(--text)" : "var(--faint)"}">${fmtHold(s)}</span>
+        </button>`;
+      }).join("")}</div>`
+    : `<div class="pb-card2" style="padding:12px 14px;margin-bottom:14px;display:flex;align-items:baseline;gap:10px">
+        <span class="pb-label" style="flex:1">${T("sw.logOne")}</span>
+        <span class="pb-num" style="font-size:24px;font-weight:700;color:var(--gold)">${times.length ? fmtHold(times[0]) : "0:00"}</span>
+      </div>`;
+
+  /* the lifts a clock can mean, the one you did most recently first */
+  const lastOn = {};
+  for (const e of log) if (!lastOn[e.exercise] || e.date > lastOn[e.exercise]) lastOn[e.exercise] = e.date;
+  const holds = library.filter((ex) => exKind(ex) === "hold")
+    .sort((a, b) => (lastOn[b.name] || "").localeCompare(lastOn[a.name] || "") || exLabel(a.name).localeCompare(exLabel(b.name)));
+  const off = !times.length;
+  const list = holds.length
+    ? `<div class="pb-card" style="overflow:hidden">${holds.map((ex, i) => `<button data-action="sw-log-pick" data-name="${esc(ex.name)}" ${off ? "disabled" : ""} style="width:100%;display:flex;align-items:center;gap:10px;padding:10px 13px;text-align:left;color:var(--text);opacity:${off ? 0.45 : 1};border-top:${i ? "1px solid var(--border-soft)" : "none"}">
+          ${nameThumb(ex.name, 30)}
+          <span style="flex:1;min-width:0;font-size:14px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(exLabel(ex.name))}</span>
+          ${lastOn[ex.name] ? `<span style="font-size:11px;color:var(--faint);flex-shrink:0">${fmtShort(lastOn[ex.name])}</span>` : ""}
+          ${icon("chevron-right", 15, 'style="color:var(--faint);flex-shrink:0"')}
+        </button>`).join("")}</div>`
+    : `<div class="pb-card" style="padding:18px;text-align:center;color:var(--faint);font-size:13px;line-height:1.55">${T("sw.logNone")}</div>`;
+
+  return sheet(T("sw.logTitle"), "swLog", `
+    ${lapped ? segControl("sw-log-mode", mode, [["laps", T("sw.logLaps", { n: splits.length })], ["total", T("sw.logTotal")]]) : ""}
+    ${what}
+    ${field(T("sw.logDate"), `<input type="date" class="pb-input" data-bind="swLog.date" value="${esc(L.date)}">`)}
+    <div class="pb-label" style="margin-bottom:6px">${T("sw.logPick")}</div>
+    ${list}
+  `, 100);
 }
 
 /* ─────────────────────────── PROFILE ──────────────────────────────── */
@@ -16890,13 +17154,19 @@ function sheet(title, target, children, z = 60) {
 /* ═══════════════════════════ SVG CHARTS ════════════════════════════
    Hand-rolled equivalents of the recharts Line/Bar charts.           */
 
-function niceTicks(min, max, count = 5, integers = false) {
+/* A hold is plotted in seconds and read as a clock, so its gridlines have to
+   land on times a clock reads round (0:30, 1:00, 1:30), not on the 1-2-5
+   ladder, which puts them at 0:50, 1:40 and 2:30. */
+const TIME_STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200];
+const timeStep = (step0) => TIME_STEPS.find((s) => s >= step0) || TIME_STEPS[TIME_STEPS.length - 1];
+
+function niceTicks(min, max, count = 5, integers = false, time = false) {
   if (min === max) { min -= 1; max += 1; }
   const span = max - min;
   const step0 = span / (count - 1);
   const mag = Math.pow(10, Math.floor(Math.log10(Math.abs(step0))));
   const norm = step0 / mag;
-  let step = (norm >= 5 ? 10 : norm >= 2 ? 5 : norm >= 1 ? 2 : 1) * mag;
+  let step = time ? timeStep(step0) : (norm >= 5 ? 10 : norm >= 2 ? 5 : norm >= 1 ? 2 : 1) * mag;
   if (integers) step = Math.max(1, Math.round(step));
   const lo = Math.floor(min / step) * step;
   const hi = Math.ceil(max / step) * step;
@@ -16909,12 +17179,12 @@ function niceTicks(min, max, count = 5, integers = false) {
    domain of its own, that domain is the answer and the ticks have to live
    inside it rather than rounding it outward, since otherwise every pan would
    nudge the view it was meant to be reading. */
-function ticksWithin(min, max, count = 5) {
+function ticksWithin(min, max, count = 5, time = false) {
   if (!(max > min)) return [min];
   const step0 = (max - min) / (count - 1);
   const mag = Math.pow(10, Math.floor(Math.log10(Math.abs(step0))));
   const norm = step0 / mag;
-  const step = (norm >= 5 ? 10 : norm >= 2 ? 5 : norm >= 1 ? 2 : 1) * mag;
+  const step = time ? timeStep(step0) : (norm >= 5 ? 10 : norm >= 2 ? 5 : norm >= 1 ? 2 : 1) * mag;
   const out = [];
   for (let v = Math.ceil(min / step) * step; v <= max + step / 1e6; v += step)
     out.push(Math.round(v * 1000) / 1000);
@@ -17157,7 +17427,8 @@ function paintLineChart(wrap) {
      moment you move it yourself, and from then on it's yours, which is what
      lets you leave room above the line for the sets you haven't done yet. */
   const yView = chartYView(scope);
-  const ticks = yView ? ticksWithin(yView.lo, yView.hi, 5) : niceTicks(Math.min(...vals), Math.max(...vals), 5);
+  const hold = line.kind === "hold";
+  const ticks = yView ? ticksWithin(yView.lo, yView.hi, 5, hold) : niceTicks(Math.min(...vals), Math.max(...vals), 5, false, hold);
   const yMin = yView ? yView.lo : ticks[0];
   const yMax = yView ? yView.hi : ticks[ticks.length - 1];
   chartYSeen[scope] = { lo: yMin, hi: yMax };   // where a y gesture starts from
@@ -17190,7 +17461,7 @@ function paintLineChart(wrap) {
   }
   /* axes + labels, and only real sessions have a date to write under them */
   svg += `<line x1="${left}" x2="${right}" y1="${bottom}" y2="${bottom}" stroke="${cAxis}"/>`;
-  for (const t of ticks) svg += `<text x="${left - 6}" y="${(yOf(t) + 3.5).toFixed(2)}" fill="${cTick}" font-size="10.5" text-anchor="end">${t}</text>`;
+  for (const t of ticks) svg += `<text x="${left - 6}" y="${(yOf(t) + 3.5).toFixed(2)}" fill="${cTick}" font-size="10.5" text-anchor="end">${hold ? fmtHold(t) : t}</text>`;
   const lSkip = Math.max(1, Math.ceil((span + 1) / 7));
   for (let i = Math.max(0, g0); i <= Math.min(n - 1, g1); i++) {
     if (i % lSkip !== 0) continue;
@@ -18612,7 +18883,9 @@ const actions = {
     const f = ui.entryForm && ui.entryForm.f;
     const t = f && f.plan && f.plan.sets && f.plan.sets[+el.dataset.i];
     if (!t) return;
-    ui.entryForm.f = syncEntry({ ...f, setList: [...(f.setList || []), newSet(t.reps, t.weight, "", t.secs)] });
+    const s = newSet(t.reps, t.weight, "", t.secs);
+    ui.entryForm.f = syncEntry({ ...f, setList: [...(f.setList || []), s] });
+    targetMoment(ui.entryForm.f, s.id);
     render();
   },
   /* the ghost row itself: open the editor with the target loaded, because
@@ -18631,6 +18904,82 @@ const actions = {
     render();
   },
   "plan-result-close": () => { ui.planResult = null; render(); },
+
+  /* ── planning the open lift's sets (renderTargetForm) ──────────────── */
+  "target-open": () => {
+    const f = ui.entryForm && ui.entryForm.f;
+    if (!f) return;
+    const t = f.plan;
+    ui.targetForm = {
+      unit: (t && t.unit) || unitOf(f),
+      sets: t && t.sets ? t.sets.map((s) => ({ ...blankTargetSet(), ...s })) : [blankTargetSet()],
+      minutes: t && !t.sets ? t.minutes : "",
+      intensity: t && !t.sets ? t.intensity : "",
+    };
+    render();
+  },
+  /* a new row starts as a copy of the one above, since "another one like
+     that" is what the next planned set nearly always is */
+  "target-add": () => {
+    const tf = ui.targetForm;
+    if (!tf) return;
+    tf.sets.push({ ...(tf.sets[tf.sets.length - 1] || blankTargetSet()) });
+    render();
+  },
+  "target-remove": (el) => {
+    const tf = ui.targetForm;
+    if (!tf) return;
+    tf.sets.splice(+el.dataset.i, 1);
+    if (!tf.sets.length) tf.sets.push(blankTargetSet());
+    render();
+  },
+  /* last session, loaded as the plan for this one (weights already in the
+     unit being typed in today); a target, never a set */
+  "target-last": () => {
+    const tf = ui.targetForm, form = ui.entryForm;
+    if (!tf || !form) return;
+    const f = form.f;
+    if (kindOf(f) === "cardio") {
+      const last = lastOuting(f, form.isDraft);
+      const r = last && last.rows[0];
+      if (r) { tf.minutes = String(r.minutes ?? ""); tf.intensity = String(r.intensity ?? ""); }
+    } else {
+      const prev = lastTimeSets(f, form.isDraft);
+      if (prev) {
+        tf.unit = unitOf(f);
+        tf.sets = prev.rows.map((r) => ({ reps: String(r.reps ?? ""), weight: String(r.weight ?? ""), secs: String(r.secs ?? "") }));
+      }
+    }
+    render();
+  },
+  /* saving nothing filled in is the same as removing the plan: an empty
+     target would draw a card promising sets it does not name */
+  "target-save": () => {
+    const tf = ui.targetForm, f = ui.entryForm && ui.entryForm.f;
+    if (!tf || !f) return;
+    const k = kindOf(f);
+    let plan = null;
+    if (k === "cardio") {
+      if (+tf.minutes > 0 && +tf.intensity > 0) plan = { minutes: tf.minutes, intensity: tf.intensity, kind: k };
+    } else {
+      const sets = tf.sets.filter((s) => setHasData(s, k))
+        .map((s) => ({ reps: s.reps || "", weight: s.weight || "", secs: s.secs || "" }));
+      if (sets.length) plan = { sets, unit: tf.unit, kind: k };
+    }
+    const { plan: _was, ...rest } = f;
+    ui.entryForm.f = plan ? { ...rest, plan } : rest;
+    ui.entryForm.cardioHit = false;
+    ui.targetForm = null;
+    render();
+  },
+  "target-clear": () => {
+    const f = ui.entryForm && ui.entryForm.f;
+    if (!f) return;
+    const { plan: _was, ...rest } = f;
+    ui.entryForm.f = rest;
+    ui.targetForm = null;
+    render();
+  },
 
   /* ── calendar & deloads ───────────────────────────────────────────── */
   "cal-prev": () => { ui.calMonth = addMonths(ui.calMonth || monthOf(todayStr()), -1); render(); },
@@ -19876,6 +20225,7 @@ const actions = {
       : f.setList.map((x) => (x.id === form.s.id ? form.s : x));
     ui.entryForm.f = syncEntry({ ...f, setList: list });
     ui.setForm = null;
+    targetMoment(ui.entryForm.f, form.s.id);
     render();
   },
   "delete-set": () => {
@@ -20036,6 +20386,58 @@ const actions = {
   "sw-reset": () => {
     state.stopwatch = newStopwatch();
     writeNow(); render();
+  },
+  /* ── the stopwatch's time, onto a lift (renderSwLog) ─────────────────── */
+  "sw-log-open": () => {
+    const w = swOf();
+    if (swRunning(w) || swElapsed(w) < 1000) return;
+    ui.swLog = { date: todayStr(), mode: w.laps.length ? "laps" : "total", picks: [] };
+    render();
+  },
+  "sw-log-mode": (el) => { if (ui.swLog) { ui.swLog.mode = el.dataset.id; render(); } },
+  "sw-log-tick": (el) => {
+    if (!ui.swLog) return;
+    const i = +el.dataset.i;
+    ui.swLog.picks[i] = ui.swLog.picks[i] === false;
+    render();
+  },
+  /* Where the sets land, in this order, so a lift is never split across two
+     rows of the same day: the lift in the workout already open on that date,
+     else in the day parked for it, else the lift as SAVED that day (opened
+     the way the Log tab opens a row, and saved straight back to it), else a
+     new entry in that day's workout. */
+  "sw-log-pick": (el) => {
+    const L = ui.swLog;
+    const ex = L && state.library.find((x) => x.name === el.dataset.name);
+    if (!ex) return;
+    const secs = swLogTimes();
+    if (!secs.length) return;
+    const date = L.date || todayStr();
+    const sets = secs.map((n) => newSet("", "", "", String(n)));
+    ui.swLog = null;
+    const isIt = (e) => e.exercise === ex.name && kindOf(e) === "hold";
+    const lastOf = (list) => [...list].reverse().find(isIt) || null;
+    let sheetNow = ui.workoutSheet && !ui.workoutSheet.planning && ui.workoutSheet.date === date ? ui.workoutSheet : null;
+    if (ui.workoutSheet && !sheetNow) closeWorksheet();
+    if (!sheetNow) {
+      const parked = (state.dayDrafts || []).find((d) => d.date === date);
+      if (parked && lastOf(parked.entries)) sheetNow = sheetFromParked(parked);
+    }
+    const inSheet = sheetNow && lastOf(sheetNow.entries);
+    const saved = !inSheet && state.log.filter((e) => e.date === date && isIt(e))
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))[0];
+    let f, isDraft = true;
+    if (inSheet) { ui.workoutSheet = sheetNow; f = { ...inSheet }; }
+    else if (saved) { f = { ...saved }; isDraft = false; }
+    else { ui.workoutSheet = sheetNow || sheetForDay(date); f = newEntry(ex.name, ex.muscle, exKind(ex)); }
+    f = syncEntry({ ...f, setList: [...(f.setList || []), ...sets] });
+    ui.entryForm = { f, isDraft };
+    ui.setForm = null; ui.picking = false; ui.pickerQ = ""; ui.pickerQuick = null;
+    ui.tab = "log";
+    ui.flashSets = null;
+    for (const s of sets) targetMoment(f, s.id);
+    ui.flashSets = sets.map((s) => s.id);
+    render();
   },
   "toast-dismiss": () => {
     const id = ui.timerToast && ui.timerToast.id;
@@ -20342,6 +20744,17 @@ function handleBind(el) {
       v = clean;
     }
     v = decimalize(v);
+  }
+  /* the time box: digits in from the right, shown with colons, stored as
+     whole seconds. The caret goes to the end, which is where a timer keypad
+     always types. */
+  if (el.dataset.dur != null) {
+    const d = durClean(v), shown = durShow(d);
+    if (shown !== v) {
+      el.value = shown;
+      try { el.setSelectionRange(shown.length, shown.length); } catch { /* not a text field */ }
+    }
+    v = d ? String(durFromDigits(d)) : "";
   }
   if (bind === "libq") {
     ui.libraryQ = v;
@@ -20659,6 +21072,14 @@ function handleBind(el) {
     if (ui.entryForm) { ui.entryForm.f.unit = v; render(); }
   } else if (bind.startsWith("entry.")) {
     ui.entryForm.f[bind.slice(6)] = v; updateEntryPreview();
+  } else if (bind === "swLog.date") {
+    if (ui.swLog) ui.swLog.date = v || todayStr();
+  } else if (bind.startsWith("target.")) {
+    /* target.<i>.<field> for a set, target.<field> for cardio; patched in
+       place, nothing on screen reads it until Save */
+    const p = bind.split(".");
+    if (ui.targetForm && p.length === 3 && ui.targetForm.sets[+p[1]]) ui.targetForm.sets[+p[1]][p[2]] = v;
+    else if (ui.targetForm && p.length === 2) ui.targetForm[p[1]] = v;
   } else if (bind.startsWith("set.")) {
     ui.setForm.s[bind.slice(4)] = v; updateSetPreview();
   } else if (bind.startsWith("timer.")) {
@@ -20675,6 +21096,16 @@ function handleBind(el) {
   /* every field is a checkpoint, nothing typed is ever only in memory */
   persist();
 }
+
+/* A time box types from the right like a timer, so a digit typed onto 1:30
+   would shift it to 13:01. Landing in one selects what is there instead, and
+   the first digit starts the time over, which is what a timer's keypad does.
+   Deferred a tick because iOS drops a selection made inside the focus. */
+document.addEventListener("focusin", (e) => {
+  const el = e.target;
+  if (el && el.dataset && el.dataset.dur != null && el.value)
+    setTimeout(() => { try { if (document.activeElement === el) el.select(); } catch { /* not a text field */ } }, 0);
+});
 
 document.addEventListener("input", (e) => {
   /* selects and the colour well re-render on commit, not on every tick of a

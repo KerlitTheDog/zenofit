@@ -244,26 +244,42 @@ export async function chatRoute(ctx) {
       "ORDER BY COALESCE(t.last_message_at, t.created_at) DESC LIMIT 100"
     ).bind(user.id, user.id, user.id).all();
 
+    /* ── WHO THIS ACCOUNT HAS BLOCKED, SO THE WAY BACK CAN BE OFFERED ──────
+       A block takes the person out of search in both directions, so once the
+       conversation was also removed there was nothing left to tap to undo it,
+       and the app could not even tell a blocked conversation from any other.
+       Each member now says whether this account has blocked them (the menu
+       offers Unblock where it offered Block), and the list says how many are
+       blocked in all, so the app can show the way to every one of them. */
+    const blockedRows = await env.DB.prepare("SELECT blocked_id FROM chat_blocks WHERE user_id = ?")
+      .bind(user.id).all();
+    const blocked = new Set((blockedRows.results || []).map((r) => r.blocked_id));
+
     const threads = rows.results || [];
-    if (!threads.length) return json({ chats: [], serverNow: Date.now() });
+    if (!threads.length) return json({ chats: [], blockedCount: blocked.size, serverNow: Date.now() });
 
     /* Everybody else in those threads, in one query rather than one per
-       thread: a DM is named by who is in it, so this IS the name. */
+       thread: a DM is named by who is in it, so this IS the name. The caller
+       is left out here rather than in SQL: with a hundred threads the ids
+       alone are D1's limit of 100 bound parameters, and one more failed the
+       whole list for anybody with that many conversations. */
     const ids = threads.map((t) => t.id);
     const marks = ids.map(() => "?").join(",");
     const people = await env.DB.prepare(
       "SELECT cm.thread_id, u.id, u.username, u.display_name FROM chat_members cm " +
       "JOIN users u ON u.id = cm.user_id " +
-      "WHERE cm.thread_id IN (" + marks + ") AND cm.user_id != ?"
-    ).bind(...ids, user.id).all();
+      "WHERE cm.thread_id IN (" + marks + ")"
+    ).bind(...ids).all();
 
     const byThread = new Map();
     for (const r of people.results || []) {
+      if (r.id === user.id) continue;
       if (!byThread.has(r.thread_id)) byThread.set(r.thread_id, []);
-      byThread.get(r.thread_id).push({ userId: r.id, username: r.username, displayName: r.display_name });
+      byThread.get(r.thread_id).push({ userId: r.id, username: r.username, displayName: r.display_name, blocked: blocked.has(r.id) });
     }
 
     return json({
+      blockedCount: blocked.size,
       chats: threads.map((t) => ({
         threadId: t.id,
         kind: t.kind,

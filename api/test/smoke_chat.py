@@ -236,13 +236,32 @@ check("in BOTH directions", not any(u["userId"] == blocker["id"] for u in r.get(
 s, r = call("GET", "/v1/chats/blocks", token=blocker["token"])
 check("the block list says who", [b["userId"] for b in r.get("blocks", [])] == [nosy["id"]], r)
 
+# The way back: a blocked account is out of search, so the app has to be told
+# who is blocked to offer Unblock at all (in the conversation, and in a list).
+s, r = call("GET", "/v1/chats", token=blocker["token"])
+bthread = [c for c in r.get("chats", []) if c["threadId"] == btid]
+check("the chat list says how many are blocked", r.get("blockedCount") == 1, r.get("blockedCount"))
+check("and marks the blocked person in their conversation",
+      bthread and any(m["userId"] == nosy["id"] and m.get("blocked") is True for m in bthread[0]["members"]), bthread)
+check("never the blocker themselves", bthread and not any(m["userId"] == blocker["id"] for m in bthread[0]["members"]), bthread)
+s, r = call("GET", "/v1/chats", token=nosy["token"])
+nthread = [c for c in r.get("chats", []) if c["threadId"] == btid]
+check("the blocked side is told nothing: no flag and no count",
+      r.get("blockedCount") == 0 and nthread and not any(m.get("blocked") for m in nthread[0]["members"]), (r.get("blockedCount"), nthread))
+
 s, r = call("POST", "/v1/chats", token=nosy["token"], body={"userId": blocker["id"]})
 check("and a fresh chat cannot be started around it", s == 403, (s, r))
 
 s, r = call("DELETE", "/v1/chats/blocks/" + nosy["id"], token=blocker["token"])
 check("unblocking works", s == 200 and r.get("blocked") is False, (s, r))
+s, r = call("GET", "/v1/chats", token=blocker["token"])
+bthread = [c for c in r.get("chats", []) if c["threadId"] == btid]
+check("and the list takes the flag and the count back",
+      r.get("blockedCount") == 0 and bthread and not any(m.get("blocked") for m in bthread[0]["members"]), (r.get("blockedCount"), bthread))
 s, r = call("POST", "/v1/chats/%s/messages" % btid, token=nosy["token"], body={"body": "hi once more"})
 check("and they can write again", s == 201, (s, r))
+s, r = call("GET", "/v1/users/search?q=" + nosy["name"], token=blocker["token"])
+check("and they are back in search", any(u["userId"] == nosy["id"] for u in r.get("users", [])), r)
 
 print("\n== leaving ==")
 s, r = call("DELETE", "/v1/chats/" + btid, token=blocker["token"])

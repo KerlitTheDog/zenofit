@@ -4406,7 +4406,7 @@ async function rosterSync(opts) {
    flight. */
 function chatReset(keep) {
   if (!keep) chatForget();
-  ui.chatThread = null; ui.chatMenu = null; ui.chatFind = ""; ui.chatResults = null;
+  ui.chatThread = null; ui.chatMenu = null; ui.chatBlocks = null; ui.chatFind = ""; ui.chatResults = null;
   ui.chatMsgMenu = null; ui.chatAttach = null; ui.chatView = null; ui.chatImage = null; ui.shareTo = null;
 }
 
@@ -4692,6 +4692,9 @@ function chatRead() {
     c = { userId: me ? me.userId : null, threads: [], msgs: {} };
   }
   if (!Array.isArray(c.threads)) c.threads = [];
+  /* how many people this account has blocked, as the last thread list said:
+     it decides whether the way back to them is shown at all */
+  if (typeof c.blockedCount !== "number") c.blockedCount = 0;
   if (!c.msgs || typeof c.msgs !== "object") c.msgs = {};
   if (!c.drafts || typeof c.drafts !== "object") c.drafts = {};
   /* which shared things were already added, per message, so the button
@@ -4913,7 +4916,11 @@ async function chatPoll(opts) {
   try {
     const res = await C.listChats();
     const c = chatRead();
-    const before = JSON.stringify(c.threads.map((t) => [t.threadId, t.unread, t.lastMessageAt, t.muted]));
+    /* what a repaint depends on, blocks included: unblocking on another
+       phone has to take the bar and the menu's Unblock away here too */
+    const shape = () => JSON.stringify([c.blockedCount, c.threads.map((t) =>
+      [t.threadId, t.unread, t.lastMessageAt, t.muted, (t.members || []).map((m) => (m.blocked ? 1 : 0)).join("")])]);
+    const before = shape();
     const had = c.threads.map((t) => t.threadId);
     c.threads = (res.chats || []).map((t) => ({
       threadId: t.threadId, kind: t.kind, title: t.title || null,
@@ -4921,8 +4928,9 @@ async function chatPoll(opts) {
       lastMessage: t.lastMessage || null, lastMessageAt: t.lastMessageAt || t.createdAt || 0,
       lastReadAt: t.lastReadAt || 0,
     }));
+    if (typeof res.blockedCount === "number") c.blockedCount = res.blockedCount;
     chatApplyMarks(c.threads);
-    if (JSON.stringify(c.threads.map((t) => [t.threadId, t.unread, t.lastMessageAt, t.muted])) !== before) changed = true;
+    if (shape() !== before) changed = true;
     chatCloseRead();
     /* A conversation that has left the list (removed here or on another
        phone, or deleted with the other person's account) takes its
@@ -6171,6 +6179,7 @@ const ui = {
   chatStarting: false,  // a "start a chat with this person" round trip
   chatThread: null,     // {threadId, draft, hasMore, loading, paging, error}
   chatMenu: null,       // threadId whose mute/block/leave sheet is open
+  chatBlocks: null,     // {loading, list, error}: the Blocked people sheet, see renderChatBlocks
   chatMsgMenu: null,    // {threadId, messageId} a long-pressed message's copy/unsend sheet
   chatAttach: null,     // {threadId, step, q} the composer's + sheet
   chatView: null,       // {threadId, messageId, done?} a shared thing, open in full
@@ -6839,6 +6848,7 @@ function render() {
   if (ui.chatImage) html += renderChatImage();
   if (ui.chatAttach) html += renderChatAttach();
   if (ui.chatMenu) html += renderChatMenu();
+  if (ui.chatBlocks) html += renderChatBlocks();
   if (ui.chatMsgMenu) html += renderChatMsgMenu();
   /* sending something from where it lives: above whatever it lives in */
   if (ui.shareTo) html += renderShareTo();
@@ -9289,10 +9299,17 @@ function chatBodyHTML() {
      conversation with you once they are (see BRING A FRIEND) */
   const invite = `<button data-action="invite-share" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:13.5px;margin-top:${threads.length ? 4 : 10}px">${icon("user-plus", 15)} ${T("invite.button")}</button>
     <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:8px 2px 0">${T("invite.hint")}</div>`;
+  /* the way back to everybody blocked, there only while there is anybody:
+     a block takes them out of search, so a removed conversation used to
+     leave no road to them at all */
+  const nb = chatRead().blockedCount || 0;
+  const blocked = nb
+    ? `<button data-action="chat-blocks-open" style="display:flex;align-items:center;gap:6px;margin:16px auto 0;padding:6px 10px;font-size:12px;color:var(--faint)">${icon("user-x", 13)} ${T("chat.blockedLink", { n: nb })}</button>`
+    : "";
   return `${chatNotifyDoor()}${threads.length ? rows : `<div class="pb-card" style="padding:26px 20px;text-align:center;color:var(--muted);font-size:13px;line-height:1.6">
       ${icon("message-circle", 26, 'style="margin:0 auto 10px;display:block;color:var(--faint)"')}
       ${T("chat.empty")}
-    </div>`}${invite}`;
+    </div>`}${invite}${blocked}`;
 }
 
 /* The count on the nav's chat icon. A function of its own because it is
@@ -9424,8 +9441,22 @@ function renderChatThread() {
 /* The red line under the header, alone, so chatRepaint can put it up or
    take it down without touching the composer. */
 function chatErrHTML(f) {
-  if (!f || !f.error) return "";
-  return `<div style="padding:8px 16px;background:rgba(208,90,80,.12);border-bottom:1px solid var(--border-soft);font-size:11.5px;color:var(--red);line-height:1.4">${esc(f.error)}</div>`;
+  if (!f) return "";
+  /* A conversation with somebody you blocked says so where the composer is
+     useless, with the way back beside it. The refusal a send gets back
+     ("unblock them to write to them") used to be the first anybody heard of
+     it, and there was nothing on screen that could do what it said. */
+  const t = chatThreadOf(f.threadId);
+  const other = t && (t.members || [])[0];
+  const bar = other && other.blocked
+    ? `<div style="display:flex;align-items:center;gap:10px;padding:8px 16px;background:var(--surface2);border-bottom:1px solid var(--border-soft);font-size:11.5px;color:var(--muted);line-height:1.4">
+        <span style="flex:1;min-width:0">${T("chat.youBlockedBar", { name: esc(other.username || chatName(t)) })}</span>
+        <button data-action="chat-unblock" data-u="${esc(other.userId)}" class="pb-btn pb-ghost" style="padding:5px 11px;font-size:11.5px;flex-shrink:0">${T("chat.unblockBtn")}</button>
+      </div>`
+    : "";
+  /* the bar already says what that refusal would */
+  if (!f.error || (bar && f.error === T("chat.errYouBlocked"))) return bar;
+  return `${bar}<div style="padding:8px 16px;background:rgba(208,90,80,.12);border-bottom:1px solid var(--border-soft);font-size:11.5px;color:var(--red);line-height:1.4">${esc(f.error)}</div>`;
 }
 
 /* Everything inside the scrolling part of a conversation: the messages,
@@ -9511,6 +9542,18 @@ function chatThreadBodyHTML(f) {
       : `${f.hasMore ? `<div style="text-align:center;margin:4px 0 12px"><button data-action="chat-earlier" data-id="${esc(f.threadId)}" ${f.paging ? "disabled" : ""} class="pb-btn pb-ghost" style="padding:7px 14px;font-size:12px">${f.paging ? T("sync.working") : T("chat.earlier")}</button></div>` : ""}${bubbles}`;
 }
 
+/* What a block or an unblock changes on this phone at once, before the next
+   poll says the same: the person's flag in every conversation they are in,
+   and the count that decides whether the Blocked people link is shown. */
+function chatSetBlocked(userId, on) {
+  const c = chatRead();
+  let was = false;
+  for (const t of c.threads) for (const m of t.members || []) if (m.userId === userId) { was = was || !!m.blocked; m.blocked = on; }
+  if (on && !was) c.blockedCount = (c.blockedCount || 0) + 1;
+  if (!on && (was || ui.chatBlocks)) c.blockedCount = Math.max(0, (c.blockedCount || 0) - 1);
+  chatWrite();
+}
+
 /* Mute, block, leave. A sheet rather than three icons in the header: they
    are rare, two of them are about a person rather than a thread, and the
    one that is destructive should not sit a thumb's width from Back. */
@@ -9534,8 +9577,36 @@ function renderChatMenu() {
   return sheet(esc(name), "chatMenu", `
     ${row("chat-mute", t.muted ? "bell" : "bell-off",
       T(t.muted ? "chat.unmute" : "chat.mute"), T(t.muted ? "chat.unmuteHint" : "chat.muteHint"))}
-    ${other ? row("chat-block", "user-x", T("chat.block", { name: esc(other.username || name) }), T("chat.blockHint"), "var(--red)") : ""}
+    ${!other ? ""
+      : other.blocked ? row("chat-unblock", "user-check", T("chat.unblock", { name: esc(other.username || name) }), T("chat.unblockHint"))
+      : row("chat-block", "user-x", T("chat.block", { name: esc(other.username || name) }), T("chat.blockHint"), "var(--red)")}
     ${row("chat-leave", "trash-2", T("chat.leave"), T("chat.leaveHint"), "var(--red)")}
+  `, 130);
+}
+
+/* Everybody this account has blocked, each with Unblock. Opened from under
+   the chat list, and the one road back to somebody whose conversation is
+   gone: a block takes them out of search for both sides. Asked for when it
+   opens rather than kept, because it is rare and the server is the one
+   that knows. */
+function renderChatBlocks() {
+  const f = ui.chatBlocks;
+  const list = f.list || [];
+  const quiet = (s) => `<div style="padding:18px 4px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${s}</div>`;
+  const body = f.loading ? quiet(T("sync.working"))
+    : f.error ? `<div style="padding:10px 12px;border-radius:10px;background:rgba(208,90,80,.12);font-size:12px;color:var(--red);line-height:1.4">${esc(f.error)}</div>`
+    : !list.length ? quiet(T("chat.blockedEmpty"))
+    : list.map((b) => {
+      const name = b.username || T("chat.unknown");
+      return `<div class="pb-card" style="display:flex;align-items:center;gap:11px;padding:10px 12px;margin-bottom:8px">
+        ${chatAvatar(name)}
+        <span style="flex:1;min-width:0;font-weight:600;font-size:14px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(name)}</span>
+        <button data-action="chat-unblock" data-u="${esc(b.userId)}" class="pb-btn pb-ghost" style="padding:7px 12px;font-size:12.5px;flex-shrink:0">${T("chat.unblockBtn")}</button>
+      </div>`;
+    }).join("");
+  return sheet(T("chat.blockedTitle"), "chatBlocks", `
+    <div style="font-size:12px;color:var(--faint);line-height:1.5;margin-bottom:12px">${T("chat.blockedHint")}</div>
+    ${body}
   `, 130);
 }
 
@@ -19478,11 +19549,53 @@ const actions = {
     if (!confirm(T("chat.blockConfirm", { name: el.dataset.n || T("chat.unknown") }))) return;
     try {
       await C.blockUser(el.dataset.u);
+      chatSetBlocked(el.dataset.u, true);
       ui.chatMenu = null; ui.chatThread = null;
       chatLastPoll = 0;
       await chatPoll();
       render();
     } catch (e) { alert(chatErrText(e)); }
+  },
+
+  /* The other half of a block, from the conversation's menu, the bar in a
+     blocked conversation, or the Blocked people sheet. No confirm: it takes
+     nothing away, and the other person is not told this either. The poll
+     after it brings every surface (the bar, the menu, the count) in line
+     with the server. */
+  "chat-unblock": async (el) => {
+    const C = window.ZenofitCloud;
+    const uid = el.dataset.u;
+    if (!C || !uid || el.disabled) return;
+    el.disabled = true;
+    try {
+      await C.unblockUser(uid);
+      chatSetBlocked(uid, false);
+      if (ui.chatBlocks && Array.isArray(ui.chatBlocks.list))
+        ui.chatBlocks = { ...ui.chatBlocks, list: ui.chatBlocks.list.filter((b) => b.userId !== uid) };
+      if (ui.chatThread) ui.chatThread.error = null;
+      ui.chatMenu = null;
+      render();
+      chatLastPoll = 0; chatPoll();
+    } catch (e) { el.disabled = false; alert(chatErrText(e)); }
+  },
+
+  "chat-blocks-open": async () => {
+    const C = window.ZenofitCloud;
+    if (!C) return;
+    ui.chatBlocks = { loading: true, list: null, error: null };
+    render();
+    try {
+      const res = await C.listBlocks();
+      if (!ui.chatBlocks) return;                  // closed while it was asking
+      const list = (res && res.blocks) || [];
+      ui.chatBlocks = { loading: false, list, error: null };
+      const c = chatRead();
+      if (c.blockedCount !== list.length) { c.blockedCount = list.length; chatWrite(); }
+    } catch (e) {
+      if (!ui.chatBlocks) return;
+      ui.chatBlocks = { loading: false, list: null, error: chatErrText(e) };
+    }
+    render();
   },
 
   /* Leaves MY copy. The other person keeps theirs and writing to them
@@ -20136,7 +20249,7 @@ const actions = {
 const READ_OK = new Set([
   "nav", "fab", "log-seg", "timer-seg", "library-seg", "prog-seg", "picker-seg", "pick-filter", "lib-filter",
   "chat-open", "chat-close", "chat-send", "chat-start", "chat-find-clear", "chat-earlier",
-  "chat-retry", "chat-menu", "chat-mute", "chat-block", "chat-leave",
+  "chat-retry", "chat-menu", "chat-mute", "chat-block", "chat-unblock", "chat-blocks-open", "chat-leave",
   /* looking at and sending things is chat; ADDING one to your library is a
      write, and chat-import is deliberately not here */
   "chat-attach", "chat-attach-step", "chat-attach-send", "chat-view", "chat-view-close",

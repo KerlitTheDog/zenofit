@@ -676,6 +676,33 @@ const setLine = (s, kind = DEFAULT_KIND, unit) =>
 
 const filledSets = (e) => (e.setList || []).filter((s) => setHasData(s, kindOf(e)));
 
+/* ── A PLANNED SET MAY NAME ONLY PART OF A SET ────────────────────────
+   "80 kg, reps on the day", "ten at RPE 8", "something at RPE 8": any one
+   number is a plan, because that is how people decide a set before doing
+   it. A LOGGED set still needs the whole set (setHasData), since the log
+   records what you did and a weight with no reps is not a thing you did. */
+const targetHasData = (s, kind = DEFAULT_KIND) => !!s && (+s.rpe > 0 ||
+  (kind === "bodyweight" || kind === "hold" ? setHasData(s, kind) : +s.reps > 0 || +s.weight > 0));
+const targetSets = (e) => (e.setList || []).filter((s) => targetHasData(s, kindOf(e)));
+
+/* ...and written as what it names, nothing invented for the rest: "80 kg",
+   "10 reps @ RPE 8", "RPE 8". A whole set reads exactly as setLine has it.
+   A weight on its own always carries its unit, since "80" alone says
+   nothing. */
+function targetLine(s, kind = DEFAULT_KIND, unit, withRpe = true) {
+  const part = kind !== "bodyweight" && kind !== "hold";
+  const main = setHasData(s, kind) ? setLine(s, kind, unit)
+    : part && +s.weight > 0 ? `${esc(s.weight)} ${unit || state.settings.units}`
+    : part && +s.reps > 0 ? T("unit.nReps", { n: esc(s.reps) })
+    : "";
+  return [main, withRpe && +s.rpe > 0 ? `RPE ${esc(s.rpe)}` : ""].filter(Boolean).join(" @ ");
+}
+
+/* the same for a cardio target, which may name its minutes, its effort or both */
+const cardioTargetLine = (t) => +t.minutes > 0 && +t.intensity > 0
+  ? T("sug.cardioSet", { min: esc(t.minutes), rpe: esc(t.intensity) })
+  : +t.minutes > 0 ? `${esc(t.minutes)} ${T("unit.min")}` : `RPE ${esc(t.intensity)}`;
+
 /* The set that speaks for the whole exercise wherever one number is shown:
    the highest estimated 1RM, the most reps, the longest hold. */
 function bestSet(list, kind = DEFAULT_KIND) {
@@ -1321,16 +1348,23 @@ function planTargetOf(pe) {
   if (!pe) return null;
   const k = kindOf(pe);
   if (k === "cardio")
-    return +pe.minutes > 0 && +pe.intensity > 0 ? { minutes: pe.minutes, intensity: pe.intensity, kind: k } : null;
+    return +pe.minutes > 0 || +pe.intensity > 0 ? { minutes: pe.minutes || "", intensity: pe.intensity || "", kind: k } : null;
   /* the target is self-describing on purpose: it is copied onto the entry
      that answers it and read back out of the log years later, long after
-     the exercise it came from may have been re-declared or deleted */
-  const sets = filledSets(pe).map((s) => ({ reps: s.reps, weight: s.weight, secs: s.secs }));
+     the exercise it came from may have been re-declared or deleted. A set
+     may name only part of itself (targetHasData), RPE included. */
+  const sets = targetSets(pe).map((s) => ({ reps: s.reps || "", weight: s.weight || "", secs: s.secs || "", rpe: s.rpe || "" }));
   return sets.length ? { sets, unit: unitOf(pe), kind: k } : null;
 }
 
 const plansSorted = (list) => [...(list || [])].sort((a, b) => (a.date < b.date ? -1 : 1));
 const planOn = (list, dayStr) => (list || []).find((p) => p.date === dayStr) || null;
+/* What a plan is called, escaped and ready to print: its name, or, when it
+   was never given one, the muscle groups it covers ("Back · Biceps"), which
+   is what a training day's name nearly always is anyway. Never a stand-in
+   word like "Plan", which reads as a name somebody forgot to type. */
+const planTitle = (p) => p.name ? esc(p.name)
+  : [...new Set((p.entries || []).map((e) => groupOfEntry(e)))].map((g) => esc(groupLabel(g))).join(" · ");
 const planSetCount = (p) =>
   (p.entries || []).reduce((n, e) => { const t = planTargetOf(e); return n + (t && t.sets ? t.sets.length : 0); }, 0);
 
@@ -1358,19 +1392,17 @@ function planMarks(plans) {
    better than last time" are different questions and they part company on
    exactly the sets where it matters: see setProgress below.            */
 
+/* Judged only on the numbers the plan NAMED: "80 kg, reps on the day" is
+   met by any number of reps at 80, and a plan of an RPE alone names
+   nothing to fall short of, so doing the set is doing the plan. RPE is
+   never graded: a set that felt harder than planned is not under it. */
 function setVerdict(actual, target, kind = DEFAULT_KIND) {
   if (!actual || !target) return null;
   if (!setHasData(actual, kind)) return null;
-  /* the one-axis kinds: nothing to trade off, so the comparison is the
-     comparison. Strength is the only one with two axes to be short on. */
-  if (kind === "bodyweight" || kind === "hold") {
-    const f = kind === "hold" ? "secs" : "reps";
-    const a = +actual[f], t = +target[f];
-    return a < t ? "under" : a > t ? "beat" : "hit";
-  }
-  const r = +actual.reps, w = +actual.weight, tr = +target.reps, tw = +target.weight;
-  if (r < tr || w < tw) return "under";
-  return r > tr || w > tw ? "beat" : "hit";
+  const named = (kind === "bodyweight" ? ["reps"] : kind === "hold" ? ["secs"] : ["reps", "weight"])
+    .filter((a) => +target[a] > 0);
+  if (named.some((a) => +actual[a] < +target[a])) return "under";
+  return named.some((a) => +actual[a] > +target[a]) ? "beat" : "hit";
 }
 
 /* ── DID THIS SET GO BETTER THAN LAST TIME ────────────────────────────
@@ -1412,10 +1444,10 @@ function setProgress(actual, prev, kind = DEFAULT_KIND) {
 }
 
 function cardioVerdict(e, t) {
-  const m = +e.minutes, i = +e.intensity;
-  if (!(m > 0 && i > 0)) return null;
-  if (m < +t.minutes || i < +t.intensity) return "under";
-  return m > +t.minutes || i > +t.intensity ? "beat" : "hit";
+  if (!(+e.minutes > 0 && +e.intensity > 0)) return null;
+  const named = ["minutes", "intensity"].filter((a) => +t[a] > 0);
+  if (named.some((a) => +e[a] < +t[a])) return "under";
+  return named.some((a) => +e[a] > +t[a]) ? "beat" : "hit";
 }
 
 /* How one logged entry stands against the target it was given. Planned sets
@@ -1490,10 +1522,11 @@ function lastTimeSets(f, isDraft) {
 }
 
 /* How this entry stands against that session. Null when there is nothing to
-   compare with: a plan already answers the question, cardio is not sets, and
-   a first outing has no yesterday. */
+   compare with: cardio is not sets, and a first outing has no yesterday. A
+   plan does not stop it: "did I do what I said" and "did I beat last time"
+   are two questions, and a planned set gets both answers. */
 function entryLastResult(f, isDraft) {
-  if (!f || f.plan || !isSetKind(kindOf(f))) return null;
+  if (!f || !isSetKind(kindOf(f))) return null;
   if (!filledSets(f).length) return null;
   const prev = lastTimeSets(f, isDraft);
   if (!prev) return null;
@@ -6987,10 +7020,10 @@ function render() {
      so VoiceOver and a keyboard cannot wander into the screen behind a
      sheet, which a sighted person cannot touch either, since the sheet's
      backdrop covers it. A live announcement (role=status) is left alone.
-   - A window that has just opened takes focus, on its first control, when
-     nothing in it asked for the caret: a screen reader starts reading the
-     new window instead of the last thing tapped. Buttons only, never a
-     field, so no phone keyboard springs up.
+   - A window that has just opened takes focus itself (the layer, never its
+     first button, which drew a ring on the X) when nothing in it asked for
+     the caret: a screen reader starts reading the new window instead of the
+     last thing tapped. Never a field, so no phone keyboard springs up.
    And the page's language follows the app's, so a screen reader reads
    Svenska in a Swedish voice. */
 const A11Y_ACTION = {
@@ -7011,10 +7044,12 @@ const A11Y_ACTION = {
    here, since that is the phone keyboard springing up. */
 const FOCUS_DATA = ["action", "id", "r", "m", "u", "name", "date", "target", "c", "seg"];
 function a11yFocusKey(el) {
-  if (!el || el === document.body || !el.closest || !el.closest("#app") || !el.dataset || !el.dataset.action) return null;
-  if (!el.matches("button, [role=switch], [role=tab], [role=radio], [role=checkbox]")) return null;
-  const ov = el.closest("[data-overlay]");
+  if (!el || el === document.body || !el.closest || !el.closest("#app") || !el.dataset) return null;
   if (!(window.CSS && CSS.escape)) return null;
+  /* the window itself, which is where a window that has just opened puts it */
+  if (el.hasAttribute("data-layer")) return el.dataset.overlay ? { ov: el.dataset.overlay, sel: "" } : null;
+  if (!el.dataset.action || !el.matches("button, [role=switch], [role=tab], [role=radio], [role=checkbox]")) return null;
+  const ov = el.closest("[data-overlay]");
   return { ov: ov ? ov.dataset.overlay : "", sel: FOCUS_DATA.filter((k) => el.dataset[k] != null).map((k) => `[data-${k}="${CSS.escape(el.dataset[k])}"]`).join("") };
 }
 function a11yPass(opened, hadFocus, focusBack) {
@@ -7054,6 +7089,8 @@ function a11yPass(opened, hadFocus, focusBack) {
       const name = (t && t.textContent.trim()) || (f && (f.getAttribute("aria-label") || f.getAttribute("placeholder")) || "").trim();
       if (name) el.setAttribute("aria-label", name.slice(0, 80));
     }
+    /* focusable by script only, so a window can take focus itself */
+    if (!el.hasAttribute("tabindex")) el.tabIndex = -1;
     const z = parseInt(el.style.zIndex, 10) || 0;
     if (z >= topZ) { topZ = z; top = el; }
   }
@@ -7062,12 +7099,17 @@ function a11yPass(opened, hadFocus, focusBack) {
     const z = parseInt(el.style.zIndex, 10) || 0;
     el.inert = !!top && el !== top && z < topZ && el.getAttribute("role") !== "status" && !el.querySelector("[role=status]");
   }
+  /* The WINDOW takes the focus, not its first button. That button is the X,
+     and Chrome draws a script focus that no tap came before (the app coming
+     back with a sheet still open: relaunched, updated, refreshed) as
+     keyboard focus, so the X wore the gold ring for no reason anybody could
+     see. A screen reader hears the window's name either way, and Tab goes on
+     to its first control. */
   if (top && !hadFocus && opened.includes(top.dataset.overlay || "")) {
-    const first = top.querySelector("button:not([disabled]), [role=switch]");
-    if (first) try { first.focus({ preventScroll: true }); } catch { /* nothing to focus */ }
+    try { top.focus({ preventScroll: true }); } catch { /* nothing to focus */ }
   } else if (focusBack && (!document.activeElement || document.activeElement === document.body)) {
     const scope = focusBack.ov ? root.querySelector(`[data-overlay="${focusBack.ov}"]`) : root;
-    const again = scope && focusBack.sel && scope.querySelector(focusBack.sel);
+    const again = scope && (focusBack.sel ? scope.querySelector(focusBack.sel) : focusBack.ov && scope);
     if (again && !again.disabled && !again.closest("[inert]")) try { again.focus({ preventScroll: true }); } catch { /* gone */ }
   }
 }
@@ -7410,7 +7452,7 @@ function renderTodayPlan(log, unfinished = null) {
     return `<button data-action="plan-open" data-d="${esc(next.date)}" style="width:100%;display:flex;align-items:center;gap:8px;margin-top:12px;padding:2px;color:var(--muted);text-align:left">
       ${icon("calendar-check", 13, 'style="color:var(--faint);flex-shrink:0"')}
       <span style="flex:1;min-width:0;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
-        ${T("plan.tomorrowLine", { what: next.name ? esc(next.name) : TN("move", (next.entries || []).length) })}
+        ${T("plan.tomorrowLine", { what: planTitle(next) })}
       </span>
       ${icon("chevron-right", 13, 'style="color:var(--faint);flex-shrink:0"')}
     </button>`;
@@ -7424,7 +7466,7 @@ function renderTodayPlan(log, unfinished = null) {
         <div style="flex:1"></div>
         ${trained ? chip(T("plan.alreadyTrained")) : ""}
       </div>
-      <div class="pb-num" style="font-size:19px;font-weight:700;line-height:1.15;margin-top:2px">${plan.name ? esc(plan.name) : T("plan.badge")}</div>
+      <div class="pb-num" style="font-size:19px;font-weight:700;line-height:1.15;margin-top:2px">${planTitle(plan)}</div>
       <div style="font-size:12px;color:var(--muted);margin-top:1px">
         ${TN("move", (plan.entries || []).length)}${sets ? " · " + T("plan.nSets", { n: sets }) : ""}
       </div>
@@ -7878,25 +7920,32 @@ function renderDeloadForm() {
    Runs of identical sets are compressed, because "3 sets · 8 × 100 kg" is
    how anybody writes down a plan and "8 × 100 · 8 × 100 · 8 × 100" is not.
    A planned exercise with no numbers on it is a legitimate plan (the
-   running order, decided, the numbers left for the day) and says so. */
+   running order, decided, the numbers left for the day) and says so, and
+   so is one that names only part of each set (targetLine). */
 function planTargetLine(t, unit) {
   if (!t) return T("plan.noNumbers");
-  if (!t.sets) return T("sug.cardioSet", { min: t.minutes, rpe: t.intensity });
+  if (!t.sets) return cardioTargetLine(t);
   const k = KIND[t.kind] ? t.kind : DEFAULT_KIND;
   const u = t.unit || unit || state.settings.units;
-  const same = (a, b) => a.reps === b.reps && a.weight === b.weight && a.secs === b.secs;
+  const same = (a, b) => a.reps === b.reps && a.weight === b.weight && a.secs === b.secs && (a.rpe || "") === (b.rpe || "");
   const runs = [];
   for (const st of t.sets) {
     const last = runs[runs.length - 1];
     if (last && same(last, st)) last.n += 1;
-    else runs.push({ n: 1, reps: st.reps, weight: st.weight, secs: st.secs });
+    else runs.push({ ...st, n: 1 });
   }
   /* "3 sets · 8 × 100 kg" only earns the count when there is more than one
      of them; a single set is just the set */
   if (runs.length === 1 && runs[0].n > 1)
-    return `${TN("set", runs[0].n)} · ${setLine(runs[0], k, u)}`;
-  /* the unit rides on the last one only, so a row of sets does not repeat it */
-  return runs.map((r, i) => `${r.n > 1 ? r.n + " × " : ""}${setLine(r, k, i === runs.length - 1 ? u : "")}`.trim()).join(" · ");
+    return `${TN("set", runs[0].n)} · ${targetLine(runs[0], k, u)}`;
+  /* the unit rides on the last one only, so a row of sets does not repeat it.
+     A part-set is spelled out each time rather than counted, because
+     "2 × 80 kg" reads as two reps at 80. */
+  return runs.flatMap((r, i) => {
+    const whole = setHasData(r, k);
+    const one = targetLine(r, k, whole && i < runs.length - 1 ? "" : u);
+    return whole ? [`${r.n > 1 ? r.n + " × " : ""}${one}`] : Array(r.n).fill(one);
+  }).join(" · ");
 }
 
 /* the same line for a planned ENTRY, which is where a target comes from */
@@ -7987,7 +8036,7 @@ function renderDayCard(log, library, settings) {
   const planned = plan ? `<div style="padding:0 14px 12px">
       ${logged.length ? `<div class="pb-hairline" style="margin:0 0 12px"></div>` : ""}
       <div style="display:flex;align-items:center;gap:7px;margin-bottom:8px">
-        <div class="pb-label" style="flex:1;min-width:0">${plan.name ? esc(plan.name) : T("plan.badge")}</div>
+        <div class="pb-label" style="flex:1;min-width:0">${planTitle(plan)}</div>
         ${planLeft ? chip(T("plan.leftToDo", { n: (plan.entries || []).length }), "var(--gold)")
           : planUnused ? chip(T("plan.missed"))
           : logged.length ? chip(T("plan.unused"))
@@ -8074,8 +8123,8 @@ function renderPlanList(log) {
     return `<button data-action="plan-open" data-d="${esc(p.date)}" style="width:100%;display:flex;align-items:center;gap:10px;padding:10px 12px;text-align:left;color:var(--text);opacity:${stale ? 0.5 : 1};border-top:1px solid var(--border-soft)">
       ${icon("calendar-check", 14, `style="color:${stale ? "var(--faint)" : "var(--gold)"};flex-shrink:0"`)}
       <div style="flex:1;min-width:0">
-        <div style="font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.name ? esc(p.name) : when}</div>
-        <div style="font-size:11px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${p.name ? when + " · " : ""}${TN("move", (p.entries || []).length)}${sets ? " · " + T("plan.nSets", { n: sets }) : ""}${stale ? " · " + T("plan.missed") : ""}</div>
+        <div style="font-size:13.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${planTitle(p)}</div>
+        <div style="font-size:11px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${when} · ${TN("move", (p.entries || []).length)}${sets ? " · " + T("plan.nSets", { n: sets }) : ""}${stale ? " · " + T("plan.missed") : ""}</div>
       </div>
       ${icon("chevron-right", 14, 'style="color:var(--faint);flex-shrink:0"')}
     </button>`;
@@ -9852,7 +9901,7 @@ async function chatBuildThing(kind, ref) {
       const k = kindOf(e);
       const row = { exercise: e.exercise, muscle: groupOfEntry(e), kind: k, unit: unitOf(e) };
       if (k === "cardio") { row.minutes = e.minutes || ""; row.intensity = e.intensity || ""; }
-      else row.sets = filledSets(e).map((st) => ({ reps: st.reps, weight: st.weight, secs: st.secs, drop: isDrop(st) }));
+      else row.sets = targetSets(e).map((st) => ({ reps: st.reps, weight: st.weight, secs: st.secs, rpe: st.rpe || "", drop: isDrop(st) }));
       if (e.notes) row.notes = e.notes;
       return row;
     });
@@ -10296,7 +10345,7 @@ function renderChatView() {
          built out of sanitised numbers only */
       const pe = {
         kind: k, unit: pUnit(r.unit), minutes: pNumStr(r.minutes), intensity: pNumStr(r.intensity),
-        setList: pList(r.sets, 40).map((st) => ({ reps: pNumStr(st.reps), weight: pNumStr(st.weight), secs: pNumStr(st.secs) })),
+        setList: pList(r.sets, 40).map((st) => ({ reps: pNumStr(st.reps), weight: pNumStr(st.weight), secs: pNumStr(st.secs), rpe: pNumStr(st.rpe) })),
       };
       return `<div style="display:flex;gap:10px;padding:11px 14px;border-bottom:${i < rows.length - 1 ? "1px solid var(--border-soft)" : "none"}">
         <span style="width:8px;height:8px;border-radius:4px;border:1.5px solid ${color};box-sizing:border-box;flex-shrink:0;margin-top:6px"></span>
@@ -10543,8 +10592,8 @@ function renderChatAttach() {
       const sets = planSetCount(x);
       return chatPickRow("plan", x.id,
         `<span style="width:34px;height:34px;border-radius:9px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:${CHAT_THING_INK.plan}22;color:${CHAT_THING_INK.plan}">${icon("calendar-clock", 16)}</span>`,
-        esc(x.name || fmtDate(x.date)),
-        [x.name ? fmtDate(x.date) : "", TN("exercise", x.entries.length), sets ? TN("set", sets) : ""].filter(Boolean).join(" · "));
+        planTitle(x),
+        [fmtDate(x.date), TN("exercise", x.entries.length), sets ? TN("set", sets) : ""].filter(Boolean).join(" · "));
     };
     body = all.length ? `<div class="pb-card" style="overflow:hidden">${[...ahead, ...gone].map(row).join("")}</div>`
       : `<div style="padding:18px 6px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T("chat.pickNoPlans")}</div>`;
@@ -10932,10 +10981,10 @@ function chatImport(m, asCopy, opts = {}) {
         if (kind === "cardio") { e.minutes = pNumStr(r.minutes); e.intensity = pNumStr(r.intensity); }
         else {
           e.setList = pList(r.sets, 40).map((st) => {
-            const set = newSet(pNumStr(st.reps), pNumStr(st.weight), "", pNumStr(st.secs));
+            const set = newSet(pNumStr(st.reps), pNumStr(st.weight), pNumStr(st.rpe), pNumStr(st.secs));
             if (st.drop === true) set.drop = true;
             return set;
-          }).filter((set) => setHasData(set, kind));
+          }).filter((set) => targetHasData(set, kind));
         }
       }
       if (typeof r.notes === "string" && r.notes) e.notes = pStr(r.notes, 500);
@@ -12636,7 +12685,8 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
       </div>`
     : draft.entries.map((e, ei) => {
     const b = badges[e.id] || {};
-    const empty = !entryHasData(e);
+    /* a planned lift that names any of its numbers is not waiting on them */
+    const empty = planning ? !planTargetOf(e) : !entryHasData(e);
     const chain = supers.cont[ei];
     /* An entry started from a plan carries its target, and the card counts
        the target down as the sets go in. It is the only thing on this
@@ -14530,11 +14580,13 @@ function ghostSetRow(t, n, unit, kind = DEFAULT_KIND) {
     <button data-action="plan-load-set" data-i="${n - 1}" style="flex:1;min-width:0;display:flex;align-items:center;gap:11px;padding:11px 4px 11px 12px;text-align:left;color:var(--muted)">
       <div class="pb-num" style="width:24px;height:24px;border-radius:7px;border:1px dashed var(--border);display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:700;color:var(--faint);flex-shrink:0">${n}</div>
       <div style="flex:1;min-width:0">
-        <div class="pb-num" style="font-weight:700;font-size:14.5px;color:var(--muted)">${setLine(t, kind, unit)}</div>
+        <div class="pb-num" style="font-weight:700;font-size:14.5px;color:var(--muted)">${targetLine(t, kind, unit)}</div>
         <div style="font-size:11px;color:var(--faint)">${T("plan.ghostLabel")}</div>
       </div>
     </button>
-    <button data-action="plan-tick" data-i="${n - 1}" title="${T("plan.ghostDo")}" style="flex-shrink:0;padding:12px 14px;color:var(--gold);align-self:stretch;border-left:1px solid var(--border-soft)">${icon("check", 17)}</button>
+    ${/* only a whole set can be logged as planned: "80 kg" has no reps to
+          log, so that row is finished in the editor instead */
+      setHasData(t, kind) ? `<button data-action="plan-tick" data-i="${n - 1}" title="${T("plan.ghostDo")}" style="flex-shrink:0;padding:12px 14px;color:var(--gold);align-self:stretch;border-left:1px solid var(--border-soft)">${icon("check", 17)}</button>` : ""}
   </div>`;
 }
 
@@ -14547,10 +14599,14 @@ function renderSetList(f, unit, planning, isDraft) {
   const top = bestSet(filled, k);
   const targets = (f.plan && f.plan.sets) || [];
   const res = entryPlanResult(f);
-  /* With no plan to answer to, the reference is your own last session, set
-     for set. Never while WRITING a plan: that is an intention, and there is
-     nothing to grade yet. See entryLastResult for what this is fixing. */
+  /* Your own last session, set for set, planned or not. Never while WRITING
+     a plan: that is an intention, and there is nothing to grade yet. See
+     entryLastResult for what this is fixing. */
   const lastRes = planning ? null : entryLastResult(f, isDraft);
+  /* a set being PLANNED may name only part of itself (targetHasData) */
+  const has = (s) => (planning ? targetHasData(s, k) : setHasData(s, k));
+  const line = (s) => (planning ? targetLine(s, k, unit, false) : setLine(s, k, unit));
+  const planUnit = (f.plan && f.plan.unit) || unit;
 
   /* Rearranging is a mode, for the same reason it is one for the exercises
      in a day and the pinned strips: a set row is what you tap to correct a
@@ -14562,9 +14618,9 @@ function renderSetList(f, unit, planning, isDraft) {
   const drops = dropMarks(list);
 
   const dragRows = list.map((s, i) => reorderRow("set", i, list.length,
-    setHasData(s, k) ? setLine(s, k, unit) : T("sets.fillIn"),
-    setHasData(s, k)
-      ? [scoreWorthShowing(k) ? T("sets.score", { n: setScore(s, k), unit: metricUnit(k, unit) }) : "",
+    has(s) ? line(s) : T("sets.fillIn"),
+    has(s)
+      ? [scoreWorthShowing(k) && setScore(s, k) != null ? T("sets.score", { n: setScore(s, k), unit: metricUnit(k, unit) }) : "",
          s.rpe ? `RPE ${esc(s.rpe)}` : ""].filter(Boolean).join(" · ")
       : T("sets.blank"),
     `<span class="pb-num" style="font-size:12.5px;font-weight:700;color:var(--faint);flex-shrink:0;margin-right:14px">${i + 1}</span>`)).join("");
@@ -14572,22 +14628,25 @@ function renderSetList(f, unit, planning, isDraft) {
   const rows = list.map((s, i) => {
     const m = setScore(s, k);
     const isBest = top && s.id === top.id && filled.length > 1;
-    const blank = !setHasData(s, k);
-    /* a plan outranks last time: it is the thing you decided to do */
+    const blank = !has(s);
+    /* Two questions, two places. The word on the right is always last time,
+       planned set or not, so every row reads the same way; the plan's answer
+       sits beside the target it answers, in the line underneath. They are
+       judged by different rules because they are different questions:
+       setVerdict keeps the axes a plan named, setProgress asks the score
+       whether this slot went better than it did last time. */
     const t = targets[i];
-    const prev = !t && lastRes ? lastRes.prev[i] : null;
-    const ref = t || prev;
-    /* and it is judged by a different rule, because it is a different
-       question: setVerdict keeps a plan's two axes, setProgress asks the
-       score whether this slot went better than it did last time */
-    const v = t ? setVerdict(s, t, k) : prev ? setProgress(s, prev, k) : null;
+    const prev = lastRes ? lastRes.prev[i] : null;
+    const v = prev ? setProgress(s, prev, k) : null;
+    const pv = t ? setVerdict(s, t, k) : null;
     const refShort = (r) => k === "bodyweight" ? T("unit.nReps", { n: esc(r.reps) })
       : k === "hold" ? fmtHold(r.secs)
       /* two decimals, the same precision the row itself carries: a line
          that reads "last time 7 × 26.3" beside a verdict measured on 26.25
          is naming a weight nobody lifted */
       : `${esc(r.reps)} × ${esc(trimNum(r.weight, 2))}`;
-    const refLine = t ? T("plan.vsTarget", { target: refShort(t) })
+    const refLine = t
+      ? `<span style="color:${pv ? VERDICT_COLOR[pv] : "inherit"}">${T("plan.vsTarget", { target: targetLine(t, k, setHasData(t, k) ? "" : planUnit) })}${pv ? " " + T("plan.v." + pv) : ""}</span>`
       : prev ? T("sets.vsLast", { target: refShort(prev) })
       : "";
     const cont = drops.cont[i];
@@ -14597,14 +14656,14 @@ function renderSetList(f, unit, planning, isDraft) {
         <div class="pb-num" style="width:24px;height:24px;border-radius:7px;background:${cont ? "transparent" : "var(--surface2)"};border:1px ${cont ? "dashed var(--steel)" : "solid var(--border)"};display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:700;color:var(--muted);flex-shrink:0">${cont ? icon("corner-down-right", 12) : i + 1}</div>
         <div style="flex:1;min-width:0">
           <div style="font-weight:600;font-size:14.5px;color:${blank ? "var(--gold)" : "var(--text)"}">
-            ${blank ? T("sets.fillIn") : setLine(s, k, unit)}
+            ${blank ? T("sets.fillIn") : line(s)}
           </div>
           ${!blank ? `<div style="font-size:11.5px;color:var(--faint)">${
-            [scoreWorthShowing(k) ? T("sets.score", { n: m, unit: metricUnit(k, unit) }) : "",
+            [scoreWorthShowing(k) && m != null ? T("sets.score", { n: m, unit: metricUnit(k, unit) }) : "",
              s.rpe ? `RPE ${esc(s.rpe)}` : "", refLine].filter(Boolean).join(" · ")
           }</div>` : ""}
         </div>
-        ${v ? `<span style="font-size:10px;font-weight:700;letter-spacing:.05em;color:${VERDICT_COLOR[v]};flex-shrink:0;white-space:nowrap">${T((t ? "plan.v." : "last.v.") + v)}</span>` : ""}
+        ${v ? `<span style="font-size:10px;font-weight:700;letter-spacing:.05em;color:${VERDICT_COLOR[v]};flex-shrink:0;white-space:nowrap">${T("last.v." + v)}</span>` : ""}
         ${isBest ? chip(T("sets.best"), "var(--gold)") : ""}
         ${icon("pencil", 14, 'style="color:var(--faint);flex-shrink:0;margin-left:2px"')}
       </button>
@@ -14630,7 +14689,8 @@ function renderSetList(f, unit, planning, isDraft) {
     : list.length && !reordering ? `<span style="font-size:11px;color:var(--faint)">${T("sets.tapToEdit")}</span>`
     : "";
 
-  const head = sectionTitle(filled.length ? T("sets.titleN", { n: filled.length }) : T("sets.title"),
+  const counted = planning ? list.filter(has).length : filled.length;
+  const head = sectionTitle(counted ? T("sets.titleN", { n: counted }) : T("sets.title"),
     `<span style="display:flex;align-items:center;gap:10px">${status}${orderToggle("set-reorder", reordering, list.length > 1)}</span>`);
 
   return `
@@ -14863,17 +14923,19 @@ function renderPlanTarget(f, unit) {
 
    Nothing here is ever the log. Copy last time loads the target, not a
    set, the same tap-to-load rule as everywhere else. */
-const blankTargetSet = () => ({ reps: "", weight: "", secs: "" });
+const blankTargetSet = () => ({ reps: "", weight: "", secs: "", rpe: "" });
 
 function renderTargetForm() {
   const tf = ui.targetForm, f = ui.entryForm && ui.entryForm.f;
   if (!tf || !f) return "";
   const k = kindOf(f);
   const canCopy = !!lastOuting(f, ui.entryForm.isDraft);
-  const box = (bind, val, isTime) => isTime
+  const box = (bind, val, isTime, ph = "—") => isTime
     ? `<input class="pb-input" ${DUR} data-bind="${bind}" value="${durValue(val)}" placeholder="0:00" style="width:100%;padding:9px 10px">`
-    : `<input class="pb-input" ${NUM} data-bind="${bind}" value="${esc(val)}" placeholder="—" style="width:100%;padding:9px 10px">`;
+    : `<input class="pb-input" ${NUM} data-bind="${bind}" value="${esc(val)}" placeholder="${ph}" style="width:100%;padding:9px 10px">`;
   const small = (text) => `<span style="font-size:11.5px;color:var(--faint);flex-shrink:0">${text}</span>`;
+  /* any box may stay empty: "80 kg" or "10 @ RPE 8" is a plan (targetHasData) */
+  const rpeBox = (i, s) => `<div style="flex:0.8">${box(`target.${i}.rpe`, s.rpe || "", false, "RPE")}</div>`;
 
   const body = k === "cardio"
     ? `<div style="display:flex;gap:10px">
@@ -14886,6 +14948,7 @@ function renderTargetForm() {
             : k === "bodyweight" ? `<div style="flex:1">${box(`target.${i}.reps`, s.reps)}</div>${small(T("unit.reps"))}`
             : `<div style="flex:1">${box(`target.${i}.reps`, s.reps)}</div>${small("×")}
                <div style="flex:1.2">${box(`target.${i}.weight`, s.weight)}</div>${small(esc(tf.unit))}`}
+          ${small("@")}${rpeBox(i, s)}
           <button data-action="target-remove" data-i="${i}" aria-label="${T("sets.remove")}" style="flex-shrink:0;color:var(--red);padding:8px 4px">${icon("x", 16)}</button>
         </div>`).join("")}
       <button data-action="target-add" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;border-style:dashed;margin-bottom:12px">${icon("plus", 16)} ${T("sets.add")}</button>`;
@@ -15178,11 +15241,16 @@ let chatFindTimer = null;
 let setRefs = { vs: null, best: null, unit: null };
 
 /* the single-set editor, same idea as the entry form, one level down */
+/* Can the set in the editor be saved? A whole set, or, while writing a PLAN,
+   any part of one (targetHasData): "80 kg" is a plan and not a record. */
+const setReady = (s, k) =>
+  (ui.entryForm && ui.entryForm.isDraft && ui.workoutSheet && ui.workoutSheet.planning ? targetHasData : setHasData)(s, k);
+
 function renderSetForm(form, unit) {
   const { s, isNew, index } = form;
   const k = ui.entryForm ? kindOf(ui.entryForm.f) : DEFAULT_KIND;
   const m = setScore(s, k);
-  const ok = setHasData(s, k);
+  const ok = setReady(s, k);
   /* two references, two different questions: the set that stood in this
      one's place last session, and the best this lift has ever been worth.
      Both are worked out ONCE, here, and parked in setRefs for the keystroke
@@ -15290,7 +15358,7 @@ function updateSetPreview() {
   if (el) el.textContent = metricShow(k, m) ?? "—";
   if (vs) vs.innerHTML = vsLastLine(m, setRefs.vs);
   if (best) best.innerHTML = bestEverBlock(m, setRefs.best, setRefs.unit);
-  if (btn) { const ok = setHasData(s, k); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
+  if (btn) { const ok = setReady(s, k); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
 }
 
 /* ── WHAT THE SAVE BUTTON SAYS ───────────────────────────────
@@ -18883,7 +18951,9 @@ const actions = {
     const f = ui.entryForm && ui.entryForm.f;
     const t = f && f.plan && f.plan.sets && f.plan.sets[+el.dataset.i];
     if (!t) return;
-    const s = newSet(t.reps, t.weight, "", t.secs);
+    /* a part-set has nothing whole to log, so it opens in the editor */
+    if (!setHasData(t, kindOf(f))) return actions["plan-load-set"](el);
+    const s = newSet(t.reps, t.weight, t.rpe || "", t.secs);
     ui.entryForm.f = syncEntry({ ...f, setList: [...(f.setList || []), s] });
     targetMoment(ui.entryForm.f, s.id);
     render();
@@ -18894,13 +18964,14 @@ const actions = {
     const f = ui.entryForm && ui.entryForm.f;
     const t = f && f.plan && f.plan.sets && f.plan.sets[+el.dataset.i];
     if (!t) return;
-    ui.setForm = { s: newSet(t.reps, t.weight, "", t.secs), isNew: true, index: (f.setList || []).length };
+    ui.setForm = { s: newSet(t.reps, t.weight, t.rpe || "", t.secs), isNew: true, index: (f.setList || []).length };
     render();
   },
   "plan-fill-cardio": () => {
     const f = ui.entryForm && ui.entryForm.f;
     if (!f || !f.plan || f.plan.sets) return;
-    ui.entryForm.f = { ...f, minutes: f.plan.minutes, intensity: f.plan.intensity };
+    /* only what the plan named; a box it left open keeps whatever is in it */
+    ui.entryForm.f = { ...f, minutes: f.plan.minutes || f.minutes, intensity: f.plan.intensity || f.intensity };
     render();
   },
   "plan-result-close": () => { ui.planResult = null; render(); },
@@ -18960,10 +19031,10 @@ const actions = {
     const k = kindOf(f);
     let plan = null;
     if (k === "cardio") {
-      if (+tf.minutes > 0 && +tf.intensity > 0) plan = { minutes: tf.minutes, intensity: tf.intensity, kind: k };
+      if (+tf.minutes > 0 || +tf.intensity > 0) plan = { minutes: tf.minutes || "", intensity: tf.intensity || "", kind: k };
     } else {
-      const sets = tf.sets.filter((s) => setHasData(s, k))
-        .map((s) => ({ reps: s.reps || "", weight: s.weight || "", secs: s.secs || "" }));
+      const sets = tf.sets.filter((s) => targetHasData(s, k))
+        .map((s) => ({ reps: s.reps || "", weight: s.weight || "", secs: s.secs || "", rpe: s.rpe || "" }));
       if (sets.length) plan = { sets, unit: tf.unit, kind: k };
     }
     const { plan: _was, ...rest } = f;
@@ -20147,7 +20218,7 @@ const actions = {
     const { f, isDraft } = ui.entryForm;
     /* backing out of an exercise you've filled in but never added to the day
        throws real work away, and in Detailed mode that can be a whole set list */
-    const orphan = isDraft && entryHasData(f) && !ui.workoutSheet.entries.some((x) => x.id === f.id);
+    const orphan = isDraft && (entryHasData(f) || planTargetOf(f)) && !ui.workoutSheet.entries.some((x) => x.id === f.id);
     if (orphan && !confirm(T("entry.confirmDiscard"))) return;
     ui.entryForm = null; ui.setForm = null; render();
   },
@@ -20219,7 +20290,7 @@ const actions = {
   },
   "save-set": () => {
     const form = ui.setForm, f = ui.entryForm && ui.entryForm.f;
-    if (!form || !f || !setHasData(form.s, kindOf(f))) return;
+    if (!form || !f || !setReady(form.s, kindOf(f))) return;
     const list = form.isNew
       ? [...f.setList, form.s]
       : f.setList.map((x) => (x.id === form.s.id ? form.s : x));
@@ -20545,7 +20616,7 @@ const actions = {
     /* drop half-typed placeholder sets and refresh the headline numbers before
        anything leaves the form */
     const f0 = ui.entryForm.f;
-    const f = syncEntry(isSetKind(kindOf(f0)) ? { ...f0, setList: filledSets(f0) } : f0);
+    const f = syncEntry(isSetKind(kindOf(f0)) ? { ...f0, setList: planning ? targetSets(f0) : filledSets(f0) } : f0);
     const exists = entryOnRecord(f, isDraft);
     /* Nothing is turned away any more. An emptied row already on record goes
        back empty, which is the whole point of unticking it, and a brand-new

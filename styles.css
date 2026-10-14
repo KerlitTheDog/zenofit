@@ -480,3 +480,6 @@ a:focus-visible, select:focus-visible, .pb-chip:focus-visible{
   outline:2px solid var(--gold); outline-offset:2px; border-radius:10px;
 }
 .pb-input:focus-visible{ outline:none; }
+/* a window that has just opened holds focus itself, for a screen reader to
+   name it, and is not a control to draw a ring round (a11yPass) */
+[data-layer]:focus{ outline:none; }

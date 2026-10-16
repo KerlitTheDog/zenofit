@@ -35,7 +35,7 @@ import {
   validateItem, encodeCursor, decodeCursor,
   MAX_ITEMS_PER_PUSH, MAX_PUSH_BODY_BYTES,
   PAGE_DEFAULT, PAGE_MAX, PAGE_BYTE_BUDGET, BATCH_CHUNK,
-  wipeRefused, WIPE_FLOOR, WIPE_WINDOW_MS,
+  wipeRefused, WIPE_FLOOR, WIPE_WINDOW_MS, LATER_COLLECTIONS,
 } from "./sync.js";
 export { TimerAlarm } from "./timer.js";
 
@@ -1332,7 +1332,7 @@ async function route(request, env, url, ctx) {
     try { body = await readJson(request, MAX_PUSH_BODY_BYTES); }
     catch { return fail(413, "too_large", "That push is too big. Send fewer items."); }
 
-    const incoming = Array.isArray(body.items) ? body.items : null;
+    let incoming = Array.isArray(body.items) ? body.items : null;
     if (!incoming) return fail(400, "bad_request", "Send { items: [...] }.");
     if (incoming.length > MAX_ITEMS_PER_PUSH) {
       return fail(400, "too_many", "At most " + MAX_ITEMS_PER_PUSH + " items per push.");
@@ -1346,6 +1346,17 @@ async function route(request, env, url, ctx) {
     for (const item of incoming) {
       const problem = validateItem(item);
       if (problem) return fail(400, "bad_item", problem);
+    }
+
+    /* A deletion in a collection the pushing build never named is a mark it
+       could not apply, not somebody deleting a note (see LATER_COLLECTIONS
+       in sync.js): dropped, and answered as fine, so it forgets the mark. */
+    const knows = new Set(Array.isArray(body.knows) ? body.knows.filter((c) => typeof c === "string") : []);
+    const blind = (i) => i.deleted && LATER_COLLECTIONS.has(i.collection) && !knows.has(i.collection);
+    const ignored = incoming.filter(blind).length;
+    if (ignored) {
+      incoming = incoming.filter((i) => !blind(i));
+      if (!incoming.length) return json({ accepted: 0, skipped: ignored, staleItems: [], serverNow: Date.now() });
     }
 
     /* ── A BATCH THAT IS MOSTLY DELETIONS DOES NOT GET THE BENEFIT OF THE
@@ -1496,7 +1507,7 @@ async function route(request, env, url, ctx) {
 
     return json({
       accepted: toWrite.length,
-      skipped: stale.length,
+      skipped: stale.length + ignored,
       staleItems: stale,
       missingPhotos,
       updatedAt: now,

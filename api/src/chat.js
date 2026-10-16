@@ -33,7 +33,8 @@ export const CHAT_PUSH_TTL = 24 * 60 * 60;
 
 /* ── WHAT A MESSAGE CAN CARRY ──────────────────────────────────────────
    Words, or a thing from the app: an exercise, a preset, a logged day, a
-   personal record, a strength-standard rank, a photo. The thing travels as
+   personal record, a strength-standard rank, a photo, a note off the
+   notepad. The thing travels as
    a SNAPSHOT the sender's app built, not as a pointer into their profile,
    because the person receiving it has no access to that profile and never
    should: they get a copy, look at it, and may keep one of their own.
@@ -44,7 +45,7 @@ export const CHAT_PUSH_TTL = 24 * 60 * 60;
    message at a photo from somebody else's conversation. Everything else
    about a payload is the app's business, and the app treats one arriving
    from somebody else as data to be escaped, never as markup. */
-export const KINDS = new Set(["text", "image", "exercise", "preset", "workout", "plan", "record", "rank"]);
+export const KINDS = new Set(["text", "image", "exercise", "preset", "workout", "plan", "record", "rank", "note"]);
 export const MAX_PAYLOAD = 32 * 1024;
 
 /* A photo sent in a conversation lives in the photo store with its thread
@@ -283,7 +284,9 @@ export async function chatRoute(ctx) {
       chats: threads.map((t) => ({
         threadId: t.id,
         kind: t.kind,
-        title: t.title,
+        /* the chat with yourself is named after you for a build that does
+           not know the kind, which would otherwise call it "Unknown" */
+        title: t.title || (t.kind === "self" ? user.username || null : null),
         members: byThread.get(t.id) || [],
         unread: t.unread || 0,
         muted: !!t.muted,
@@ -305,7 +308,35 @@ export async function chatRoute(ctx) {
   if (seg.length === 2 && method === "POST") {
     const body = await readJson(request).catch(() => ({}));
     const other = typeof body.userId === "string" ? body.userId : "";
-    if (!other || other === user.id) return fail(400, "bad_request", "Who do you want to talk to?");
+    if (!other) return fail(400, "bad_request", "Who do you want to talk to?");
+
+    /* ── THE CHAT WITH YOURSELF ─────────────────────────────────────────
+       Your own id opens the one thread whose only member is you (kind
+       'self', `dm_key` your id twice, so it is still find-or-create and
+       never a second one). Nothing in it ever echoes: the send route fans
+       out to the OTHER members and counts unread from the OTHER senders,
+       and there are none, so a message there rings nothing and comes back
+       as nothing. It exists so one account can carry things between its
+       own profiles: chat belongs to the account, every profile sees it. */
+    if (other === user.id) {
+      const key = dmKey(user.id, user.id);
+      const now = Date.now();
+      let row = await env.DB.prepare("SELECT id FROM chat_threads WHERE dm_key = ?").bind(key).first();
+      if (!row) {
+        try {
+          await env.DB.prepare(
+            "INSERT INTO chat_threads (id, kind, created_by, created_at, dm_key) VALUES (?, 'self', ?, ?, ?)"
+          ).bind(newId(), user.id, now, key).run();
+        } catch { /* two phones at once: the UNIQUE index kept one, read it below */ }
+        row = await env.DB.prepare("SELECT id FROM chat_threads WHERE dm_key = ?").bind(key).first();
+        if (!row) return fail(500, "server_error", "Could not open that chat.");
+      }
+      await env.DB.prepare(
+        "INSERT INTO chat_members (thread_id, user_id, joined_at, opened_at) VALUES (?, ?, ?, ?) " +
+        "ON CONFLICT(thread_id, user_id) DO UPDATE SET left_at = NULL, opened_at = excluded.opened_at"
+      ).bind(row.id, user.id, now, now).run();
+      return json({ threadId: row.id, kind: "self", members: [] });
+    }
 
     const them = await env.DB.prepare(
       "SELECT id, username, display_name FROM users WHERE id = ? AND username_lc IS NOT NULL"
@@ -670,6 +701,41 @@ export async function chatRoute(ctx) {
         }
       }
       return json({ threadId, messageId: row.id, unsent: true, deletedAt: now });
+    }
+
+    /* ---- wipe the chat with yourself ---------------------------------------
+     * Every message in it, at once. Only there: in a conversation with
+     * somebody else half of it is theirs, and taking their words off their
+     * phone is not this account's to do (unsend is, one message of your
+     * own at a time). Tombstones, exactly as unsend leaves, because another
+     * phone signed in to this account may hold the messages and learns to
+     * drop them from the `unsent` list of its next `since` poll. The cards'
+     * hold on library photos is let go and the pictures sent in it go.
+     */
+    if (seg[3] === "messages" && seg.length === 4 && method === "DELETE") {
+      const t = await env.DB.prepare("SELECT kind FROM chat_threads WHERE id = ?").bind(threadId).first();
+      if (!t || t.kind !== "self") {
+        return fail(403, "not_self", "Only the chat with yourself can be wiped. Unsend your own messages instead.");
+      }
+      /* read before the tombstones, which the subquery would no longer see */
+      const held = await env.DB.prepare(
+        "SELECT DISTINCT holder FROM photo_refs WHERE holder IN " +
+        "(SELECT 'msg:' || id FROM chat_messages WHERE thread_id = ? AND deleted = 0)"
+      ).bind(threadId).all();
+      const now = Date.now();
+      const res = await env.DB.batch([
+        env.DB.prepare(
+          "UPDATE chat_messages SET deleted = 1, body = NULL, payload = NULL, deleted_at = ? WHERE thread_id = ? AND deleted = 0"
+        ).bind(now, threadId),
+        env.DB.prepare("UPDATE chat_threads SET last_message_at = NULL WHERE id = ?").bind(threadId),
+        env.DB.prepare("DELETE FROM photos WHERE thread_id = ?").bind(threadId),
+      ]);
+      const holders = (held.results || []).map((r) => r.holder);
+      if (holders.length) {
+        try { await setHoldings(env, Object.fromEntries(holders.map((h) => [h, []]))); }
+        catch (e) { console.error("photo holdings failed; the chat is wiped", e && e.message ? e.message : e); }
+      }
+      return json({ threadId, wiped: (res[0].meta && res[0].meta.changes) || 0, wipedAt: now });
     }
 
     /* ---- a photo whose message never went -------------------------------

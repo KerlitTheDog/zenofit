@@ -521,6 +521,9 @@
   function pushChanges(profileId, items, opts) {
     const body = { items: items };
     if (opts && opts.allowWipe) body.allowWipe = true;
+    /* the collections this build knows: a deletion in one it does not name
+       is refused by the server (LATER_COLLECTIONS in api/src/sync.js) */
+    if (opts && Array.isArray(opts.knows)) body.knows = opts.knows;
     return call("POST", "/v1/profiles/" + profileId + "/items", body);
   }
 
@@ -612,8 +615,13 @@
 
   /* Find-or-create. Tapping a name means "take me to the conversation with
      this person", which is the same request whether or not it exists yet, so
-     there is deliberately no separate create call to get wrong. */
+     there is deliberately no separate create call to get wrong. Your own id
+     opens the chat with yourself (kind "self"). */
   const openChat = (userId) => call("POST", "/v1/chats", { userId });
+
+  /* Every message in the chat with yourself, gone on every device. The
+     server refuses it for any other conversation. */
+  const wipeChat = (threadId) => call("DELETE", "/v1/chats/" + threadId + "/messages");
 
   /* opts: {since} for what is new, {before} to page back into history,
      {limit} for how much. Bare, it returns the tail of the thread. */
@@ -684,7 +692,7 @@
     listProfiles, createProfile, renameProfile, deleteProfile, setProfileOrder,
     rotateSeeds, joinWithSeed,
     listGrants, revokeGrant, setGrantLevel, leaveProfile,
-    searchUsers, listChats, openChat, fetchMessages, sendMessage, unsendMessage, uploadChatPhoto, discardChatPhoto,
+    searchUsers, listChats, openChat, wipeChat, fetchMessages, sendMessage, unsendMessage, uploadChatPhoto, discardChatPhoto,
     markChatRead, muteChat, leaveChat, listBlocks, blockUser, unblockUser,
     sharedActivity,
     _call: call,

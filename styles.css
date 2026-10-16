@@ -176,6 +176,11 @@ body { background: var(--outer); }
      the tinted row of the tier you are standing on. */
   --tier-wood:#d19d70; --tier-gold:var(--gold); --tier-diamond:#5fc9dd;
   --tier-titanium:#aab4c0; --tier-vibranium:#bf9fdd;
+  /* The notepad's colours (NOTE_COLORS in app.js): Google Keep's own dark
+     palette, deep enough that --text reads on every one of them */
+  --note-red:#77172e; --note-orange:#692b17; --note-yellow:#7c4a03; --note-green:#264d3b;
+  --note-teal:#0c625d; --note-blue:#256377; --note-navy:#284255; --note-purple:#472e5b;
+  --note-pink:#6c394f; --note-brown:#4b443a; --note-gray:#3c3f43;
 }
 :root[data-theme="light"]{
   color-scheme:light;
@@ -191,7 +196,34 @@ body { background: var(--outer); }
      near-white card */
   --tier-wood:#7d5133; --tier-gold:var(--gold); --tier-diamond:#08616f;
   --tier-titanium:#525e6b; --tier-vibranium:#6f4e96;
+  /* ...and its light one */
+  --note-red:#faafa8; --note-orange:#f39f76; --note-yellow:#fff8b8; --note-green:#e2f6d3;
+  --note-teal:#b4ddd3; --note-blue:#d4e4ed; --note-navy:#aeccdc; --note-purple:#d3bfdb;
+  --note-pink:#f6e2dd; --note-brown:#e9e3d4; --note-gray:#efeff1;
 }
+/* ── THE NOTEPAD ───────────────────────────────────────────────────────
+   Cards in two columns of whatever height their words make, the way Keep
+   lays out a page of notes; the browser balances the columns. */
+.pb-notes{ column-count:2; column-gap:8px; }
+.pb-note{
+  display:inline-block; width:100%; margin:0 0 8px; padding:11px 12px;
+  border:1px solid var(--border-soft); border-radius:12px;
+  text-align:left; color:var(--text); break-inside:avoid; vertical-align:top;
+}
+.pb-note-label{
+  font-size:10.5px; padding:2px 8px; border-radius:999px; max-width:100%;
+  background:rgba(127,127,127,.2); color:var(--text);
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+/* the editor's fields: no box, just the words on the colour of the note */
+.pb-note-field{
+  display:block; width:100%; padding:0; border:0; outline:none; resize:none;
+  background:transparent; color:var(--text); font-family:inherit; overflow:hidden;
+}
+.pb-note-field::placeholder{ color:var(--faint); }
+/* a row of chips that scrolls sideways instead of wrapping */
+.pb-chiprow{ display:flex; gap:6px; overflow-x:auto; margin:0 -16px 12px; padding:0 16px 2px; scrollbar-width:none; }
+.pb-chiprow::-webkit-scrollbar{ display:none; }
 /* ── VIEWPORT ENGINE ───────────────────────────────────────────────────
    Every measurement that has to answer to the device, how wide the frame
    is, how tall, and how much of it the phone's own furniture (status bar,

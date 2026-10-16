@@ -44,14 +44,15 @@
  * thread that is no longer there. The comments on each say which.
  */
 
-/* Every DM this account is in, left or not. */
+/* Every DM this account is in, left or not, and its chat with itself,
+   which goes whole for the same reason with nobody else to lose it. */
 const DM_THREADS =
   "SELECT m.thread_id FROM chat_members m JOIN chat_threads t ON t.id = m.thread_id " +
-  "WHERE m.user_id = ? AND t.kind = 'dm'";
+  "WHERE m.user_id = ? AND t.kind IN ('dm', 'self')";
 /* Anything else it is in. Nothing can create one yet. */
 const GROUP_THREADS =
   "SELECT m.thread_id FROM chat_members m JOIN chat_threads t ON t.id = m.thread_id " +
-  "WHERE m.user_id = ? AND t.kind != 'dm'";
+  "WHERE m.user_id = ? AND t.kind NOT IN ('dm', 'self')";
 const OWNED = "SELECT id FROM profiles WHERE owner_id = ?";
 
 /* Whether a holder in the photo index (photos.js) is one of this account's
@@ -102,7 +103,7 @@ export async function deleteAccount(env, user) {
       "AND NOT EXISTS (SELECT 1 FROM photo_refs r WHERE r.photo_id = photos.id)", uid),
   ];
   const dmMessages = q("DELETE FROM chat_messages WHERE thread_id IN (" + DM_THREADS + ")", uid);
-  const dmThreads = q("DELETE FROM chat_threads WHERE kind = 'dm' AND id IN (SELECT thread_id FROM chat_members WHERE user_id = ?)", uid);
+  const dmThreads = q("DELETE FROM chat_threads WHERE kind IN ('dm', 'self') AND id IN (SELECT thread_id FROM chat_members WHERE user_id = ?)", uid);
   const items = q("DELETE FROM items WHERE profile_id IN (" + OWNED + ")", uid);
   const profiles = q("DELETE FROM profiles WHERE owner_id = ?", uid);
 

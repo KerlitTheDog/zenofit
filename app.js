@@ -1736,7 +1736,7 @@ const seedTimers = () =>
 function newStopwatch() { return { startedAt: null, acc: 0, laps: [] }; }
 
 const defaultState = () => ({
-  version: 16,
+  version: 17,
   /* `sex` is "" until asked, and it is only ever asked by the strength
      standards, whose tables are split male/female. It sits in settings so it
      is remembered and travels in a backup, not because the app wants a
@@ -1750,12 +1750,13 @@ const defaultState = () => ({
   volumeGoals: {},// { [muscleGroup]: target sets per period }, user's own volume target
   presets: [],    // [{id,name,description,pinned,exercises:[{exercise,muscle,kind}],createdAt}]
   timers: seedTimers(), // [{id,name,duration,endsAt,remaining,doneAt,pinned,createdAt}]
-  stopwatch: newStopwatch(), // {startedAt,acc,laps}, the Log tab's third mini tab, see STOPWATCH
+  stopwatch: newStopwatch(), // {startedAt,acc,laps}, the Timer tab's second half, see STOPWATCH
   dayDrafts: [],  // [{id,date,entries,dayNote,savedAt}], workout days you backed out of, see closeWorksheet()
   dayNotes: {},   // { [date]: "how the session went" }, see dayNoteOn()
   unlogged: [],   // [{date,entries,savedAt}], lifts left unlogged on a day you DID save, see commitWorkout()
   plans: [],      // [{id,date,name,entries,createdAt}], days you intend to train, see planTargetOf()
   deloads: [],    // [{id,start,end}], planned easy weeks, inclusive ISO dates
+  notes: [],      // [{id,title,body,list,items:[{id,text,done}],color,pinned,archived,trashedAt,labels,createdAt,updatedAt}], the Log tab's notepad, see NOTEPAD
   drafts: {},     // half-finished forms, restored after a crash/lock, see snapshotDrafts()
 });
 
@@ -2010,6 +2011,12 @@ function migrate(s) {
     if (!s.dayNotes || typeof s.dayNotes !== "object" || Array.isArray(s.dayNotes)) s.dayNotes = {};
     s.version = 16;
   }
+  if (v < 17) {
+    /* v17 adds the notepad. Like v16, hydrate() has already put an empty
+       list under an older save; this only refuses anything that is not one. */
+    if (!Array.isArray(s.notes)) s.notes = [];
+    s.version = 17;
+  }
   return s;
 }
 
@@ -2110,9 +2117,21 @@ function cleanRow(collection, r) {
       if (c) out.color = c; else delete out.color;
       return out;
     }
+    /* a colour is a NAME from the palette (it is printed into a style), the
+       words are escaped where they are drawn, and a list is a list */
+    case "notes": return {
+      ...r, id: cleanToken(r.id),
+      color: NOTE_COLOR_SET.has(r.color) ? r.color : "",
+      labels: Array.isArray(r.labels) ? r.labels.filter((l) => typeof l === "string" && l).map((l) => l.slice(0, 40)).slice(0, 20) : [],
+      items: Array.isArray(r.items) ? r.items.filter((i) => i && typeof i === "object").map((i) => ({ id: cleanToken(i.id) || uid(), text: typeof i.text === "string" ? i.text : "", done: i.done === true })) : [],
+    };
     default: return r;
   }
 }
+/* NOTE_COLORS' twin, declared up here for the reason `uid` gives: hydrate
+   runs while this file is still being evaluated, long before the NOTEPAD
+   block's const exists */
+const NOTE_COLOR_SET = new Set(["", "red", "orange", "yellow", "green", "teal", "blue", "navy", "purple", "pink", "brown", "gray"]);
 /* the three map collections, one value at a time */
 function cleanMapValue(collection, key, v) {
   if (collection === "goals" || collection === "volumeGoals") return cleanNum(v);
@@ -2126,7 +2145,7 @@ function cleanMapValue(collection, key, v) {
 }
 function cleanState(s) {
   if (!s || typeof s !== "object") return s;
-  for (const c of ["log", "plans", "dayDrafts", "unlogged", "body", "deloads", "presets", "library", "groups"])
+  for (const c of ["log", "plans", "dayDrafts", "unlogged", "body", "deloads", "presets", "library", "groups", "notes"])
     if (Array.isArray(s[c])) s[c] = s[c].map((r) => cleanRow(c, r));
   for (const c of ["goals", "volumeGoals"])
     if (s[c] && typeof s[c] === "object") for (const k of Object.keys(s[c])) s[c][k] = cleanMapValue(c, k, s[c][k]);
@@ -2506,6 +2525,10 @@ function snapshotDrafts() {
     set: clone(ui.setForm),
     body: clone(ui.bodyForm),
     bodyWasNew: ui.bodyFormWasNew,
+    /* the note that was open: its words are already in state.notes, so only
+       which one, and a killed app comes back inside it rather than leaving a
+       note somebody had just started (perhaps still empty) on the grid */
+    note: ui.noteEdit ? ui.noteEdit.id : null,
     savedAt: Date.now(),
   };
 }
@@ -2595,6 +2618,8 @@ function closeEverything() {
   /* "send in a chat" names a lift or a preset of the profile being left,
      and a shared card's "add to my library" is about to mean another one */
   ui.shareTo = null; ui.chatView = null; ui.chatAttach = null;
+  /* a note is the profile's, like everything above */
+  ui.noteEdit = null; ui.noteMenu = null; ui.noteLabels = null; ui.notesQ = ""; ui.notesView = "notes";
   /* and a picture of the profile being left is a picture of nothing here */
   picClose();
 }
@@ -2910,6 +2935,7 @@ const SYNC_COLLECTIONS = {
   dayDrafts:   { id: (x) => x.id },
   unlogged:    { id: (x) => x.date },
   dayNotes:    { map: true },
+  notes:       { id: (x) => x.id },
   presets:     { id: (x) => x.id, order: true },
   library:     { id: (x) => x.id, order: true },
   groups:      { id: (x) => x.name, order: true },
@@ -2917,6 +2943,34 @@ const SYNC_COLLECTIONS = {
   volumeGoals: { map: true },
   settings:    { map: true, keys: ["units", "startDate", "weekMode", "sex", "name"] },
 };
+
+/* ── A COLLECTION THIS BUILD KNOWS AND AN OLDER ONE SKIPPED ───────────
+   A build that has never heard of a collection still records a mark for
+   every row of it it pulls, applies none of them, and moves its cursor past
+   them. Two things follow once that phone updates to a build that DOES know
+   the collection, and both are fixed here, once per profile, before its
+   first pull or push: the marks would read as rows deleted on this phone
+   (the next push a tombstone for every one), and the cursor would never
+   hand the rows over again. So the marks of every collection this record
+   was not kept with are dropped and the cursor goes back to the start; the
+   full pull that follows skips everything it already has (a row equal to
+   its mark is an echo) and lands only what was missed. The server's half
+   is LATER_COLLECTIONS in api/src/sync.js, which ignores a deletion in one
+   of these from a build that does not say it knows it (`knows` on every
+   push). A record from before this existed was kept with everything but
+   SYNC_SINCE_V1. */
+const SYNC_SINCE_V1 = ["notes"];
+function syncLearn(localId) {
+  const rec = syncFor(localId);
+  const all = Object.keys(SYNC_COLLECTIONS);
+  if (!rec || !rec.remoteId) return;
+  const kept = Array.isArray(rec.knows) ? rec.knows : all.filter((c) => !SYNC_SINCE_V1.includes(c));
+  const fresh = new Set(all.filter((c) => !kept.includes(c)));
+  if (!fresh.size) return;
+  const marks = { ...(rec.marks || {}) };
+  for (const k of Object.keys(marks)) if (fresh.has(k.slice(0, k.indexOf("/")))) delete marks[k];
+  syncSet(localId, { marks, cursor: null, knows: all });
+}
 
 /* djb2, base36. Short, fast, and only ever compared with itself: this
    answers "did this item change", never "are these two items equal". */
@@ -3071,6 +3125,7 @@ function syncApply(items, into) {
    You sync what is in front of you. */
 
 async function syncPull(localId) {
+  syncLearn(localId);    // before anything reads the marks or the cursor
   const rec = syncFor(localId);
   if (!rec || !rec.remoteId) return { ok: false, reason: "not-linked" };
   const C = window.ZenofitCloud;
@@ -3208,6 +3263,7 @@ const profileStateFor = (localId) =>
   (localId === activeProfileId() ? state : readProfileState(localId));
 
 async function syncPush(localId) {
+  syncLearn(localId);    // before anything reads the marks or the cursor
   const rec = syncFor(localId);
   if (!rec || !rec.remoteId) return { ok: false, reason: "not-linked" };
   if (rec.level === "read") return { ok: false, reason: "read-only" };
@@ -3334,7 +3390,7 @@ async function syncPush(localId) {
   const missingPhotos = [];
   for (let i = 0; i < queue.length; i += SYNC_PAGE) {
     const batch = queue.slice(i, i + SYNC_PAGE);
-    const res = await C.pushChanges(rec.remoteId, batch, { allowWipe });
+    const res = await C.pushChanges(rec.remoteId, batch, { allowWipe, knows: Object.keys(SYNC_COLLECTIONS) });
     sent += res.accepted || 0;
     /* rows naming a photo the server does not have (swept after nothing
        held it for days, or an upload that never landed): see below */
@@ -4141,7 +4197,7 @@ function profileHasContent(id) {
   const some = (k) => !!((d[k] || []).length);
   const someMap = (k) => !!Object.keys(d[k] || {}).length;
   return some("log") || some("body") || some("plans") || some("dayDrafts") ||
-         some("unlogged") || some("deloads") || some("presets") ||
+         some("unlogged") || some("deloads") || some("presets") || some("notes") ||
          someMap("goals") || someMap("volumeGoals") || someMap("dayNotes");
 }
 
@@ -4830,10 +4886,22 @@ const chatThreads = () => chatRead().threads;
 const chatThreadOf = (id) => chatThreads().find((t) => t.threadId === id) || null;
 const chatMsgs = (id) => chatRead().msgs[id] || [];
 
+/* ── THE CHAT WITH YOURSELF ───────────────────────────────────────────
+   One thread per account whose only member is you (kind "self", see
+   chat.js). Chat belongs to the account and every profile sees it, so it is
+   how a plan, an exercise or a note goes from one of your profiles to
+   another: send it here, switch profiles, open the card, add it. Nothing in
+   it echoes (no notification, no unread count, no second copy), and every
+   control that is about the OTHER person (block, mute, leave) is not
+   offered; a wipe is offered instead (`chat-wipe`). */
+const chatIsSelf = (t) => !!(t && t.kind === "self");
+const chatSelfThread = () => chatThreads().find(chatIsSelf) || null;
+
 /* A DM is named by who is in it. `members` is everybody but me, so for
    the only kind that exists today it is one person. */
 function chatName(t) {
   if (!t) return "";
+  if (chatIsSelf(t)) return T("chat.selfName", { name: (chatMe() || {}).username || "" });
   if (t.title) return t.title;
   const who = (t.members || []).map((m) => m.username || m.displayName).filter(Boolean);
   return who.length ? who.join(", ") : T("chat.unknown");
@@ -5180,7 +5248,7 @@ function apiErrText(e, offlineKey) {
 /* Chat's own codes before the shared ones. `not_found` is the one whose
    meaning depends on what was asked: a conversation that is gone, or (on
    opening one) an account that is. */
-const CHAT_ERR_KEY = { blocked: "chat.errBlocked", you_blocked: "chat.errYouBlocked", not_found: "chat.errGone" };
+const CHAT_ERR_KEY = { blocked: "chat.errBlocked", you_blocked: "chat.errYouBlocked", not_found: "chat.errGone", not_self: "chat.errNotSelf" };
 function chatErrText(e, notFoundKey) {
   if (!e) return T("chat.errGeneric");
   if (e.status === 401) return T("chat.errSignedOut");
@@ -5264,7 +5332,7 @@ function chatSWClick(data) {
   }
   /* A timer notification: the toast and the Timer tab already say what
      happened, so this only has to put somebody in front of them. */
-  if (data.kind === "timer") { ui.tab = "timer"; render(); }
+  if (data.kind === "timer") { noteLeave(); ui.tab = "timer"; render(); }   // a note open on top would hide the tab
   else if (data.kind === "test") { ui.notifyWin = true; ui.notifyDiag = { loading: true }; render(); notifyDiagLoad(); }
 }
 (function claimSWClicks() {
@@ -5277,6 +5345,26 @@ function chatSWClick(data) {
      openChatThread renders */
   if (queued.length) setTimeout(() => chatSWClick(queued[queued.length - 1]), 0);
 })();
+
+/* The chat with yourself, found or made (your own id, see chat.js), and put
+   in the cache at once so the screen about to open it can read it. */
+async function chatSelfOpen() {
+  const have = chatSelfThread();
+  if (have) return have.threadId;
+  const C = window.ZenofitCloud;
+  const me = chatMe();
+  if (!C || !me) throw new Error(T("chat.needAccount"));
+  const res = await C.openChat(me.userId);
+  const c = chatRead();
+  if (!c.threads.some((t) => t.threadId === res.threadId)) {
+    c.threads.unshift({
+      threadId: res.threadId, kind: "self", title: null, members: [],
+      unread: 0, muted: false, lastMessage: null, lastMessageAt: Date.now(), lastReadAt: 0,
+    });
+    chatWrite();
+  }
+  return res.threadId;
+}
 
 /* ── opening a conversation ───────────────────────────────────────────
    Paints from the cache first and then fetches, so tapping a name is
@@ -5407,7 +5495,10 @@ async function chatPost(threadId, { body, kind = "text", payload = null, upload 
   if (t) { t.lastMessage = { body, from: me.userId, at: Date.now(), kind }; t.lastMessageAt = Date.now(); }
   chatWrite();
   ui.chatStick = true;
-  render();
+  /* patched, not rendered, while the composer has the caret: render()
+     rebuilds `#app` and the keyboard went down with the old composer after
+     every message, so a second one meant tapping back into the field */
+  chatRepaint();
 
   await chatDeliver(threadId, clientId);
   return clientId;
@@ -5486,6 +5577,18 @@ document.addEventListener("scroll", (e) => {
   if (!el || !el.dataset || el.dataset.chatscroll == null) return;
   ui.chatStick = el.scrollHeight - el.scrollTop - el.clientHeight < CHAT_STICK_SLOP;
 }, { capture: true, passive: true });
+
+/* ── TAPPING SEND DOES NOT TAKE THE CARET OFF THE COMPOSER ─────────────
+   A button takes focus when it is pressed (Android, desktop), so the
+   composer lost the caret, the phone put its keyboard away, and every
+   message after the first needed a tap back into the field. Cancelling
+   the press's default keeps the caret where it is; the click still lands,
+   and chat-send clears the field in place rather than rendering it away. */
+const CHAT_KEEP_FOCUS = '[data-action="chat-send"]';
+["pointerdown", "mousedown"].forEach((ev) => document.addEventListener(ev, (e) => {
+  const a = document.activeElement;
+  if (a && a.dataset && a.dataset.bind === "chatDraft" && e.target.closest && e.target.closest(CHAT_KEEP_FOCUS)) e.preventDefault();
+}));
 
 /* The keyboard opening shortens the list by exactly the height of the
    keyboard (see `--pb-kb` in applyViewport), and the newest message has
@@ -6108,8 +6211,14 @@ function applyTheme(theme) {
 
 const ui = {
   tab: "home",
-  logSeg: "history",   // history | calendar
+  logSeg: "history",   // history | calendar | notes
   timerSeg: "timers",  // timers | stopwatch, the Timer tab's two halves
+  /* ── the notepad, see NOTEPAD ─────────────────────────────────────── */
+  notesView: "notes",  // notes | archive | trash | label:<name>
+  notesQ: "",          // the search over it, patched in place
+  noteEdit: null,      // {id, fresh?, focus?, palette?, showDone?} the note open full screen
+  noteMenu: null,      // a note id: its ⋮ sheet
+  noteLabels: null,    // {id, q} its label sheet
   /* the day the Log tab has been sent to by a jump from somewhere else, held
      only until the frame that lands on it has scrolled to it, see flashLogDay */
   logJump: null,
@@ -6619,10 +6728,11 @@ function applyViewport() {
      divides by 1; on a tablet it is the difference between a composer
      that clears the keyboard and one that clears twice too much.
 
-     ONLY THE CHAT COMPOSER SPENDS IT, and it spends it as padding on the
-     whole layer so the message list shrinks with it. Nothing else in the
-     app has a control the keyboard can bury: every other bottom sheet
-     scrolls, and `fitScrollFooters` is about content rather than chrome.
+     TWO LAYERS SPEND IT, the chat composer and the note editor's tool bar,
+     each as padding on the whole layer so the list above shrinks with it.
+     Nothing else in the app has a control the keyboard can bury: every
+     other bottom sheet scrolls, and `fitScrollFooters` is about content
+     rather than chrome.
 
      It is written ABOVE the early return below, on purpose. That return
      fires precisely when neither the scale nor the width has changed,
@@ -6839,23 +6949,13 @@ function render() {
 
   /* "time's up" banner, floating above the nav on whatever tab you're on, so a
      rest timer finishing while you're logging a set still gets your attention */
-  if (ui.timerToast) {
-    html += `<div class="pb-sheet" style="position:absolute;left:12px;right:12px;bottom:var(--pb-toast-b);z-index:40">
-      <div class="pb-card pb-timer-done" style="display:flex;align-items:center;gap:11px;padding:13px 14px;border-color:rgba(233,185,73,.55);background:var(--surface)">
-        ${icon("bell-ring", 20, 'style="color:var(--gold);flex-shrink:0"')}
-        <div style="flex:1;min-width:0">
-          <div style="font-weight:700;font-size:14px;color:var(--gold)">${T("timers.timesUp")}</div>
-          <div style="font-size:12.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(ui.timerToast.name)}</div>
-        </div>
-        <button data-action="toast-open" class="pb-btn pb-ghost" style="padding:7px 12px;font-size:12.5px">${T("common.open")}</button>
-        <button data-action="toast-dismiss" style="color:var(--muted);padding:6px">${icon("x", 18)}</button>
-      </div>
-    </div>`;
-  }
+  if (ui.timerToast) html += timerToastHTML();
 
-  /* FAB: always-visible overlay on Log */
+  /* FAB: always-visible overlay on Log. On the notepad it is a new note,
+     which is what a + means on a page of notes. */
   if (tab === "log" && !ui.workoutSheet) {
-    html += `<button data-action="fab" class="pb-btn pb-gold" style="position:absolute;right:18px;bottom:var(--pb-fab-b);width:56px;height:56px;border-radius:18px;box-shadow:0 8px 22px rgba(233,185,73,.35);z-index:30">${icon("plus", 26, 'stroke-width="2.6"')}</button>`;
+    const notes = ui.logSeg === "notes";
+    html += `<button data-action="${notes ? "note-new" : "fab"}" ${notes ? `aria-label="${esc(T("notes.new"))}"` : ""} class="pb-btn pb-gold" style="position:absolute;right:18px;bottom:var(--pb-fab-b);width:56px;height:56px;border-radius:18px;box-shadow:0 8px 22px rgba(233,185,73,.35);z-index:30">${icon("plus", 26, 'stroke-width="2.6"')}</button>`;
   }
 
   /* bottom nav */
@@ -6930,6 +7030,10 @@ function render() {
   if (ui.groupForm) html += renderGroupForm();
   if (ui.deloadForm) html += renderDeloadForm();
   if (ui.planResult) html += renderPlanResult();
+  /* a note, and the two sheets that open from it */
+  if (ui.noteEdit) html += renderNoteEditor();
+  if (ui.noteMenu) html += renderNoteMenu();
+  if (ui.noteLabels) html += renderNoteLabels();
   /* the thread first, then everything that opens from it on top of it:
      a card in full, a photo, the + sheet, and the two menus */
   if (ui.chatThread) html += renderChatThread();
@@ -6949,6 +7053,10 @@ function render() {
 
   html += `</div></div>`;
   app.innerHTML = html;
+
+  /* a note's fields grow to what is in them BEFORE the scroll is put back,
+     or a long note is one line tall for a moment and the scroll is clamped */
+  if (ui.noteEdit) noteFitAll();
 
   /* restore scroll */
   app.querySelectorAll("[data-scrollkey]").forEach((el) => {
@@ -7594,13 +7702,374 @@ function renderUnfinishedCard(u) {
 
 function renderLog(log, library, badges, settings, unit, currentWeek) {
   const seg = ui.logSeg;
-  const segs = [["history", T("log.history")], ["calendar", T("log.calendar")]].map(([id, label]) =>
+  const segs = [["history", T("log.history")], ["calendar", T("log.calendar")], ["notes", T("log.notepad")]].map(([id, label]) =>
     `<button data-action="log-seg" data-id="${id}" class="pb-btn" style="flex:1;padding:8px 0;font-size:13px;border-radius:8px;background:${seg === id ? "var(--raise)" : "transparent"};color:${seg === id ? "var(--text)" : "var(--muted)"};border:${seg === id ? "1px solid var(--border)" : "1px solid transparent"}">${label}</button>`).join("");
 
   return `<div class="" style="padding:12px 16px 0">
     <div style="display:flex;background:var(--surface2);border-radius:11px;padding:3px;margin-bottom:14px;border:1px solid var(--border-soft)">${segs}</div>
-    ${seg === "history" ? renderHistory(log, library, badges, settings, unit) : renderCalendarTab(log, library, settings, currentWeek)}
+    ${seg === "notes" ? renderNotes() : seg === "history" ? renderHistory(log, library, badges, settings, unit) : renderCalendarTab(log, library, settings, currentWeek)}
   </div>`;
+}
+
+/* ═══════════════════════════ NOTEPAD ══════════════════════════════════
+   The Log tab's third mini tab: notes, kept the way Google Keep keeps
+   them. A grid of cards, pinned ones first; a note is words or a
+   checklist, with a colour and labels; Archive puts one out of the way and
+   the trash holds a deleted one until somebody empties it (nothing leaves
+   on a timer: "nothing destroys quietly" holds here too). There is no Save
+   button: a note is kept as it is typed, and one closed with nothing in it
+   is not kept at all.
+
+   NOTES BELONG TO A PROFILE (`state.notes`), like everything else that is
+   not chat, so they sync between that profile's devices as a collection of
+   their own (`notes` in SYNC_COLLECTIONS, and COLLECTIONS in
+   api/src/sync.js), ride in its backup, and another profile has its own. A
+   note goes from one profile to another through the chat with yourself
+   (kind "note", see THINGS IN A MESSAGE).
+
+   TYPING NEVER RENDERS. render() rebuilds `#app` and the caret goes with
+   it, so a keystroke writes the note straight into `state` and persist()
+   is the checkpoint (noteSet with `draw` off), the way the chat composer
+   and every search here work. A checklist's Enter and Backspace move
+   between rows in the DOM itself for the same reason (noteSplitItem, and
+   the keydown listener beside handleBind). */
+const NOTE_COLORS = [...NOTE_COLOR_SET];   // "" is the plain card; each other one is a --note-* token
+const noteBg = (c) => (c && NOTE_COLORS.includes(c) ? `var(--note-${c})` : "var(--surface)");
+const NOTE_MAX_LABELS = 20;
+
+function newNote(list) {
+  const now = Date.now();
+  return {
+    id: uid(), title: "", body: "", list: !!list, items: list ? [{ id: uid(), text: "", done: false }] : [],
+    color: "", pinned: false, archived: false, trashedAt: null, labels: [], createdAt: now, updatedAt: now,
+  };
+}
+const noteOf = (id) => (state.notes || []).find((n) => n.id === id) || null;
+const noteItems = (n) => (n && Array.isArray(n.items) ? n.items : []);
+const noteEmpty = (n) => !String(n.title || "").trim() && !String(n.body || "").trim() &&
+  !noteItems(n).some((i) => String(i.text || "").trim());
+/* a note on somebody else's profile, or in the trash, is read, not written */
+const noteLocked = (n) => !n || !!n.trashedAt || syncReadOnly();
+
+/* One note changed. `draw` off is the typing path: written and saved, not
+   drawn, because the field being typed in is the thing that changed. */
+function noteSet(id, fields, draw = true) {
+  const notes = (state.notes || []).map((n) => (n.id === id ? { ...n, ...fields, updatedAt: Date.now() } : n));
+  if (draw) patch({ notes });
+  else { state = { ...state, notes }; persist(); }
+}
+
+/* every label in use, for the chips over the grid and the label sheet */
+function noteLabelsAll() {
+  const set = new Set();
+  for (const n of state.notes || []) if (!n.trashedAt) for (const l of n.labels || []) if (typeof l === "string" && l) set.add(l);
+  return [...set].sort((a, b) => a.localeCompare(b, localeTag()));
+}
+
+const noteMatches = (n, q) => [n.title, n.body, ...noteItems(n).map((i) => i.text), ...(n.labels || [])]
+  .some((x) => String(x || "").toLowerCase().includes(q));
+
+/* The view the grid is on. A label view whose label has just gone from
+   its last note falls back to Notes rather than to an empty page with no
+   chip lit. */
+function notesViewNow() {
+  const v = ui.notesView || "notes";
+  return v.startsWith("label:") && !noteLabelsAll().includes(v.slice(6)) ? "notes" : v;
+}
+
+/* What the grid shows, newest first: a search reads everything not in the
+   trash (archived notes included, as Keep's does); otherwise the chosen
+   view or label. */
+function notesShown() {
+  const v = notesViewNow();
+  const q = (ui.notesQ || "").trim().toLowerCase();
+  const all = (state.notes || []).slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  if (q) return all.filter((n) => !n.trashedAt && noteMatches(n, q));
+  if (v === "trash") return all.filter((n) => n.trashedAt);
+  if (v === "archive") return all.filter((n) => !n.trashedAt && n.archived);
+  if (v.startsWith("label:")) { const l = v.slice(6); return all.filter((n) => !n.trashedAt && (n.labels || []).includes(l)); }
+  return all.filter((n) => !n.trashedAt && !n.archived);
+}
+
+const noteLabelChips = (labels, max) => labels.length
+  ? `<span style="display:flex;flex-wrap:wrap;gap:4px;margin-top:8px">${labels.slice(0, max).map((l) =>
+    `<span class="pb-note-label">${esc(l)}</span>`).join("")}${labels.length > max ? `<span style="font-size:10.5px;color:var(--faint);align-self:center">+${labels.length - max}</span>` : ""}</span>`
+  : "";
+
+function noteCard(n, view) {
+  const items = noteItems(n);
+  const open = items.filter((i) => !i.done);
+  const done = items.length - open.length;
+  const title = String(n.title || "").trim();
+  const body = n.list
+    ? (items.length ? `<span style="display:flex;flex-direction:column;gap:3px">${open.slice(0, 8).map((i) =>
+        `<span style="display:flex;gap:6px;align-items:flex-start;font-size:12.5px;line-height:1.4">${icon("square", 12, 'style="flex-shrink:0;margin-top:2px;color:var(--muted)"')}<span style="min-width:0;word-break:break-word">${esc(i.text)}</span></span>`).join("")}
+        ${open.length > 8 ? `<span style="font-size:11.5px;opacity:.65">…</span>` : ""}
+        ${/* the card's own ink, dimmed: --faint is too weak on a coloured card */""}
+        ${done ? `<span style="font-size:11.5px;opacity:.65;margin-top:2px">${TN("notes.checkedN", done)}</span>` : ""}</span>` : "")
+    : String(n.body || "").trim()
+      ? `<span style="display:-webkit-box;-webkit-line-clamp:10;-webkit-box-orient:vertical;overflow:hidden;font-size:12.5px;line-height:1.45;white-space:pre-wrap;word-break:break-word">${esc(n.body)}</span>`
+      : "";
+  const labels = noteLabelChips(n.labels || [], 3);
+  return `<button data-action="note-open" data-id="${esc(n.id)}" class="pb-note" style="background:${noteBg(n.color)};border-color:${n.color ? "transparent" : "var(--border-soft)"}">
+    ${n.pinned && view !== "notes" ? `<span style="float:right;color:var(--muted);margin:0 0 4px 6px">${icon("pin", 12)}</span>` : ""}
+    ${title ? `<span style="display:block;font-weight:700;font-size:14px;line-height:1.3;margin-bottom:${body ? 6 : 0}px;word-break:break-word">${esc(title)}</span>` : ""}
+    ${body}${labels}
+    ${!title && !body && !labels ? `<span style="font-size:12.5px;color:var(--faint);font-style:italic">${T("notes.emptyNote")}</span>` : ""}
+  </button>`;
+}
+
+/* Under the search field and the chips: patched in place while the search
+   is typed (every search in this app patches and never renders). */
+function notesGridHTML() {
+  const list = notesShown();
+  const v = notesViewNow();
+  const q = (ui.notesQ || "").trim();
+  const grid = (ns) => `<div class="pb-notes">${ns.map((n) => noteCard(n, v)).join("")}</div>`;
+  if (!list.length) {
+    const [ic, key] = q ? ["search-x", "notes.noneFound"]
+      : v === "trash" ? ["trash-2", "notes.trashEmpty"]
+      : v === "archive" ? ["archive", "notes.archiveEmpty"]
+      : v.startsWith("label:") ? ["tag", "notes.labelEmpty"]
+      : ["sticky-note", "notes.empty"];
+    return `<div style="padding:34px 20px;text-align:center;color:var(--faint);font-size:13px;line-height:1.6">${icon(ic, 34, 'style="display:block;margin:0 auto 10px"')}${T(key)}</div>`;
+  }
+  if (v === "trash" && !q) {
+    return `<div style="display:flex;align-items:center;gap:10px;margin:0 2px 10px">
+        <span style="flex:1;font-size:11.5px;color:var(--faint);line-height:1.45">${T("notes.trashHint")}</span>
+        <button data-action="notes-empty-trash" class="pb-btn pb-ghost" style="padding:7px 12px;font-size:12px;color:var(--red);flex-shrink:0">${T("notes.emptyTrash")}</button>
+      </div>${grid(list)}`;
+  }
+  if (v === "notes" && !q) {
+    const pinned = list.filter((n) => n.pinned), others = list.filter((n) => !n.pinned);
+    if (pinned.length) {
+      return `${sectionTitle(T("notes.pinned"))}${grid(pinned)}${others.length ? `<div style="height:8px"></div>${sectionTitle(T("notes.others"))}${grid(others)}` : ""}`;
+    }
+  }
+  return grid(list);
+}
+
+function renderNotes() {
+  const v = notesViewNow();
+  /* the clear button is always in the DOM and shown in place, for the
+     reason the chat search gives: drawing it on the first keystroke would
+     change the field's own markup and cost the focus */
+  const finder = `<div style="position:relative;margin-bottom:10px">
+    <input class="pb-input" data-bind="notesQ" value="${esc(ui.notesQ || "")}" placeholder="${esc(T("notes.search"))}" style="padding-left:36px;padding-right:36px">
+    <span style="position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--faint);pointer-events:none;display:flex">${icon("search", 15)}</span>
+    <button id="notesQClear" data-action="notes-q-clear" aria-label="${esc(T("a11y.clearSearch"))}" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);color:var(--muted);padding:4px;display:${ui.notesQ ? "flex" : "none"}">${icon("x", 15)}</button>
+  </div>`;
+  const views = [["notes", T("notes.viewNotes"), "lightbulb"], ["archive", T("notes.viewArchive"), "archive"], ["trash", T("notes.viewTrash"), "trash-2"],
+    ...noteLabelsAll().map((l) => ["label:" + l, l, "tag"])];
+  const chips = `<div class="pb-scroll pb-chiprow">${views.map(([id, label, ic]) => {
+    const on = v === id;
+    return `<button data-action="notes-view" data-id="${esc(id)}" aria-pressed="${on}" style="flex-shrink:0;display:flex;align-items:center;gap:5px;padding:6px 11px;border-radius:999px;font-size:12px;font-weight:600;white-space:nowrap;max-width:180px;border:1px solid ${on ? "var(--gold)" : "var(--border)"};background:${on ? "rgba(233,185,73,.14)" : "var(--surface)"};color:${on ? "var(--gold)" : "var(--muted)"}">${icon(ic, 13, 'style="flex-shrink:0"')}<span style="overflow:hidden;text-overflow:ellipsis">${esc(label)}</span></button>`;
+  }).join("")}</div>`;
+  /* Keep's "Take a note…", and its checkbox for a list. Archive and Trash
+     are for finding things, so a new note starts from Notes or a label. */
+  const take = v === "archive" || v === "trash" ? "" : `<div class="pb-card" style="display:flex;align-items:center;margin-bottom:12px;overflow:hidden">
+      <button data-action="note-new" style="flex:1;min-width:0;text-align:left;padding:13px 14px;font-size:13.5px;color:var(--muted)">${T("notes.take")}</button>
+      <button data-action="note-new" data-list="1" title="${esc(T("notes.newList"))}" aria-label="${esc(T("notes.newList"))}" style="padding:12px 14px;color:var(--muted);display:flex">${icon("square-check-big", 19)}</button>
+    </div>`;
+  return `${finder}${chips}${take}<div id="notesGrid">${notesGridHTML()}</div>`;
+}
+
+/* When a note was last changed: the time if it was today, the day if not.
+   (chatWhen's "Yesterday" and weekday read oddly after "Edited".) */
+const noteWhen = (at) => {
+  if (!at) return "";
+  const d = new Date(at);
+  return isoOf(d) === todayStr() ? chatStamp(at) : fmtShort(isoOf(d));
+};
+
+/* A textarea as tall as what is in it, so a long note reads as a page and
+   not as a box with a scrollbar inside the page. */
+function noteAutosize(el) {
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = el.scrollHeight + "px";
+}
+const noteFitAll = () => app.querySelectorAll('[data-overlay="noteEdit"] [data-autosize]').forEach(noteAutosize);
+
+/* One checklist row. Its own function because Enter draws a new one into
+   the DOM beside the row being typed in, rather than rendering. */
+function noteItemRow(n, i, ro) {
+  const focus = ui.noteEdit && ui.noteEdit.focus === i.id;
+  return `<div data-noteitem="${esc(i.id)}" style="display:flex;align-items:flex-start;gap:6px;padding:1px 0">
+    <button data-action="note-check" data-id="${esc(n.id)}" data-iid="${esc(i.id)}" ${ro ? "disabled" : ""} role="checkbox" aria-checked="${!!i.done}" aria-label="${esc(T("notes.check"))}" style="flex-shrink:0;padding:7px 4px 7px 0;display:flex;color:${i.done ? "var(--faint)" : "var(--muted)"}">${icon(i.done ? "square-check-big" : "square", 19)}</button>
+    <textarea data-bind="note.item" data-iid="${esc(i.id)}" data-autosize rows="1" maxlength="1000" enterkeyhint="enter" ${ro ? "readonly" : ""} ${focus ? "data-autofocus" : ""}
+      placeholder="${esc(T("notes.itemPh"))}" class="pb-note-field" style="flex:1;min-width:0;padding:6px 0;font-size:14.5px;line-height:1.4;${i.done ? "color:var(--faint);text-decoration:line-through;" : ""}">${esc(i.text || "")}</textarea>
+    ${ro ? "" : `<button data-action="note-item-del" data-id="${esc(n.id)}" data-iid="${esc(i.id)}" aria-label="${esc(T("notes.removeItem"))}" style="flex-shrink:0;padding:7px 0 7px 4px;display:flex;color:var(--faint)">${icon("x", 17)}</button>`}
+  </div>`;
+}
+
+/* The note, full screen, tinted its colour, the way Keep opens one. Under
+   the conversation layer (70), so a chat notification tapped while a note
+   is open lands in the chat, and Back comes back to the note. The
+   tool bar at its foot is lifted over the on-screen keyboard by `--pb-kb`,
+   like the chat composer: it is where the colour, the checkboxes and the
+   labels are, and a note is edited with the keyboard up. */
+function renderNoteEditor() {
+  const e = ui.noteEdit;
+  const n = noteOf(e.id);
+  if (!n) return "";
+  const ro = noteLocked(n);
+  const items = noteItems(n);
+  const btn = (action, ic, label, on) => `<button data-action="${action}" data-id="${esc(n.id)}" title="${esc(label)}" aria-label="${esc(label)}" ${on != null ? `aria-pressed="${!!on}"` : ""} style="display:flex;padding:9px;color:${on ? "var(--gold)" : "var(--muted)"}">${icon(ic, 20)}</button>`;
+
+  const title = `<textarea data-bind="note.title" data-autosize rows="1" maxlength="300" placeholder="${esc(T("notes.titlePh"))}" ${ro ? "readonly" : ""}
+    class="pb-note-field" style="font-size:19px;font-weight:700;line-height:1.3;margin-bottom:10px">${esc(n.title || "")}</textarea>`;
+  let body;
+  if (n.list) {
+    const row = (i) => noteItemRow(n, i, ro);
+    const open = items.filter((i) => !i.done), done = items.filter((i) => i.done);
+    const shut = e.showDone === false;
+    body = `<div id="noteItems">${open.map(row).join("")}
+      ${ro ? "" : `<button data-action="note-item-add" data-id="${esc(n.id)}" style="display:flex;align-items:center;gap:8px;padding:8px 0;color:var(--muted);font-size:13.5px">${icon("plus", 18)} ${T("notes.addItem")}</button>`}
+      ${done.length ? `<button data-action="note-checked-toggle" aria-expanded="${!shut}" style="display:flex;align-items:center;gap:6px;padding:12px 0 6px;color:var(--muted);font-size:12.5px;font-weight:600">${icon(shut ? "chevron-right" : "chevron-down", 15)} ${TN("notes.checkedN", done.length)}</button>
+        ${shut ? "" : done.map(row).join("")}` : ""}
+    </div>`;
+  } else {
+    /* the newline after the tag is eaten by the parser, so a note whose
+       first line is empty keeps it */
+    body = `<textarea data-bind="note.body" data-autosize rows="4" maxlength="20000" placeholder="${esc(T("notes.bodyPh"))}" ${ro ? "readonly" : ""} ${e.fresh ? "data-autofocus" : ""}
+      class="pb-note-field" style="font-size:14.5px;line-height:1.5;min-height:140px">\n${esc(n.body || "")}</textarea>`;
+  }
+  const labels = (n.labels || []).length
+    ? `<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:14px">${n.labels.map((l) => ro
+      ? `<span class="pb-note-label" style="font-size:12px;padding:4px 10px">${esc(l)}</span>`
+      : `<button data-action="note-labels" data-id="${esc(n.id)}" class="pb-note-label" style="font-size:12px;padding:4px 10px">${esc(l)}</button>`).join("")}</div>`
+    : "";
+  const palette = e.palette && !ro
+    ? `<div class="pb-scroll pb-chiprow" style="margin:0;padding:10px 12px;border-top:1px solid var(--border-soft)">${NOTE_COLORS.map((c) => {
+      const on = (n.color || "") === c;
+      return `<button data-action="note-color" data-id="${esc(n.id)}" data-c="${c}" aria-label="${esc(T("notes.color." + (c || "none")))}" aria-pressed="${on}" style="flex-shrink:0;width:34px;height:34px;border-radius:17px;display:flex;align-items:center;justify-content:center;color:var(--muted);background:${noteBg(c)};border:2px solid ${on ? "var(--gold)" : "var(--border)"}">${c ? (on ? icon("check", 15) : "") : icon("ban", 15)}</button>`;
+    }).join("")}</div>`
+    : "";
+  const bar = n.trashedAt
+    ? `<div style="display:flex;gap:8px;padding:10px 14px calc(10px + var(--pb-sab));border-top:1px solid var(--border-soft)">
+        ${syncReadOnly() ? "" : `<button data-action="note-restore" data-id="${esc(n.id)}" class="pb-btn pb-ghost" style="flex:1;padding:11px 0;font-size:13px">${icon("archive-restore", 15)} ${T("notes.restore")}</button>
+        <button data-action="note-purge" data-id="${esc(n.id)}" class="pb-btn pb-ghost" style="flex:1;padding:11px 0;font-size:13px;color:var(--red)">${icon("trash-2", 15)} ${T("notes.deleteForever")}</button>`}
+      </div>`
+    : ro ? ""
+    : `<div style="display:flex;align-items:center;gap:2px;padding:4px 8px calc(4px + var(--pb-sab));border-top:1px solid var(--border-soft)">
+        ${btn("note-palette", "palette", T("notes.colorTitle"), !!e.palette)}
+        ${btn("note-list-toggle", n.list ? "text" : "square-check-big", T(n.list ? "notes.hideBoxes" : "notes.showBoxes"))}
+        ${btn("note-labels", "tag", T("notes.labelsTitle"))}
+        <span style="flex:1;min-width:0;text-align:center;font-size:11px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${T("notes.edited", { when: noteWhen(n.updatedAt) })}</span>
+        ${btn("note-menu", "more-vertical", T("notes.more"))}
+      </div>`;
+
+  return `<div data-overlay="noteEdit" data-layer="fs" class="${_lastOverlayKeys.has("noteEdit") ? "" : "pb-sheet"}"
+    style="position:absolute;inset:0;z-index:66;background:${n.color ? noteBg(n.color) : "var(--bg)"};display:flex;flex-direction:column;padding-bottom:var(--pb-kb, 0px)">
+    <div style="display:flex;align-items:center;gap:4px;padding:var(--pb-header-pt) 8px 4px;flex-shrink:0">
+      <button data-action="note-close" aria-label="${esc(T("a11y.back"))}" style="display:flex;padding:8px;color:var(--muted)">${icon("arrow-left", 22)}</button>
+      <span style="flex:1;min-width:0;font-size:11.5px;color:var(--faint)">${n.trashedAt ? T("notes.inTrash") : n.archived ? T("notes.inArchive") : ""}</span>
+      ${ro ? "" : btn("note-pin", n.pinned ? "pin-off" : "pin", T(n.pinned ? "notes.unpin" : "notes.pin"), n.pinned)}
+      ${ro ? "" : btn("note-archive", n.archived ? "archive-restore" : "archive", T(n.archived ? "notes.unarchive" : "notes.archive"))}
+    </div>
+    <div class="pb-scroll" data-scrollkey="noteEdit" style="flex:1;min-height:0;overflow-y:auto;padding:4px 18px 28px">${title}${body}${labels}</div>
+    ${palette}${bar}
+  </div>`;
+}
+
+/* ⋮ in the editor: the rarer things, the way Keep's menu holds them */
+function renderNoteMenu() {
+  const n = noteOf(ui.noteMenu);
+  if (!n) return "";
+  const row = (action, ic, label, ink = "var(--text)", extra = "") => `<button data-action="${action}" data-id="${esc(n.id)}" ${extra}
+      class="pb-btn pb-ghost" style="width:100%;padding:12px 14px;margin-bottom:8px;justify-content:flex-start;gap:10px;color:${ink}">${icon(ic, 16)} <span style="font-size:13.5px;font-weight:600">${label}</span></button>`;
+  return sheet(T("notes.more"), "noteMenu", `
+    ${row("note-copy", "copy-plus", T("notes.copy"))}
+    ${chatSignedIn() ? row("share-open", "send", T("notes.send"), "var(--text)", `data-kinds="note" data-ref="${esc(n.id)}"`) : ""}
+    ${row("note-trash", "trash-2", T("notes.delete"), "var(--red)")}
+  `, 110);
+}
+
+/* Labels: tick the ones this note wears, or type a new one. The list is
+   patched as the field is typed in. */
+function noteLabelListHTML(n) {
+  const q = ((ui.noteLabels && ui.noteLabels.q) || "").trim().toLowerCase();
+  const all = [...new Set([...noteLabelsAll(), ...(n.labels || [])])].sort((a, b) => a.localeCompare(b, localeTag()))
+    .filter((l) => !q || l.toLowerCase().includes(q));
+  if (!all.length) return `<div style="padding:14px 4px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T(q ? "notes.labelNew" : "notes.labelsEmpty")}</div>`;
+  return `<div class="pb-card" style="overflow:hidden">${all.map((l, i) => {
+    const on = (n.labels || []).includes(l);
+    return `<button data-action="note-label-toggle" data-id="${esc(n.id)}" data-name="${esc(l)}" role="checkbox" aria-checked="${on}" style="width:100%;display:flex;align-items:center;gap:10px;padding:11px 13px;text-align:left;color:var(--text);border-bottom:${i < all.length - 1 ? "1px solid var(--border-soft)" : "none"}">
+      ${icon("tag", 15, 'style="color:var(--muted);flex-shrink:0"')}
+      <span style="flex:1;min-width:0;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(l)}</span>
+      ${icon(on ? "square-check-big" : "square", 18, `style="flex-shrink:0;color:${on ? "var(--gold)" : "var(--faint)"}"`)}
+    </button>`;
+  }).join("")}</div>`;
+}
+function renderNoteLabels() {
+  const n = noteOf(ui.noteLabels.id);
+  if (!n) return "";
+  const q = (ui.noteLabels.q || "").trim();
+  return sheet(T("notes.labelsTitle"), "noteLabels", `
+    <div style="display:flex;gap:8px;margin-bottom:12px">
+      <input class="pb-input" data-bind="noteLabelQ" value="${esc(ui.noteLabels.q || "")}" maxlength="40" enterkeyhint="done" placeholder="${esc(T("notes.labelPh"))}" ${ui.noteLabels.focus ? "data-autofocus" : ""} style="flex:1;min-width:0">
+      <button id="noteLabelAdd" data-action="note-label-add" data-id="${esc(n.id)}" ${q ? "" : "disabled"} class="pb-btn pb-gold" style="padding:0 14px;font-size:13px;flex-shrink:0;opacity:${q ? 1 : 0.4}">${T("notes.labelAdd")}</button>
+    </div>
+    <div id="noteLabelList">${noteLabelListHTML(n)}</div>
+  `, 110);
+}
+
+/* A typed label onto the note: an existing one is matched whatever its
+   case, so "Legs" and "legs" do not become two. */
+function noteLabelAdd(id) {
+  const n = noteOf(id);
+  const want = ((ui.noteLabels && ui.noteLabels.q) || "").trim().slice(0, 40);
+  if (!n || !want || noteLocked(n)) return;
+  const name = noteLabelsAll().find((l) => l.toLowerCase() === want.toLowerCase()) || want;
+  /* the field comes back empty with the caret still in it, for the next one */
+  ui.noteLabels.q = "";
+  ui.noteLabels.focus = true;
+  if ((n.labels || []).includes(name)) render();
+  else noteSet(n.id, { labels: [...(n.labels || []), name].slice(0, NOTE_MAX_LABELS) });
+  if (ui.noteLabels) ui.noteLabels.focus = false;
+}
+
+/* Leaving a note. One with nothing written in it is not kept, the way Keep
+   drops an empty note: it was never anything, so nothing is destroyed. */
+function noteLeave() {
+  const e = ui.noteEdit;
+  ui.noteEdit = null; ui.noteMenu = null; ui.noteLabels = null;
+  const n = e && noteOf(e.id);
+  if (n && noteEmpty(n) && !syncReadOnly()) { state = { ...state, notes: (state.notes || []).filter((x) => x.id !== n.id) }; persist(); }
+}
+function noteClose() { noteLeave(); render(); }
+
+/* Enter in a checklist row (and a paste of several lines): the text after
+   the caret becomes the next row, drawn into the DOM beside this one and
+   focused, so the keyboard stays up and a list is typed like a list. It is
+   done here, off the newline the field received, rather than off keydown,
+   because an Android keyboard often reports its keys as "Unidentified". */
+function noteSplitItem(el, n, v) {
+  const iid = el.dataset.iid;
+  const cur = noteItems(n).find((i) => i.id === iid);
+  const row0 = el.closest("[data-noteitem]");
+  if (!cur || !row0) return;
+  const lines = v.replace(/\r/g, "").split("\n");
+  const fresh = lines.slice(1).map((text) => ({ id: uid(), text, done: !!cur.done }));
+  const items = [];
+  for (const i of noteItems(n)) {
+    items.push(i.id === iid ? { ...i, text: lines[0] } : i);
+    if (i.id === iid) items.push(...fresh);
+  }
+  noteSet(n.id, { items }, false);
+  el.value = lines[0];
+  noteAutosize(el);
+  const note = noteOf(n.id);
+  let row = row0;
+  for (const it of fresh) { row.insertAdjacentHTML("afterend", noteItemRow(note, it, false)); row = row.nextElementSibling; }
+  if (window.lucide) lucide.createIcons();
+  const ta = row.querySelector("textarea");
+  if (!ta) return;
+  noteAutosize(ta);
+  ta.focus();
+  const at = fresh.length > 1 ? ta.value.length : 0;
+  try { ta.setSelectionRange(at, at); } catch { /* not a text field */ }
 }
 
 /* Parked days sit above the real history, unmistakably not part of it:
@@ -9272,6 +9741,11 @@ function chatAvatar(name, size = 42) {
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 360;
   return `<span style="flex-shrink:0;width:${size}px;height:${size}px;border-radius:${Math.round(size / 2.6)}px;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:${Math.round(size / 2.4)}px;background:hsl(${h} 42% 30%);color:hsl(${h} 70% 88%)">${esc(ch)}</span>`;
 }
+/* a conversation's circle: the chat with yourself wears a bookmark, so it
+   never passes for a person in the list */
+const chatAvatarOf = (t, size = 42) => chatIsSelf(t)
+  ? `<span style="flex-shrink:0;width:${size}px;height:${size}px;border-radius:${Math.round(size / 2.6)}px;display:flex;align-items:center;justify-content:center;background:rgba(233,185,73,.16);color:var(--gold)">${icon("bookmark", Math.round(size / 2.2))}</span>`
+  : chatAvatar(chatName(t), size);
 
 /* ── A DOORWAY, NOT A SECOND SWITCH ───────────────────────────────────
    This used to be a strip with its own "Turn on" button, which was the
@@ -9373,7 +9847,8 @@ function chatBodyHTML() {
     const name = chatName(t);
     const last = t.lastMessage;
     const me = chatMe();
-    const mine = last && me && last.from === me.userId;
+    /* in the chat with yourself every line is yours, so the arrow says nothing */
+    const mine = last && me && last.from === me.userId && !chatIsSelf(t);
     /* A pending or failed message of my own is newer than anything the
        server has said, and the row has to say so or the list contradicts
        the conversation one tap inside it. */
@@ -9384,7 +9859,7 @@ function chatBodyHTML() {
     const unread = t.unread || 0;
 
     return `<button data-action="chat-open" data-id="${esc(t.threadId)}" class="pb-card" style="width:100%;display:flex;align-items:center;gap:11px;padding:11px 12px;margin-bottom:8px;text-align:left">
-      ${chatAvatar(name)}
+      ${chatAvatarOf(t)}
       <span style="flex:1;min-width:0">
         <span style="display:flex;align-items:baseline;gap:8px">
           <span style="flex:1;min-width:0;font-weight:${unread ? 700 : 600};font-size:14px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(name)}</span>
@@ -9395,7 +9870,7 @@ function chatBodyHTML() {
             : local ? icon("clock", 12, 'style="color:var(--faint);flex-shrink:0"')
             : mine ? icon("corner-up-right", 12, 'style="color:var(--faint);flex-shrink:0"') : ""}
           ${CHAT_THING_ICON[pkind] ? icon(CHAT_THING_ICON[pkind], 12, `style="color:${CHAT_THING_INK[pkind]};flex-shrink:0"`) : ""}
-          <span style="flex:1;min-width:0;font-size:12px;color:${unread ? "var(--muted)" : "var(--faint)"};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${preview ? esc(preview.replace(/\n+/g, " ")) : `<i>${T("chat.noMessages")}</i>`}</span>
+          <span style="flex:1;min-width:0;font-size:12px;color:${unread ? "var(--muted)" : "var(--faint)"};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${preview ? esc(preview.replace(/\n+/g, " ")) : `<i>${T(chatIsSelf(t) ? "chat.selfHint" : "chat.noMessages")}</i>`}</span>
           ${t.muted ? icon("bell-off", 12, 'style="color:var(--faint);flex-shrink:0"') : ""}
           ${unread ? `<span style="flex-shrink:0;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--gold);color:var(--gold-ink);font-size:10.5px;font-weight:700;display:flex;align-items:center;justify-content:center">${unread > 99 ? "99+" : unread}</span>` : ""}
         </span>
@@ -9414,7 +9889,16 @@ function chatBodyHTML() {
   const blocked = nb
     ? `<button data-action="chat-blocks-open" style="display:flex;align-items:center;gap:6px;margin:16px auto 0;padding:6px 10px;font-size:12px;color:var(--faint)">${icon("user-x", 13)} ${T("chat.blockedLink", { n: nb })}</button>`
     : "";
-  return `${chatNotifyDoor()}${threads.length ? rows : `<div class="pb-card" style="padding:26px 20px;text-align:center;color:var(--muted);font-size:13px;line-height:1.6">
+  /* the chat with yourself before it exists: the way in, at the top. Once it
+     exists it is a row like any other, where its last message puts it */
+  const self = chatSelfThread() ? "" : `<button data-action="chat-self" ${ui.chatStarting ? "disabled" : ""} class="pb-card" style="width:100%;display:flex;align-items:center;gap:11px;padding:11px 12px;margin-bottom:8px;text-align:left;border-style:dashed;opacity:${ui.chatStarting ? 0.5 : 1}">
+      ${chatAvatarOf({ kind: "self" })}
+      <span style="flex:1;min-width:0">
+        <span style="display:block;font-weight:600;font-size:14px;color:var(--text)">${T("chat.selfStart")}</span>
+        <span style="display:block;font-size:11.5px;color:var(--faint);margin-top:2px;line-height:1.4">${T("chat.selfHint")}</span>
+      </span>
+    </button>`;
+  return `${chatNotifyDoor()}${self}${threads.length ? rows : `<div class="pb-card" style="padding:26px 20px;text-align:center;color:var(--muted);font-size:13px;line-height:1.6">
       ${icon("message-circle", 26, 'style="margin:0 auto 10px;display:block;color:var(--faint)"')}
       ${T("chat.empty")}
     </div>`}${invite}${blocked}`;
@@ -9514,10 +9998,11 @@ function renderChatThread() {
 
     <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 12px 10px;border-bottom:1px solid var(--border-soft);background:var(--bg);flex-shrink:0">
       <button data-action="chat-close" style="color:var(--muted);padding:4px;flex-shrink:0">${icon("chevron-left", 24)}</button>
-      ${chatAvatar(name, 34)}
+      ${t ? chatAvatarOf(t, 34) : chatAvatar(name, 34)}
       <div style="flex:1;min-width:0">
         <div style="font-weight:700;font-size:15px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(name)}</div>
-        ${t && t.muted ? `<div style="font-size:10.5px;color:var(--faint);display:flex;align-items:center;gap:4px">${icon("bell-off", 10)} ${T("chat.muted")}</div>` : ""}
+        ${chatIsSelf(t) ? `<div style="font-size:10.5px;color:var(--faint)">${T("chat.selfSub")}</div>`
+          : t && t.muted ? `<div style="font-size:10.5px;color:var(--faint);display:flex;align-items:center;gap:4px">${icon("bell-off", 10)} ${T("chat.muted")}</div>` : ""}
       </div>
       <button data-action="chat-menu" data-id="${esc(f.threadId)}" style="color:var(--muted);padding:6px;flex-shrink:0">${icon("more-vertical", 20)}</button>
     </div>
@@ -9646,7 +10131,9 @@ function chatThreadBodyHTML(f) {
   return f.loading && !msgs.length
     ? `<div style="padding:40px 0;text-align:center;font-size:12.5px;color:var(--faint)">${T("sync.working")}</div>`
     : !msgs.length
-      ? `<div style="padding:40px 20px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T("chat.sayHi", { name: esc(name) })}</div>`
+      ? `<div style="padding:40px 20px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${chatIsSelf(t)
+        ? `${icon("bookmark", 22, 'style="display:block;margin:0 auto 10px;color:var(--gold)"')}${T("chat.selfEmpty")}`
+        : T("chat.sayHi", { name: esc(name) })}</div>`
       : `${f.hasMore ? `<div style="text-align:center;margin:4px 0 12px"><button data-action="chat-earlier" data-id="${esc(f.threadId)}" ${f.paging ? "disabled" : ""} class="pb-btn pb-ghost" style="padding:7px 14px;font-size:12px">${f.paging ? T("sync.working") : T("chat.earlier")}</button></div>` : ""}${bubbles}`;
 }
 
@@ -9681,6 +10168,16 @@ function renderChatMenu() {
         <span style="display:block;font-size:11px;color:var(--faint);font-weight:400;margin-top:2px;white-space:normal;line-height:1.4">${hint}</span>
       </span>
     </button>`;
+
+  /* With yourself there is nobody to block, nothing ever rings to mute, and
+     "remove this chat" would only hide it until the next send brought it
+     back. What it has instead is the one thing a scratchpad needs: start
+     again with nothing in it. */
+  if (chatIsSelf(t)) {
+    return sheet(esc(name), "chatMenu", `
+      ${row("chat-wipe", "eraser", T("chat.wipe"), T("chat.wipeHint"), "var(--red)")}
+    `, 130);
+  }
 
   return sheet(esc(name), "chatMenu", `
     ${row("chat-mute", t.muted ? "bell" : "bell-off",
@@ -9748,11 +10245,11 @@ function renderChatBlocks() {
 
 const CHAT_THING_ICON = {
   image: "image", exercise: "dumbbell", preset: "layers",
-  workout: "calendar-check", plan: "calendar-clock", record: "trophy", rank: "medal",
+  workout: "calendar-check", plan: "calendar-clock", record: "trophy", rank: "medal", note: "sticky-note",
 };
 const CHAT_THING_INK = {
   image: "#7ea0b8", exercise: "#5d8bcc", preset: "#e9b949",
-  workout: "#6aa465", plan: "#b0a06a", record: "#c98f5a", rank: "#a07ec2",
+  workout: "#6aa465", plan: "#b0a06a", record: "#c98f5a", rank: "#a07ec2", note: "#d0a24c",
 };
 const chatIsThing = (m) => !!(m && CHAT_THING_ICON[m.kind]);
 
@@ -9958,6 +10455,25 @@ async function chatBuildThing(kind, ref) {
         set: { reps: set.reps, weight: set.weight, secs: set.secs, minutes: set.minutes, intensity: set.intensity },
         setUnit: unitOf(b), sessions: hist.sessions.filter((x) => !x.offKind).length, series,
       },
+      ups,
+    };
+  }
+
+  /* A NOTE off the notepad: its words, its rows and their ticks, its colour
+     and labels. Not where it sat (pinned, archived): that is the sender's
+     notepad, and it lands as a new note at the top of the other one. */
+  if (kind === "note") {
+    const n = noteOf(ref);
+    if (!n || noteEmpty(n)) return null;
+    const first = String(n.title || "").trim() || String(n.body || "").trim().split("\n")[0] ||
+      (noteItems(n).find((i) => String(i.text).trim()) || {}).text || "";
+    return {
+      body: T("chat.kind.note") + ": " + String(first).slice(0, 80),
+      payload: { v: 1, note: {
+        title: n.title || "", body: n.list ? "" : (n.body || ""), list: !!n.list,
+        items: n.list ? noteItems(n).map((i) => ({ text: i.text || "", done: !!i.done })) : [],
+        color: n.color || "", labels: [...(n.labels || [])],
+      } },
       ups,
     };
   }
@@ -10171,22 +10687,56 @@ function chatThingCard(m) {
       </div>
       <div style="padding:0 12px 11px"><div style="height:5px;background:var(--surface2);border-radius:3px;overflow:hidden"><div style="height:100%;width:${Math.round(prog * 100)}%;background:${color}"></div></div></div>` + foot;
   }
+
+  if (m.kind === "note") {
+    const nt = chatNoteOf(p);
+    const lines = nt.list ? nt.items.map((i) => (i.done ? "☑ " : "☐ ") + i.text) : nt.body.split("\n");
+    const text = lines.filter((l) => l.trim()).slice(0, 4).join("\n");
+    return head(tile("sticky-note", ink), esc(nt.title || T("chat.kind.note")), nt.list ? TN("notes.itemN", nt.items.length) : "") +
+      (text ? `<div style="padding:0 12px 10px"><div style="font-size:12px;color:var(--muted);line-height:1.45;white-space:pre-wrap;word-break:break-word;overflow:hidden;display:-webkit-box;-webkit-line-clamp:4;-webkit-box-orient:vertical">${esc(text)}</div></div>` : "") +
+      foot;
+  }
   return "";
+}
+
+/* A note out of somebody's payload, every field held to its shape. */
+function chatNoteOf(p) {
+  const n = p && p.note && typeof p.note === "object" ? p.note : {};
+  return {
+    title: pStr(n.title, 300), body: pStr(n.body, 20000), list: n.list === true,
+    items: pList(n.items, 500).map((i) => ({ text: pStr(i.text, 1000), done: i.done === true })),
+    color: NOTE_COLOR_SET.has(n.color) ? n.color : "",
+    labels: (Array.isArray(n.labels) ? n.labels : []).filter((l) => typeof l === "string" && l).slice(0, 20).map((l) => l.slice(0, 40)),
+  };
 }
 
 /* ── the thing in full ────────────────────────────────────────────────── */
 
 /* "profileId", or "profileId@date" for a planned day, which is added on a
-   day of the recipient's choosing and says which */
-function chatImportedHere(messageId) {
+   day of the recipient's choosing and says which. ONE MARK PER PROFILE: the
+   chat is the account's, so the same card is offered in every profile, and
+   adding it to one must not tell the next profile it is already there (it
+   used to keep a single mark, which is exactly what moving a plan to two
+   of your own profiles through the chat with yourself trips over). An
+   older cache holds a bare string, read as a list of one. */
+const chatMarks = (messageId) => {
   const v = chatRead().imported[messageId];
-  const me = activeProfileId();
-  return typeof v === "string" && (v === me || v.startsWith(me + "@"));
-}
-const chatImportedOn = (messageId) => {
-  const v = chatRead().imported[messageId];
-  return typeof v === "string" && v.includes("@") ? v.split("@")[1] : null;
+  return Array.isArray(v) ? v.filter((x) => typeof x === "string") : typeof v === "string" ? [v] : [];
 };
+const chatMarkOf = (messageId) => {
+  const me = activeProfileId();
+  return chatMarks(messageId).find((v) => v === me || v.startsWith(me + "@")) || null;
+};
+const chatImportedHere = (messageId) => !!chatMarkOf(messageId);
+const chatImportedOn = (messageId) => {
+  const v = chatMarkOf(messageId);
+  return v && v.includes("@") ? v.split("@")[1] : null;
+};
+function chatMarkImported(messageId, mark) {
+  const own = chatMarkOf(messageId);
+  chatRead().imported[messageId] = [...chatMarks(messageId).filter((v) => v !== own), mark];
+  chatWrite();
+}
 
 function renderChatView() {
   const v = ui.chatView;
@@ -10320,6 +10870,29 @@ function renderChatView() {
       ${imp}
       ${sectionTitle(TN("move", rows.length))}
       ${list}
+    `);
+  }
+
+  /* ── a note: read in full, and kept as a new note on this notepad ─── */
+  if (m.kind === "note") {
+    const nt = chatNoteOf(p);
+    const words = nt.list
+      ? `<div style="display:flex;flex-direction:column;gap:6px">${nt.items.map((i) => `<div style="display:flex;gap:8px;align-items:flex-start;font-size:14px;line-height:1.45">
+          ${icon(i.done ? "square-check-big" : "square", 16, `style="flex-shrink:0;margin-top:2px;color:${i.done ? "var(--faint)" : "var(--muted)"}"`)}
+          <span style="min-width:0;word-break:break-word;${i.done ? "color:var(--faint);text-decoration:line-through" : ""}">${esc(i.text)}</span></div>`).join("")}</div>`
+      : `<div style="font-size:14px;line-height:1.55;white-space:pre-wrap;word-break:break-word">${esc(nt.body)}</div>`;
+    const imp = chatImportedHere(m.messageId)
+      ? done(T("chat.addedNote"), "chat-open-notes", `${icon("sticky-note", 15)} ${T("chat.openNotes")}`)
+      : `<button data-action="chat-import" class="pb-btn pb-gold" style="width:100%;padding:14px 0;font-size:15px;border-radius:14px">${icon("sticky-note", 17)} ${T("chat.addNote")}</button>
+         <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:8px 2px 18px">${T("chat.addNoteHint")}</div>`;
+    return shell(T("chat.kind.note"), `
+      ${from}
+      ${imp}
+      <div class="pb-note" style="cursor:default;margin-top:4px;padding:14px 15px;background:${noteBg(nt.color)};border-color:${nt.color ? "transparent" : "var(--border-soft)"}">
+        ${nt.title ? `<div style="font-weight:700;font-size:17px;line-height:1.3;margin-bottom:10px;word-break:break-word">${esc(nt.title)}</div>` : ""}
+        ${words}
+        ${noteLabelChips(nt.labels, 20)}
+      </div>
     `);
   }
 
@@ -10554,7 +11127,7 @@ function renderChatAttach() {
     </label>`;
     return sheet(T("chat.attachTitle"), "chatAttach", `
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-bottom:12px">
-        ${photo}${tile("exercise")}${tile("preset")}${tile("workout")}${tile("plan")}${tile("record")}${tile("rank")}
+        ${photo}${tile("exercise")}${tile("preset")}${tile("workout")}${tile("plan")}${tile("record")}${tile("rank")}${tile("note")}
       </div>
       <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:0 2px">${T("chat.attachHint")}</div>
     `, 78);
@@ -10597,6 +11170,17 @@ function renderChatAttach() {
     };
     body = all.length ? `<div class="pb-card" style="overflow:hidden">${[...ahead, ...gone].map(row).join("")}</div>`
       : `<div style="padding:18px 6px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T("chat.pickNoPlans")}</div>`;
+  } else if (step === "note") {
+    /* what is on the notepad, as its grid orders it: pinned, then newest */
+    const ns = (state.notes || []).filter((n) => !n.trashedAt && !noteEmpty(n))
+      .sort((a, b) => (!!b.pinned - !!a.pinned) || (b.createdAt || 0) - (a.createdAt || 0));
+    body = ns.length ? `<div class="pb-card" style="overflow:hidden">${ns.map((n) => {
+      const first = String(n.title || "").trim() || String(n.body || "").trim().split("\n")[0] || (noteItems(n).find((i) => String(i.text).trim()) || {}).text || "";
+      return chatPickRow("note", n.id,
+        `<span style="width:34px;height:34px;border-radius:9px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:${n.color ? noteBg(n.color) : CHAT_THING_INK.note + "22"};color:${CHAT_THING_INK.note}">${icon("sticky-note", 16)}</span>`,
+        esc(first), n.list ? TN("notes.itemN", noteItems(n).length) : noteWhen(n.updatedAt));
+    }).join("")}</div>`
+      : `<div style="padding:18px 6px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T("chat.pickNoNotes")}</div>`;
   } else if (step === "record") {
     const lifts = chatRecordLifts();
     body = lifts.length ? `<div class="pb-card" style="overflow:hidden">${lifts.map((r) => {
@@ -10656,10 +11240,12 @@ function renderChatMsgMenu() {
         ${hint ? `<span style="display:block;font-size:11px;color:var(--faint);font-weight:400;margin-top:2px;white-space:normal;line-height:1.4">${hint}</span>` : ""}
       </span>
     </button>`;
+  /* "for everyone" means nothing with nobody else in the chat: it is a delete */
+  const self = chatIsSelf(chatThreadOf(threadId));
   return sheet(T("chat.msgTitle"), "chatMsgMenu", `
     <div class="pb-card2" style="padding:10px 12px;margin-bottom:12px;font-size:12.5px;color:var(--muted);line-height:1.45;max-height:96px;overflow:hidden;word-break:break-word">${preview}</div>
     ${acts.includes("copy") ? row("chat-copy", "copy", T("chat.copy"), "", "var(--text)") : ""}
-    ${acts.includes("unsend") ? row("chat-unsend", "trash-2", T("chat.unsend"), T("chat.unsendHint"), "var(--red)") : ""}
+    ${acts.includes("unsend") ? row("chat-unsend", "trash-2", T(self ? "chat.selfDelete" : "chat.unsend"), T(self ? "chat.selfDeleteHint" : "chat.unsendHint"), "var(--red)") : ""}
     ${acts.includes("discard") ? row("chat-discard", "trash-2", T("chat.discard"), T("chat.discardHint"), "var(--red)") : ""}
   `, 132);
 }
@@ -10755,24 +11341,32 @@ function renderShareTo() {
       <div class="pb-card" style="padding:16px 14px;margin-bottom:12px;text-align:center;border-color:${failed ? "rgba(208,90,80,.45)" : "rgba(106,164,101,.45)"}">
         ${icon(failed ? "alert-circle" : "check-circle-2", 26, `style="display:block;margin:0 auto 8px;color:${failed ? "var(--red)" : "var(--green)"}"`)}
         <div style="font-weight:700;font-size:14.5px">${failed ? T("chat.shareFailed") : T("chat.shareSent", { name: esc(chatName(t)) })}</div>
-        ${failed ? `<div style="font-size:12px;color:var(--muted);margin-top:6px;line-height:1.5">${esc(failed)}</div>` : ""}
+        ${failed ? `<div style="font-size:12px;color:var(--muted);margin-top:6px;line-height:1.5">${esc(failed)}</div>`
+          : chatIsSelf(t) ? `<div style="font-size:12px;color:var(--muted);margin-top:6px;line-height:1.5">${T("chat.shareSentSelf")}</div>` : ""}
       </div>
       <div style="display:flex;gap:8px">
         <button data-action="overlay-close" data-target="shareTo" class="pb-btn pb-ghost" style="flex:1;padding:12px 0;font-size:13.5px">${T("common.done")}</button>
-        <button data-action="share-open-chat" data-id="${esc(sh.sent)}" class="pb-btn pb-gold" style="flex:1;padding:12px 0;font-size:13.5px">${icon("message-circle", 15)} ${T("chat.shareOpen")}</button>
+        ${t ? `<button data-action="share-open-chat" data-id="${esc(sh.sent)}" class="pb-btn pb-gold" style="flex:1;padding:12px 0;font-size:13.5px">${icon("message-circle", 15)} ${T("chat.shareOpen")}</button>` : ""}
       </div>
     `, 128);
   }
 
+  /* yourself first, always, made on the first send if it does not exist
+     yet ("self"): sending a thing to yourself is how it reaches your other
+     profiles, which is most of what this sheet gets used for */
+  const self = chatSelfThread();
+  const targets = [self || { threadId: "self", kind: "self" }, ...threads.filter((t) => t !== self)];
   const list = !chatSignedIn()
     ? `<div style="padding:16px 6px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T("chat.needAccount")}</div>`
-    : threads.length
-    ? `<div class="pb-card" style="overflow:hidden">${threads.map((t, i) => `<button data-action="share-send" data-id="${esc(t.threadId)}" ${sh.busy ? "disabled" : ""} style="width:100%;display:flex;align-items:center;gap:11px;padding:10px 13px;text-align:left;color:var(--text);border-bottom:${i < threads.length - 1 ? "1px solid var(--border-soft)" : "none"};opacity:${sh.busy ? 0.5 : 1}">
-        ${chatAvatar(chatName(t), 34)}
-        <span style="flex:1;min-width:0;font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(chatName(t))}</span>
+    : `<div class="pb-card" style="overflow:hidden">${targets.map((t, i) => `<button data-action="share-send" data-id="${esc(t.threadId)}" ${sh.busy ? "disabled" : ""} style="width:100%;display:flex;align-items:center;gap:11px;padding:10px 13px;text-align:left;color:var(--text);border-bottom:${i < targets.length - 1 ? "1px solid var(--border-soft)" : "none"};opacity:${sh.busy ? 0.5 : 1}">
+        ${chatAvatarOf(t, 34)}
+        <span style="flex:1;min-width:0">
+          <span style="display:block;font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(chatName(t))}</span>
+          ${chatIsSelf(t) ? `<span style="display:block;font-size:11px;color:var(--faint);margin-top:1px">${T("chat.selfShareHint")}</span>` : ""}
+        </span>
         ${sh.busy === t.threadId ? `<span style="font-size:11.5px;color:var(--faint)">${T("chat.sending")}</span>` : icon("send", 15, 'style="color:var(--gold);flex-shrink:0"')}
-      </button>`).join("")}</div>`
-    : `<div style="padding:16px 6px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T("chat.shareNoChats")}</div>`;
+      </button>`).join("")}</div>
+      ${threads.filter((t) => t !== self).length ? "" : `<div style="padding:12px 6px 0;text-align:center;font-size:12px;color:var(--faint);line-height:1.6">${T("chat.shareNoChats")}</div>`}`;
 
   return sheet(T("chat.shareTitle"), "shareTo", `
     ${pick}
@@ -10947,11 +11541,22 @@ function chatImport(m, asCopy, opts = {}) {
       description: m.kind === "preset" ? pStr(p.preset && p.preset.description, 200) : T("chat.fromWho", { name: chatName(t) }),
       pinned: false, exercises, createdAt: Date.now(),
     };
-    chatRead().imported[m.messageId] = activeProfileId();
-    chatWrite();
+    chatMarkImported(m.messageId, activeProfileId());
     patch({ library: lib, presets: [...(state.presets || []), preset], ...(groups.length !== nGroups ? { groups } : {}) });
     photoPass();
     return preset.id;
+  }
+
+  /* A note lands at the top of this profile's notepad as a note of its own,
+     not pinned and not archived: where it sat was the sender's notepad. */
+  if (m.kind === "note") {
+    const nt = chatNoteOf(p);
+    const n = { ...newNote(nt.list), title: nt.title, body: nt.list ? "" : nt.body, color: nt.color, labels: nt.labels,
+      items: nt.list ? nt.items.map((i) => ({ id: uid(), text: i.text, done: i.done })) : [] };
+    if (noteEmpty(n)) return null;
+    chatMarkImported(m.messageId, activeProfileId());
+    patch({ notes: [n, ...(state.notes || [])] });
+    return n.id;
   }
 
   /* ── A PLANNED DAY, INTO YOUR OWN CALENDAR ─────────────────────────────
@@ -10992,8 +11597,7 @@ function chatImport(m, asCopy, opts = {}) {
     });
     if (!entries.length) return null;
     const plan = { id: uid(), date, name: pStr(pl.name, 80).trim(), entries, createdAt: Date.now() };
-    chatRead().imported[m.messageId] = activeProfileId() + "@" + date;
-    chatWrite();
+    chatMarkImported(m.messageId, activeProfileId() + "@" + date);
     patch({ library: lib, plans: plansSorted([...(state.plans || []), plan]), ...(groups.length !== nGroups ? { groups } : {}) });
     photoPass();
     return date;
@@ -16176,11 +16780,43 @@ function paintTimers() {
   }
 }
 
+/* The "time's up" banner, drawn by render() and, while a field has the
+   caret, by timerRepaint on its own. */
+function timerToastHTML() {
+  return `<div data-timer-toast class="pb-sheet" style="position:absolute;left:12px;right:12px;bottom:var(--pb-toast-b);z-index:40">
+      <div class="pb-card pb-timer-done" style="display:flex;align-items:center;gap:11px;padding:13px 14px;border-color:rgba(233,185,73,.55);background:var(--surface)">
+        ${icon("bell-ring", 20, 'style="color:var(--gold);flex-shrink:0"')}
+        <div style="flex:1;min-width:0">
+          <div style="font-weight:700;font-size:14px;color:var(--gold)">${T("timers.timesUp")}</div>
+          <div style="font-size:12.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(ui.timerToast.name)}</div>
+        </div>
+        <button data-action="toast-open" class="pb-btn pb-ghost" style="padding:7px 12px;font-size:12.5px">${T("common.open")}</button>
+        <button data-action="toast-dismiss" style="color:var(--muted);padding:6px">${icon("x", 18)}</button>
+      </div>
+    </div>`;
+}
+
+/* ── A REST RUNNING OUT DOES NOT TAKE THE KEYBOARD WITH IT ─────────────
+   It used to render(), which rebuilds `#app`: somebody typing a message, a
+   note or a set's numbers when the rest ended lost the field mid-word and
+   the keyboard went down. The chime, the buzz and the notification have
+   already gone off by now (fireTimer); while a field has the caret the
+   banner is put up in place instead, the same rule chatRepaint lives by,
+   and everything else catches up on the next render. */
+function timerRepaint() {
+  if (!syncTyping()) { render(); return; }
+  const root = app.querySelector(".pb-root");
+  if (!root || !ui.timerToast) return;
+  root.querySelectorAll("[data-timer-toast]").forEach((el) => el.remove());
+  root.insertAdjacentHTML("beforeend", timerToastHTML());
+  if (window.lucide) lucide.createIcons();
+}
+
 let timerEngine = null;
 function startTimerEngine() {
   if (timerEngine) return;
   timerEngine = setInterval(() => {
-    if (sweepTimers()) { render(); return; }
+    if (sweepTimers()) { timerRepaint(); return; }
     paintTimers();
   }, 250);
 }
@@ -16191,10 +16827,10 @@ document.addEventListener("visibilitychange", () => {
   /* first, so the sweep below knows this is somebody coming back to it */
   if (document.hidden) visibleSince = null;
   else { visibleSince = Date.now(); dropHeldChime(); }
-  if (!document.hidden && sweepTimers()) render();
+  if (!document.hidden && sweepTimers()) timerRepaint();
   timerNotifsTidy();
 });
-window.addEventListener("focus", () => { if (sweepTimers()) render(); timerNotifsTidy(); });
+window.addEventListener("focus", () => { if (sweepTimers()) timerRepaint(); timerNotifsTidy(); });
 /* A timer push the page was alive to hear (see the push handler in sw.js):
    it may be announcing a rest this page has already dealt with. */
 if ("serviceWorker" in navigator) {
@@ -18858,6 +19494,122 @@ const actions = {
     }
     render();
   },
+  /* ── the notepad, see NOTEPAD ─────────────────────────────────────
+     Opening, reading, searching and changing the view are on READ_OK (a
+     shared profile's notes can be read); everything that writes a note is
+     not, and its fields are drawn read-only there (noteLocked). */
+  "notes-view": (el) => { ui.notesView = el.dataset.id || "notes"; ui.notesQ = ""; render(); },
+  "notes-q-clear": () => {
+    ui.notesQ = "";
+    const field = document.querySelector('[data-bind="notesQ"]');
+    if (field) { field.value = ""; try { field.focus(); } catch { /* gone */ } }
+    const g = document.getElementById("notesGrid");
+    if (g) { g.innerHTML = notesGridHTML(); if (window.lucide) lucide.createIcons(); }
+    const clear = document.getElementById("notesQClear");
+    if (clear) clear.style.display = "none";
+  },
+  /* A new note opens straight into its first field, keyboard up, the way
+     Keep's does. Made under the label being looked at, as Keep does too. */
+  "note-new": (el) => {
+    const n = newNote(el.dataset.list === "1");
+    const v = notesViewNow();
+    if (v.startsWith("label:")) n.labels = [v.slice(6)];
+    else if (v !== "notes") ui.notesView = "notes";
+    ui.tab = "log"; ui.logSeg = "notes"; ui.notesQ = "";
+    ui.noteEdit = { id: n.id, fresh: !n.list, focus: n.list ? n.items[0].id : null };
+    patch({ notes: [n, ...(state.notes || [])] });
+    /* the caret has been placed; later frames must not keep pulling it back */
+    if (ui.noteEdit) { ui.noteEdit.fresh = false; ui.noteEdit.focus = null; }
+  },
+  "note-open": (el) => { if (noteOf(el.dataset.id)) { ui.noteEdit = { id: el.dataset.id }; render(); } },
+  "note-close": () => noteClose(),
+  /* pinning something archived brings it back, as in Keep */
+  "note-pin": (el) => { const n = noteOf(el.dataset.id); if (n) noteSet(n.id, { pinned: !n.pinned, archived: false }); },
+  "note-archive": (el) => {
+    const n = noteOf(el.dataset.id);
+    if (!n) return;
+    /* an empty note is not archived but dropped, exactly as closing it is */
+    if (noteEmpty(n)) { noteClose(); return; }
+    const on = !n.archived;
+    ui.noteEdit = null; ui.noteMenu = null; ui.noteLabels = null;
+    appToast(T(on ? "notes.archived" : "notes.unarchived"));
+    noteSet(n.id, { archived: on, pinned: on ? false : n.pinned });
+  },
+  "note-palette": () => { if (ui.noteEdit) { ui.noteEdit.palette = !ui.noteEdit.palette; render(); } },
+  "note-color": (el) => noteSet(el.dataset.id, { color: NOTE_COLOR_SET.has(el.dataset.c) ? el.dataset.c : "" }),
+  /* Keep's "Show checkboxes" / "Hide checkboxes": each line becomes a row,
+     each row a line. Ticks do not survive the trip to plain text. */
+  "note-list-toggle": (el) => {
+    const n = noteOf(el.dataset.id);
+    if (!n || !ui.noteEdit) return;
+    if (n.list) {
+      noteSet(n.id, { list: false, items: [], body: noteItems(n).map((i) => i.text).filter((t) => String(t).trim()).join("\n") });
+      return;
+    }
+    const lines = String(n.body || "").split("\n").filter((l) => l.trim());
+    const items = (lines.length ? lines : [""]).map((text) => ({ id: uid(), text, done: false }));
+    if (!lines.length) ui.noteEdit.focus = items[0].id;
+    noteSet(n.id, { list: true, body: "", items });
+    if (ui.noteEdit) ui.noteEdit.focus = null;
+  },
+  "note-check": (el) => {
+    const n = noteOf(el.dataset.id);
+    if (n) noteSet(n.id, { items: noteItems(n).map((i) => (i.id === el.dataset.iid ? { ...i, done: !i.done } : i)) });
+  },
+  "note-item-del": (el) => {
+    const n = noteOf(el.dataset.id);
+    if (n) noteSet(n.id, { items: noteItems(n).filter((i) => i.id !== el.dataset.iid) });
+  },
+  "note-item-add": (el) => {
+    const n = noteOf(el.dataset.id);
+    if (!n || !ui.noteEdit) return;
+    const it = { id: uid(), text: "", done: false };
+    ui.noteEdit.focus = it.id;
+    noteSet(n.id, { items: [...noteItems(n), it] });
+    if (ui.noteEdit) ui.noteEdit.focus = null;
+  },
+  "note-checked-toggle": () => { if (ui.noteEdit) { ui.noteEdit.showDone = ui.noteEdit.showDone === false; render(); } },
+  "note-menu": (el) => { ui.noteMenu = el.dataset.id; render(); },
+  "note-copy": (el) => {
+    const n = noteOf(el.dataset.id);
+    if (!n) return;
+    const now = Date.now();
+    const copy = { ...n, id: uid(), pinned: false, archived: false, trashedAt: null, createdAt: now, updatedAt: now,
+      items: noteItems(n).map((i) => ({ ...i, id: uid() })), labels: [...(n.labels || [])] };
+    ui.noteMenu = null; ui.noteEdit = { id: copy.id };
+    appToast(T("notes.copied"));
+    patch({ notes: [copy, ...(state.notes || [])] });
+  },
+  /* into the trash, not gone: it is in Trash until restored or emptied */
+  "note-trash": (el) => {
+    const n = noteOf(el.dataset.id);
+    if (!n) return;
+    ui.noteMenu = null; ui.noteEdit = null; ui.noteLabels = null;
+    if (noteEmpty(n)) { patch({ notes: state.notes.filter((x) => x.id !== n.id) }); return; }
+    appToast(T("notes.trashed"));
+    noteSet(n.id, { trashedAt: Date.now() });
+  },
+  "note-restore": (el) => { appToast(T("notes.restored")); noteSet(el.dataset.id, { trashedAt: null }); },
+  "note-purge": (el) => {
+    if (!noteOf(el.dataset.id) || !confirm(T("notes.purgeConfirm"))) return;
+    ui.noteEdit = null; ui.noteMenu = null;
+    patch({ notes: state.notes.filter((x) => x.id !== el.dataset.id) });
+  },
+  "notes-empty-trash": () => {
+    const n = (state.notes || []).filter((x) => x.trashedAt).length;
+    if (!n || !confirm(T("notes.emptyTrashConfirm", { n: TN("note", n) }))) return;
+    patch({ notes: state.notes.filter((x) => !x.trashedAt) });
+  },
+  "note-labels": (el) => { if (noteOf(el.dataset.id)) { ui.noteLabels = { id: el.dataset.id, q: "" }; render(); } },
+  "note-label-add": (el) => noteLabelAdd(el.dataset.id),
+  "note-label-toggle": (el) => {
+    const n = noteOf(el.dataset.id);
+    const l = el.dataset.name;
+    if (!n || !l) return;
+    const has = (n.labels || []).includes(l);
+    noteSet(n.id, { labels: has ? n.labels.filter((x) => x !== l) : [...(n.labels || []), l].slice(0, NOTE_MAX_LABELS) });
+  },
+
   /* One period back or forward. In rolling mode that is a whole seven-day
      window, not a single day, since stepping a day at a time would make the
      arrows useless for the comparison underneath, and a single day is what
@@ -19795,6 +20547,44 @@ const actions = {
     }
   },
 
+  /* The chat with yourself, made the first time it is asked for. */
+  "chat-self": async () => {
+    if (ui.chatStarting) return;
+    ui.chatStarting = true;
+    chatPatchBody();
+    try {
+      const id = await chatSelfOpen();
+      ui.chatStarting = false;
+      openChatThread(id);
+    } catch (e) {
+      ui.chatStarting = false;
+      render();
+      alert(chatErrText(e));
+    }
+  },
+
+  /* Everything in the chat with yourself, off every device (the server
+     refuses it anywhere else). The messages' ids go into chatGone first,
+     so a poll already on the wire cannot paint them back. */
+  "chat-wipe": async (el) => {
+    const C = window.ZenofitCloud;
+    const id = el.dataset.id;
+    if (!C || !id || !chatIsSelf(chatThreadOf(id))) return;
+    if (!confirm(T("chat.wipeConfirm"))) return;
+    ui.chatMenu = null;
+    try {
+      await C.wipeChat(id);
+      const c = chatRead();
+      for (const m of c.msgs[id] || []) { chatGone.add(m.messageId); chatUploads.delete(m.clientId); }
+      c.msgs[id] = [];
+      chatRelast(id);
+      chatWrite();
+      if (ui.chatThread && ui.chatThread.threadId === id) ui.chatThread.hasMore = false;
+      render();
+      chatLastPoll = 0; chatPoll();
+    } catch (e) { render(); alert(chatErrText(e)); }
+  },
+
   "chat-open": (el) => openChatThread(el.dataset.id),
   /* The draft is deliberately kept: backing out of a conversation to look
      something up and coming back to a cleared composer is the same
@@ -19815,9 +20605,15 @@ const actions = {
     if (!text) return;
     /* cleared BEFORE the send, because chatSend draws the message on
        screen straight away and a composer still holding it reads as
-       having failed to send */
+       having failed to send. Cleared IN PLACE, and the message is patched
+       in rather than rendered (chatPost → chatRepaint), so the composer
+       keeps the caret and the keyboard stays up for the next message: it
+       used to shut after every send, see CHAT_KEEP_FOCUS. */
     f.draft = "";
     chatDraftSet(el.dataset.id, "");
+    const box = app.querySelector('[data-bind="chatDraft"]');
+    if (box) { box.value = ""; chatFitComposer(); }
+    el.disabled = true; el.style.opacity = 0.4;
     chatSend(el.dataset.id, text);
   },
 
@@ -19863,7 +20659,7 @@ const actions = {
   },
   /* the day a planned day was added on, in your own calendar */
   "chat-open-day": (el) => {
-    ui.chatView = null; ui.chatThread = null; ui.chatMsgMenu = null;
+    ui.chatView = null; ui.chatThread = null; ui.chatMsgMenu = null; noteLeave();
     actions["plan-open"](el);
   },
   /* An exercise you have, in the place it lives. The conversation is closed
@@ -19872,14 +20668,19 @@ const actions = {
   "chat-open-ex": (el) => {
     const name = el.dataset.name;
     if (!name) return;
-    ui.chatView = null; ui.chatThread = null; ui.chatMsgMenu = null;
+    ui.chatView = null; ui.chatThread = null; ui.chatMsgMenu = null; noteLeave();
     ui.tab = "library";
     ui.exWin = { name }; ui.exWinEdit = false; ui.exWinDraft = null;
     render();
   },
   "chat-open-presets": () => {
-    ui.chatView = null; ui.chatThread = null; ui.chatMsgMenu = null;
+    ui.chatView = null; ui.chatThread = null; ui.chatMsgMenu = null; noteLeave();
     ui.tab = "library"; ui.librarySeg = "presets";
+    render();
+  },
+  "chat-open-notes": () => {
+    ui.chatView = null; ui.chatThread = null; ui.chatMsgMenu = null; noteLeave();
+    ui.tab = "log"; ui.logSeg = "notes"; ui.notesView = "notes"; ui.notesQ = "";
     render();
   },
   "chat-copy": () => {
@@ -19893,7 +20694,7 @@ const actions = {
     const v = ui.chatMsgMenu;
     ui.chatMsgMenu = null;
     render();
-    if (!v || !confirm(T("chat.unsendConfirm"))) return;
+    if (!v || !confirm(T(chatIsSelf(chatThreadOf(v.threadId)) ? "chat.selfDeleteConfirm" : "chat.unsendConfirm"))) return;
     await chatUnsend(v.threadId, v.messageId);
   },
   /* never reached the server, so there is nobody else to take it back from */
@@ -19923,6 +20724,7 @@ const actions = {
     const kinds = String(el.dataset.kinds || "").split(",").filter((k) => CHAT_THING_ICON[k]);
     if (!kinds.length) return;
     ui.shareTo = { kinds, kind: kinds[0], ref: el.dataset.ref };
+    ui.noteMenu = null;          // opened from a note's ⋮, which has done its job
     render();
     /* the list is what it was at the last poll, which may be a while */
     if (chatSignedIn()) { chatLastPoll = 0; chatPoll(); }
@@ -19931,8 +20733,14 @@ const actions = {
   "share-send": async (el) => {
     const sh = ui.shareTo;
     if (!sh || sh.busy) return;
-    const threadId = el.dataset.id;
+    let threadId = el.dataset.id;
     sh.busy = threadId; render();
+    /* the chat with yourself, before its first message, is made here */
+    if (threadId === "self") {
+      try { threadId = await chatSelfOpen(); }
+      catch (e) { if (ui.shareTo === sh) { sh.busy = false; sh.sent = "self"; sh.failed = chatErrText(e); render(); } return; }
+      sh.busy = threadId;        // its real row now says Sending…
+    }
     const clientId = await chatSendThing(threadId, sh.kind, sh.ref);
     if (ui.shareTo !== sh) return;
     const row = clientId && chatMsgs(threadId).find((m) => m.clientId === clientId);
@@ -19945,7 +20753,7 @@ const actions = {
     const id = el.dataset.id;
     ui.shareTo = null;
     ui.exWin = null; ui.exWinEdit = false; ui.exWinDraft = null; ui.exWinAttach = null;
-    ui.presetView = null;
+    ui.presetView = null; noteLeave();
     openChatThread(id);
   },
 
@@ -20723,10 +21531,13 @@ const READ_OK = new Set([
   "nav", "fab", "log-seg", "timer-seg", "library-seg", "prog-seg", "picker-seg", "pick-filter", "lib-filter",
   "chat-open", "chat-close", "chat-send", "chat-start", "chat-find-clear", "chat-earlier",
   "chat-retry", "chat-menu", "chat-mute", "chat-block", "chat-unblock", "chat-blocks-open", "chat-leave",
+  "chat-self", "chat-wipe",
+  /* reading a note is looking; every note action that writes is not here */
+  "notes-view", "notes-q-clear", "note-open", "note-close", "note-checked-toggle",
   /* looking at and sending things is chat; ADDING one to your library is a
      write, and chat-import is deliberately not here */
   "chat-attach", "chat-attach-step", "chat-attach-send", "chat-view", "chat-view-close",
-  "chat-image", "chat-image-close", "chat-open-ex", "chat-open-presets", "chat-open-day",
+  "chat-image", "chat-image-close", "chat-open-ex", "chat-open-presets", "chat-open-day", "chat-open-notes",
   "chat-copy", "chat-unsend", "chat-discard",
   "share-open", "share-kind", "share-send", "share-open-chat",
   /* notifications belong to the phone, like the timers: nothing in them is
@@ -20945,6 +21756,46 @@ function handleBind(el) {
     /* and the same rule as the search box: the checkpoint for a message is
        chatDraftSet above, not the profile write at the bottom of this
        function */
+    return;
+  } else if (bind === "notesQ") {
+    /* the notepad's search: patched, never rendered, and not state */
+    ui.notesQ = v;
+    const g = document.getElementById("notesGrid");
+    if (g) { g.innerHTML = notesGridHTML(); if (window.lucide) lucide.createIcons(); }
+    const clear = document.getElementById("notesQClear");
+    if (clear) clear.style.display = v ? "flex" : "none";
+    return;
+  } else if (bind === "noteLabelQ") {
+    if (ui.noteLabels) {
+      ui.noteLabels.q = v;
+      const n = noteOf(ui.noteLabels.id);
+      const list = document.getElementById("noteLabelList");
+      if (list && n) { list.innerHTML = noteLabelListHTML(n); if (window.lucide) lucide.createIcons(); }
+      const btn = document.getElementById("noteLabelAdd");
+      if (btn) { const ok = !!v.trim(); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.4; }
+    }
+    return;
+  } else if (bind === "note.title" || bind === "note.body" || bind === "note.item") {
+    /* A NOTE IS KEPT AS IT IS TYPED, written straight into `state` with no
+       render (noteSet's typing path), so the caret and the keyboard stay */
+    noteAutosize(el);
+    const n = ui.noteEdit && noteOf(ui.noteEdit.id);
+    if (noteLocked(n)) return;
+    if (bind === "note.item") {
+      if (v.includes("\n")) { noteSplitItem(el, n, v); return; }
+      noteSet(n.id, { items: noteItems(n).map((i) => (i.id === el.dataset.iid ? { ...i, text: v } : i)) }, false);
+    } else if (bind === "note.title" && v.includes("\n")) {
+      /* a title is one line: Enter goes on to the note itself, as in Keep,
+         and a pasted line break becomes a space */
+      const one = v.replace(/\s*\n\s*/g, " ").trim();
+      el.value = one;
+      noteAutosize(el);
+      noteSet(n.id, { title: one }, false);
+      const next = app.querySelector('[data-overlay="noteEdit"] [data-bind="note.body"], [data-overlay="noteEdit"] [data-bind="note.item"]');
+      if (next) { next.focus(); try { next.setSelectionRange(0, 0); } catch { /* not a text field */ } }
+    } else {
+      noteSet(n.id, { [bind.slice(5)]: v }, false);
+    }
     return;
   } else if (bind === "stdq") {
     ui.stdQ = v;
@@ -21178,6 +22029,35 @@ document.addEventListener("focusin", (e) => {
     setTimeout(() => { try { if (document.activeElement === el) el.select(); } catch { /* not a text field */ } }, 0);
 });
 
+/* Two keys the notepad answers itself. Return in the label field adds the
+   label. Backspace at the very start of a checklist row joins it onto the
+   row above and puts the caret at the seam, as Keep does (Enter is the
+   newline handleBind sees, see noteSplitItem). */
+document.addEventListener("keydown", (e) => {
+  const el = e.target;
+  if (!el || !el.dataset || e.isComposing) return;
+  if (el.dataset.bind === "noteLabelQ" && e.key === "Enter") {
+    e.preventDefault();
+    if (ui.noteLabels) noteLabelAdd(ui.noteLabels.id);
+    return;
+  }
+  if (el.dataset.bind !== "note.item" || e.key !== "Backspace" || el.selectionStart !== 0 || el.selectionEnd !== 0) return;
+  const n = ui.noteEdit && noteOf(ui.noteEdit.id);
+  const row = el.closest("[data-noteitem]");
+  const prev = row && row.previousElementSibling;
+  if (noteLocked(n) || !prev || !prev.matches("[data-noteitem]")) return;
+  e.preventDefault();
+  const above = prev.querySelector("textarea");
+  const seam = above.value.length;
+  const text = above.value + el.value;
+  noteSet(n.id, { items: noteItems(n).filter((i) => i.id !== el.dataset.iid).map((i) => (i.id === above.dataset.iid ? { ...i, text } : i)) }, false);
+  above.value = text;
+  noteAutosize(above);
+  row.remove();
+  above.focus();
+  try { above.setSelectionRange(seam, seam); } catch { /* not a text field */ }
+});
+
 document.addEventListener("input", (e) => {
   /* selects and the colour well re-render on commit, not on every tick of a
      drag, or the native picker gets pulled out from under the user's finger */
@@ -21276,7 +22156,8 @@ function restoreDrafts() {
   if (d.entry) ui.entryForm = d.entry;
   if (d.set && ui.entryForm) ui.setForm = d.set;
   if (d.body) { ui.bodyForm = d.body; ui.bodyFormWasNew = !!d.bodyWasNew; }
-  if (ui.workoutSheet || ui.entryForm) ui.tab = "log";
+  if (typeof d.note === "string" && noteOf(d.note)) { ui.noteEdit = { id: d.note }; ui.logSeg = "notes"; }
+  if (ui.workoutSheet || ui.entryForm || ui.noteEdit) ui.tab = "log";
   else if (ui.bodyForm) ui.showBody = true;   // the form lives inside that window
 }
 restoreDrafts();

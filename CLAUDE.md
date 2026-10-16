@@ -72,7 +72,7 @@ Each one's reasons, and the bugs that taught it, are in the doc named beside it.
 
 - **State changes go through `patch()`**, which persists and re-renders. `render()` rebuilds `#app` wholesale, so anything with a caret or a finger on it is patched in place instead.
 - **Interaction is delegated**: `data-action` plus an `actions` entry for clicks, `data-bind` plus a branch in `handleBind` for input. A new action is refused on a read-only profile until it is added to `READ_OK`, and a new draggable list until it is in `DRAG_READ_OK`.
-- **A new persisted field** goes into `defaultState()` (which alone puts it in the backup), gets a `migrate()` step if old saves need one, and is decided about for `SYNC_COLLECTIONS`, whose server twin `COLLECTIONS` in `api/src/sync.js` must match. A migration must never throw (docs/architecture.md).
+- **A new persisted field** goes into `defaultState()` (which alone puts it in the backup), gets a `migrate()` step if old saves need one, and is decided about for `SYNC_COLLECTIONS`, whose server twin `COLLECTIONS` in `api/src/sync.js` must match. **A new collection also joins `SYNC_SINCE_V1` and the server's `LATER_COLLECTIONS`**, or a phone still on the previous build deletes its rows from every device (docs/sync.md). A migration must never throw (docs/architecture.md).
 - **Numbers** are `${NUM}` text inputs, never `type="number"`.
 - **Device dimensions** come from the viewport engine's `--pb-*` tokens, never a raw pixel offset against the top or bottom of the screen, and pointer maths divides by `vpScale` (docs/architecture.md).
 - **Words**: every string in all three languages in the same commit, and **no em dashes (U+2014)** in anything the app says, in code comments, in commit messages or in these docs (`.claude/rules/i18n.md`).
@@ -97,7 +97,8 @@ The detail of every area lives in `docs/`, one file per area, each small enough 
 | Photos: the store, upload and download, holders and the sweep, ceilings, R2, image scaling | docs/photos.md |
 | Timers, the stopwatch, rest alarms and their notifications, sounds | docs/timers.md |
 | The notifications switch, how a push is shown, WebKit | docs/notifications.md |
-| Chat: search, threads, unread, blocks, things in a message, unsend, the invite link | docs/chat.md |
+| Chat: search, threads, unread, blocks, things in a message, unsend, the chat with yourself, the invite link | docs/chat.md |
+| The notepad on the Log tab: notes and checklists, colours, labels, archive and trash, how a note syncs | docs/notepad.md |
 | Progress: the est. 1RM, charts, the Body graph, the ledger, the 1RM calculator, strength standards | docs/progress.md |
 | Backups, the spreadsheet export, the picture studio | docs/export.md |
 

@@ -159,6 +159,34 @@ check("refuses theme, a device preference", s == 400, (s, b))
 s, b = call("POST", "/v1/profiles/%s/items" % PID, token=owner,
             body={"items": [item("settings", "units", "kg")]})
 check("accepts units, which is training config", s == 200 and b.get("accepted") == 1, (s, b))
+s, b = call("POST", "/v1/profiles/%s/items" % PID, token=owner,
+            body={"items": [item("notes", "N1", {"id": "N1", "title": "Program to try", "body": "5x5", "list": False})]})
+check("accepts a note off the notepad, which belongs to the profile", s == 200 and b.get("accepted") == 1, (s, b))
+
+print("\n== a build that never heard of a collection cannot delete from it ==")
+# An older app records a mark for every row it pulls, applies none of a
+# collection it does not know, and then reads those marks as rows deleted on
+# that phone. Its tombstones must not take a newer phone's notes away.
+s, b = call("POST", "/v1/profiles/%s/items" % PID, token=owner,
+            body={"items": [{"collection": "notes", "itemId": "N1", "deleted": True}]})
+check("a note deletion from a build that does not name `notes` is skipped, not refused",
+      s == 200 and b.get("accepted") == 0 and b.get("skipped") == 1, (s, b))
+s, b = call("GET", "/v1/profiles/%s/changes" % PID, token=owner)
+row = next((i for i in b.get("items", []) if i["collection"] == "notes" and i["itemId"] == "N1"), None)
+check("and the note is still there", row is not None and not row.get("deleted"), row)
+s, b = call("POST", "/v1/profiles/%s/items" % PID, token=owner,
+            body={"items": [{"collection": "notes", "itemId": "N1", "deleted": True},
+                            item("log", "BL1", {"ok": True})]})
+check("the rest of such a push still lands", s == 200 and b.get("accepted") == 1 and b.get("skipped") == 1, (s, b))
+s, b = call("POST", "/v1/profiles/%s/items" % PID, token=owner,
+            body={"knows": ["notes"], "items": [{"collection": "notes", "itemId": "N1", "deleted": True}]})
+check("from a build that knows notes, deleting one works", s == 200 and b.get("accepted") == 1, (s, b))
+s, b = call("GET", "/v1/profiles/%s/changes" % PID, token=owner)
+row = next((i for i in b.get("items", []) if i["collection"] == "notes" and i["itemId"] == "N1"), None)
+check("and it comes back as a tombstone", row is not None and row.get("deleted") is True, row)
+s, b = call("POST", "/v1/profiles/%s/items" % PID, token=owner,
+            body={"items": [{"collection": "log", "itemId": "BL1", "deleted": True}]})
+check("an older build still deletes from the collections it knows", s == 200 and b.get("accepted") == 1, (s, b))
 
 print("\n== size limits ==")
 s, b = call("POST", "/v1/profiles/%s/items" % PID, token=owner,

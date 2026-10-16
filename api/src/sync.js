@@ -29,10 +29,24 @@ export const COLLECTIONS = new Set([
   "dayDrafts",
   "unlogged",
   "dayNotes",
+  "notes",
   "library",
   "groups",
   "settings",
 ]);
+
+/* ── COLLECTIONS ADDED AFTER A BUILD THAT IS STILL OUT THERE ─────────────
+ * A build that has never heard of a collection still records a sync mark
+ * for every row it pulls, applies none of them, and then reads each mark
+ * with no row behind it as something DELETED on that phone: its next push
+ * is a tombstone for every one, which would take the rows off every device
+ * on the account. So a deletion in one of these is only honoured from a
+ * client that names the collection in `knows` on its push; from any other
+ * it is dropped and counted as skipped, and the old build forgets its mark
+ * because the push came back fine. The app's twin is SYNC_SINCE_V1, which
+ * also re-pulls once what an older build on the same phone skipped.
+ */
+export const LATER_COLLECTIONS = new Set(["notes"]);
 
 /* `settings` is one row per key, so the split runs per key rather than per
  * collection. theme and lang describe the phone, not the training: syncing

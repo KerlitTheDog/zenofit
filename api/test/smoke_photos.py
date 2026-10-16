@@ -258,6 +258,18 @@ if os.environ.get("ZENOFIT_SWEEP"):
     sweep()
     check("and unsending the card lets it go", not exists(owner_tok, carded), carded)
 
+    s, mine, _ = call("POST", "/v1/chats", token=owner_tok, body={"userId": owner_id})
+    selft = mine["threadId"]
+    self_card = upload(owner_tok, data_url())
+    call("POST", "/v1/chats/%s/messages" % selft, token=owner_tok, body={
+        "body": "Exercise: Belt squat", "kind": "exercise",
+        "payload": {"v": 1, "ex": {"name": "Belt squat", "muscle": "Legs", "photo": self_card}}})
+    sweep()
+    check("a card in the chat with yourself holds its photo too", exists(owner_tok, self_card), self_card)
+    s, r, _ = call("DELETE", "/v1/chats/%s/messages" % selft, token=owner_tok)
+    sweep()
+    check("and wiping that chat lets it go", s == 200 and not exists(owner_tok, self_card), (s, self_card))
+
     planned = upload(owner_tok, data_url())
     s, pcard, _ = call("POST", "/v1/chats/%s/messages" % thread, token=owner_tok, body={
         "body": "Planned day: Thu", "kind": "plan",

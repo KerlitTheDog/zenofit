@@ -123,8 +123,6 @@ check("and so does asking from the other end", t3["threadId"] == t1["threadId"],
 
 thread = t1["threadId"]
 
-s, r = call("POST", "/v1/chats", token=him["token"], body={"userId": him["id"]})
-check("you cannot open a chat with yourself", s == 400, (s, r))
 s, r = call("POST", "/v1/chats", token=him["token"], body={"userId": str(uuid.uuid4())})
 check("nor with an id that is nobody", s == 404, (s, r))
 
@@ -420,6 +418,64 @@ s, r = call("POST", "/v1/chats/%s/messages" % qtid, token=quiet_a["token"], body
     "payload": {"v": 1, "plan": {"date": "2031-01-02", "name": "Legs", "entries": [{"exercise": "Leg Press", "kind": "strength", "sets": [{"reps": "10", "weight": "150"}]}]}, "lib": []}})
 check("a planned day can be sent", s == 201 and r["message"]["kind"] == "plan", (s, r))
 check("with its lifts and targets intact", r["message"]["payload"]["plan"]["entries"][0]["sets"][0]["weight"] == "150", r)
+
+print("\n== the chat with yourself ==")
+# One thread whose only member is you: how one account carries a plan or a
+# note from one of its profiles to another. Nothing in it may echo back as
+# unread, it must never become a second thread, and wiping it is allowed
+# there and nowhere else.
+solo = account("solo")
+s, st = call("POST", "/v1/chats", token=solo["token"], body={"userId": solo["id"]})
+check("your own id opens the chat with yourself", s == 200 and st.get("kind") == "self" and st.get("members") == [], (s, st))
+s, st2 = call("POST", "/v1/chats", token=solo["token"], body={"userId": solo["id"]})
+check("asking again is the same one, never a second", st2.get("threadId") == st.get("threadId"), st2)
+stid = st["threadId"]
+s, r = call("GET", "/v1/chats", token=solo["token"])
+mine = [c for c in r.get("chats", []) if c["threadId"] == stid]
+check("it is in the list before a word is written in it",
+      len(mine) == 1 and mine[0]["kind"] == "self" and mine[0]["members"] == [], r)
+s, sm = call("POST", "/v1/chats/%s/messages" % stid, token=solo["token"], body={"body": "note to self", "clientId": "s1"})
+check("a message to yourself is stored", s == 201, (s, sm))
+check("and reaches nobody: it does not echo", sm.get("recipients") == 0, sm)
+s, r = call("GET", "/v1/chats", token=solo["token"])
+mine = [c for c in r.get("chats", []) if c["threadId"] == stid]
+check("nothing you send yourself counts as unread", mine and mine[0]["unread"] == 0, mine)
+s, r = call("GET", "/v1/chats/%s/messages" % stid, token=solo["token"])
+check("it reads back exactly once", [m["body"] for m in r.get("messages", [])] == ["note to self"], r)
+s, r = call("GET", "/v1/chats/%s/messages" % stid, token=her["token"])
+check("nobody else can read it", s == 404, (s, r))
+s, r = call("POST", "/v1/chats/%s/messages" % stid, token=solo["token"], body={
+    "body": "Note: groceries", "clientId": "s2", "kind": "note",
+    "payload": {"v": 1, "note": {"title": "groceries", "body": "", "list": True,
+                                 "items": [{"text": "eggs", "done": False}], "color": "yellow", "labels": ["food"]}}})
+check("a note off the notepad can be sent", s == 201 and r["message"]["kind"] == "note", (s, r))
+s, up = call("POST", "/v1/chats/%s/photos" % stid, token=solo["token"], body={"data": tiny})
+spid = up.get("photoId")
+s, r = call("POST", "/v1/chats/%s/messages" % stid, token=solo["token"],
+            body={"body": "Photo", "clientId": "s3", "kind": "image", "payload": {"photo": spid, "w": 1, "h": 1}})
+check("and a photo", s == 201, (s, r))
+
+s, before_q = call("GET", "/v1/chats/%s/messages" % qtid, token=quiet_b["token"])
+s, r = call("DELETE", "/v1/chats/%s/messages" % qtid, token=quiet_a["token"])
+check("a conversation with somebody else cannot be wiped", s == 403 and r.get("error") == "not_self", (s, r))
+s, after_q = call("GET", "/v1/chats/%s/messages" % qtid, token=quiet_b["token"])
+check("and the other person's copy is untouched",
+      len(after_q.get("messages", [])) == len(before_q.get("messages", [])) > 0, (len(before_q.get("messages", [])), len(after_q.get("messages", []))))
+s, r = call("DELETE", "/v1/chats/%s/messages" % stid, token=her["token"])
+check("nor can anybody else wipe yours", s == 404, (s, r))
+s, r = call("DELETE", "/v1/chats/%s/messages" % stid, token=solo["token"])
+check("the chat with yourself wipes clean", s == 200 and r.get("wiped") == 3, (s, r))
+s, r = call("GET", "/v1/chats/%s/messages" % stid, token=solo["token"])
+check("nothing is left in it", r.get("messages") == [], r)
+s, r = call("GET", "/v1/chats/%s/messages?since=%d" % (stid, sm["message"]["at"]), token=solo["token"])
+check("and another phone still holding them is told to drop every one", len(r.get("unsent", [])) == 3, r)
+s, r = call("GET", "/v1/photos/" + spid, token=solo["token"])
+check("the photo sent in it goes too", s == 404, (s, r))
+s, r = call("GET", "/v1/chats", token=solo["token"])
+mine = [c for c in r.get("chats", []) if c["threadId"] == stid]
+check("it stays in the list, empty, ready for the next note", len(mine) == 1 and mine[0]["lastMessage"] is None, mine)
+s, r = call("POST", "/v1/chats/%s/messages" % stid, token=solo["token"], body={"body": "fresh start", "clientId": "s4"})
+check("and takes a message again straight away", s == 201, (s, r))
 
 print("\n== unauthenticated ==")
 s, r = call("GET", "/v1/chats")

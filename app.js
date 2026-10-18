@@ -391,6 +391,16 @@ const nameMatches = (name, q) => {
     exLabel(name).toLowerCase().includes(s);
 };
 
+/* …and over plain words: a preset's name, a note, a date as it is shown */
+const textHas = (q, ...texts) => {
+  const s = String(q || "").trim().toLowerCase();
+  return !s || texts.some((t) => String(t || "").toLowerCase().includes(s));
+};
+/* a preset is found by its name, its description or any lift in it, so
+   "squat" finds the leg day that never says squat in its name */
+const presetMatches = (p, q) => textHas(q, p.name, p.description) ||
+  (p.exercises || []).some((ex) => nameMatches(ex.exercise, q));
+
 /* an exercise's label, looked up from the log by its stored name */
 function exLabel(name) {
   const ex = ((state && state.library) || []).find((x) => x.name === name);
@@ -2606,6 +2616,9 @@ function closeEverything() {
   ui.groupSheet = false; ui.groupForm = null;
   ui.presetForm = null; ui.presetView = null;
   ui.timerForm = null; ui.deloadForm = null; ui.planResult = null;
+  /* "time's up" names a timer of the profile being left, and timers of
+     every profile share the seeded ids */
+  ui.timerToast = null;
   /* `std` is rebuilt from the profile being switched INTO, see stdForm */
   ui.stdPick = false; ui.std = null; ui.stdResult = null; ui.stdJump = false;
   ui.profilesWin = false; ui.profileForm = null; ui.profileOrder = false;
@@ -6329,6 +6342,8 @@ const ui = {
   volGoalEditing: null, // muscle group whose set target is being edited
   volGoalVal: "",
   libraryQ: "",
+  presetQ: "",          // the search over Library -> Presets
+  historyQ: "",         // the search over the Log tab's history
   libraryFilter: "All",
   librarySeg: "exercises", // exercises | presets, Library sub-tab
   /* ── chat ─────────────────────────────────────────────────────────
@@ -6372,6 +6387,8 @@ function resetTransient() {
   ui.goalEditing = null;
   ui.volGoalEditing = null;
   ui.libraryQ = "";
+  ui.presetQ = "";
+  ui.historyQ = "";
   ui.libraryFilter = "All";
   ui.librarySeg = "exercises";
   ui.exHistAll = false;
@@ -6460,6 +6477,20 @@ const chip = (children, color, style = "") =>
 
 const sectionTitle = (children, right = "") =>
   `<div style="display:flex;align-items:baseline;justify-content:space-between;margin:2px 2px 10px"><div class="pb-label">${children}</div>${right}</div>`;
+
+/* A search field over a list. Its `handleBind` branch patches the list
+   under it and never renders, as every search here does, so the caret and
+   the keyboard stay where they are while it is typed in. */
+const searchField = (bind, q, ph, style = "margin-bottom:10px") => `<div style="position:relative;${style}">
+    ${icon("search", 16, 'style="position:absolute;left:12px;top:12px;color:var(--faint)"')}
+    <input class="pb-input" style="padding-left:36px" placeholder="${esc(ph)}" aria-label="${esc(ph)}" data-bind="${bind}" value="${esc(q || "")}">
+  </div>`;
+const searchNone = () => `<div style="padding:18px 6px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T("common.noMatch")}</div>`;
+/* swap a patched list's contents, for those handleBind branches */
+function repaintList(id, html) {
+  const el = document.getElementById(id);
+  if (el) { el.innerHTML = html(); if (window.lucide) lucide.createIcons(); }
+}
 
 /* The unit dropdown that lives inside a weight field's label: tap "kg" and
    pick whatever the machine in front of you is stamped in. The calculator
@@ -8117,12 +8148,29 @@ function renderHistory(log, library, badges, settings, unit) {
       ${T("log.empty")}
     </div>`;
 
+  /* the parked drafts stay above the search: they are not history yet */
+  const many = new Set(log.map((e) => e.date)).size > 1;
+  return drafts + (many ? searchField("histq", ui.historyQ, T("log.search")) : "") +
+    `<div id="histList">${historyDaysHTML(log, library, badges, settings, unit)}</div>`;
+}
+
+/* Every logged day, newest first: what the search above patches. A day is
+   found by its date as shown ("oct", "mon") or by its note, and then shows
+   whole; otherwise by its lifts (name, group or the lift's own note), and
+   then shows only the lifts that matched, which is the answer to "how has
+   my bench gone" without scrolling past every other lift of every day. */
+function historyDaysHTML(log, library, badges, settings, unit) {
   const byDate = {};
   for (const e of log) (byDate[e.date] = byDate[e.date] || []).push(e);
   const dates = Object.keys(byDate).sort().reverse();
+  const q = dates.length > 1 ? ui.historyQ : "";
+  const liftHit = (e) => nameMatches(e.exercise, q) ||
+    textHas(q, e.notes, groupOfEntry(e, library), groupLabel(groupOfEntry(e, library)));
 
-  return drafts + dates.map((date) => {
+  const days = dates.map((date) => {
     const entries = byDate[date].sort((a, b) => a.createdAt - b.createdAt);
+    const only = textHas(q, fmtDate(date), dayNoteOn(date)) ? null : new Set(entries.filter(liftHit));
+    if (only && !only.size) return "";
     /* a program-week label, and nothing to say in rolling mode */
     const wk = rollingWeeks() ? null : weekOf(date, settings.startDate);
     const sets = entries.filter((e) => e.kind !== "cardio").reduce((a, e) => a + (+e.sets || 0), 0);
@@ -8134,6 +8182,7 @@ function renderHistory(log, library, badges, settings, unit) {
     /* lifts done back to back read that way months later too */
     const daySupers = superMarks(entries);
     const rows = entries.map((e, ei) => {
+      if (only && !only.has(e)) return "";
       const b = badges[e.id] || {};
       const chain = daySupers.cont[ei];
       const muscle = groupOfEntry(e, library);
@@ -8214,6 +8263,7 @@ function renderHistory(log, library, badges, settings, unit) {
       ${leftLine}
     </div>`;
   }).join("");
+  return days || searchNone();
 }
 
 /* ───────────────────────────── VOLUME ─────────────────────────────── */
@@ -11079,7 +11129,7 @@ function chatWorkoutDays() {
     if (isSetKind(kindOf(e))) d.sets += filledSets(e).length;
     by.set(e.date, d);
   }
-  return [...by.values()].sort((a, b) => (a.date < b.date ? 1 : -1)).slice(0, 60);
+  return [...by.values()].sort((a, b) => (a.date < b.date ? 1 : -1));
 }
 
 /* Every row of a picking list, one shape: a mark, two lines, a send glyph. */
@@ -11099,14 +11149,104 @@ const chatExMark = (ex) => ex.image
   : photoComing(ex) ? photoSlot(ex.photoId, "width:34px;height:34px;border-radius:8px;flex-shrink:0", { iconSize: 13 })
   : chatDot(colorFor(ex.muscle));
 
-/* The exercise list, patched in place as the search is typed (every search
-   in this app patches and never renders; see chatBodyHTML). */
+/* What each step of the attach sheet offers, before its search narrows it */
+function chatAttachItems(step) {
+  if (step === "exercise") return state.library || [];
+  if (step === "preset") return (state.presets || []).filter((x) => (x.exercises || []).length);
+  if (step === "workout") return chatWorkoutDays();
+  if (step === "plan") {
+    /* what is coming first, soonest first; then what has gone by, newest
+       first, since a plan that was missed can still be somebody's Thursday */
+    const today = todayStr();
+    const all = plansSorted(state.plans).filter((x) => (x.entries || []).length);
+    return [...all.filter((x) => x.date >= today), ...all.filter((x) => x.date < today).reverse()];
+  }
+  /* what is on the notepad, as its grid orders it: pinned, then newest */
+  if (step === "note") return (state.notes || []).filter((n) => !n.trashedAt && !noteEmpty(n))
+    .sort((a, b) => (!!b.pinned - !!a.pinned) || (b.createdAt || 0) - (a.createdAt || 0));
+  if (step === "record") return chatRecordLifts();
+  if (step === "rank") {
+    const rows = [];
+    for (const ex of state.library || []) {
+      const slug = stdSlugFor(ex);
+      const sEx = slug ? stdOf(slug) : null;
+      const best = sEx ? stdBestSetFor(ex, sEx) : null;
+      if (best) rows.push({ ex, sEx, best });
+    }
+    return rows;
+  }
+  return [];
+}
+
+/* what the search reads on each: the words a row shows, and the lifts
+   behind it, so "bench" finds the day, the plan and the preset with a
+   bench in them */
+const CHAT_ATTACH_HIT = {
+  exercise: (ex, q) => exMatches(ex, q),
+  preset: presetMatches,
+  workout: (d, q) => textHas(q, fmtDate(d.date)) || [...d.lifts].some((n) => nameMatches(n, q)),
+  plan: (x, q) => textHas(q, x.name, planTitle(x), fmtDate(x.date)) || x.entries.some((e) => nameMatches(e.exercise, q)),
+  note: (n, q) => textHas(q, n.title, n.body, ...noteItems(n).map((i) => i.text)),
+  record: (r, q) => nameMatches(r.name, q),
+  rank: (r, q) => exMatches(r.ex, q) || textHas(q, stdName(r.sEx)),
+};
+const CHAT_ATTACH_NONE = {
+  exercise: "chat.pickNone", preset: "chat.pickNoPresets", workout: "chat.pickNoDays",
+  plan: "chat.pickNoPlans", note: "chat.pickNoNotes", record: "chat.pickNoRecords",
+};
+
+/* The list under the attach sheet's search, patched in place as it is
+   typed (every search in this app patches and never renders; see
+   chatBodyHTML). */
 function chatAttachListHTML() {
-  const q = (ui.chatAttach && ui.chatAttach.q) || "";
-  const rows = (state.library || []).filter((ex) => exMatches(ex, q));
-  if (!rows.length) return `<div style="padding:18px 6px;text-align:center;font-size:12.5px;color:var(--faint)">${T("chat.pickNone")}</div>`;
-  return `<div class="pb-card" style="overflow:hidden">${rows.slice(0, 200).map((ex) =>
-    chatPickRow("exercise", ex.name, chatExMark(ex), esc(exLabelOf(ex)), esc(groupLabel(ex.muscle)))).join("")}</div>`;
+  const a = ui.chatAttach, step = a.step, q = a.q || "";
+  const all = chatAttachItems(step);
+  const items = all.filter((x) => CHAT_ATTACH_HIT[step](x, q));
+  const say = (key) => `<div style="padding:18px 6px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T(key)}</div>`;
+  const card = (rows) => `<div class="pb-card" style="overflow:hidden">${rows}</div>`;
+  const mark = (k, ic, bg = CHAT_THING_INK[k] + "22") =>
+    `<span style="width:34px;height:34px;border-radius:9px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:${bg};color:${CHAT_THING_INK[k]}">${icon(ic, 16)}</span>`;
+
+  if (step === "rank") {
+    const f = stdForm();
+    const ready = !!f.sex && +decimalize(f.bw) > 0;
+    const last = ui.stdResult && stdOf(ui.stdResult.slug);
+    const lastOn = last && textHas(q, stdName(last));
+    return `${ready ? "" : `<div class="pb-card2" style="padding:10px 12px;margin-bottom:10px;font-size:12px;color:var(--steel);line-height:1.5">${T("chat.pickRankSetup")}</div>`}
+      ${lastOn ? `${sectionTitle(T("chat.pickRankLast"))}<div class="pb-card" style="overflow:hidden;margin-bottom:14px">${chatPickRow("rank", "last",
+        `<span style="width:34px;height:34px;border-radius:9px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:var(--surface2);color:${ui.stdResult.rank >= 0 ? STD_COLORS[STD_LEVELS[ui.stdResult.rank]] : "var(--muted)"}">${icon("medal", 16)}</span>`,
+        esc(stdName(last)), ui.stdResult.rank >= 0 ? stdLevelLabel(STD_LEVELS[ui.stdResult.rank]) : T("chat.rankUnder"))}</div>` : ""}
+      ${items.length ? `${sectionTitle(T("chat.pickRankLifts"))}${card(items.map(({ ex, sEx, best }) =>
+        chatPickRow("rank", ex.name, chatExMark(ex), esc(exLabelOf(ex)),
+          esc(stdName(sEx)) + " · " + (sEx.reps ? TN("rep", +best.reps) : `${esc(best.reps)} × ${esc(trimNum(best.weight, 2))} ${best.unit}`), ready)).join(""))}`
+        : all.length ? (lastOn ? "" : searchNone()) : last ? "" : say("chat.pickNoRanks")}`;
+  }
+
+  if (!all.length) return say(CHAT_ATTACH_NONE[step]);
+  if (!items.length) return step === "exercise" ? say("chat.pickNone") : searchNone();
+  const ROW = {
+    exercise: (ex) => chatPickRow("exercise", ex.name, chatExMark(ex), esc(exLabelOf(ex)), esc(groupLabel(ex.muscle))),
+    preset: (x) => chatPickRow("preset", x.id, mark("preset", "layers"), esc(x.name), TN("exercise", x.exercises.length)),
+    workout: (d) => chatPickRow("workout", d.date, mark("workout", "calendar-check"),
+      fmtDate(d.date), TN("exercise", d.lifts.size) + (d.sets ? " · " + TN("set", d.sets) : "")),
+    plan: (x) => {
+      const sets = planSetCount(x);
+      return chatPickRow("plan", x.id, mark("plan", "calendar-clock"), planTitle(x),
+        [fmtDate(x.date), TN("exercise", x.entries.length), sets ? TN("set", sets) : ""].filter(Boolean).join(" · "));
+    },
+    note: (n) => {
+      const first = String(n.title || "").trim() || String(n.body || "").trim().split("\n")[0] || (noteItems(n).find((i) => String(i.text).trim()) || {}).text || "";
+      return chatPickRow("note", n.id, mark("note", "sticky-note", n.color ? noteBg(n.color) : undefined),
+        esc(first), n.list ? TN("notes.itemN", noteItems(n).length) : noteWhen(n.updatedAt));
+    },
+    record: (r) => {
+      const ex = (state.library || []).find((x) => x.name === r.name);
+      return chatPickRow("record", r.name, ex ? chatExMark(ex) : chatDot("#8a8f97"), esc(exLabel(r.name)), T("chat.lastTrained", { date: fmtShort(r.last) }));
+    },
+  };
+  /* the search reads every day; the list still stops at the newest sixty */
+  const cap = step === "exercise" ? 200 : step === "workout" ? 60 : Infinity;
+  return card(items.slice(0, cap).map(ROW[step]).join(""));
 }
 
 function renderChatAttach() {
@@ -11134,82 +11274,13 @@ function renderChatAttach() {
   }
 
   const back = `<span style="display:flex;align-items:center;gap:6px"><button data-action="chat-attach-step" data-s="menu" style="color:var(--muted);padding:2px 4px 2px 0;display:flex">${icon("arrow-left", 19)}</button>${T("chat.pick." + step)}</span>`;
-  let body = "";
-
-  if (step === "exercise") {
-    body = `<div style="position:relative;margin-bottom:10px">
-        <input class="pb-input" data-bind="chatAttachQ" value="${esc(a.q || "")}" placeholder="${esc(T("lib.search"))}" style="padding-left:36px">
-        <span style="position:absolute;left:12px;top:50%;transform:translateY(-50%);color:var(--faint);pointer-events:none;display:flex">${icon("search", 15)}</span>
-      </div>
-      <div id="chatAttachList">${chatAttachListHTML()}</div>`;
-  } else if (step === "preset") {
-    const ps = (state.presets || []).filter((x) => (x.exercises || []).length);
-    body = ps.length ? `<div class="pb-card" style="overflow:hidden">${ps.map((x) =>
-      chatPickRow("preset", x.id, `<span style="width:34px;height:34px;border-radius:9px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:${CHAT_THING_INK.preset}22;color:${CHAT_THING_INK.preset}">${icon("layers", 16)}</span>`,
-        esc(x.name), TN("exercise", x.exercises.length))).join("")}</div>`
-      : `<div style="padding:18px 6px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T("chat.pickNoPresets")}</div>`;
-  } else if (step === "workout") {
-    const days = chatWorkoutDays();
-    body = days.length ? `<div class="pb-card" style="overflow:hidden">${days.map((d) =>
-      chatPickRow("workout", d.date, `<span style="width:34px;height:34px;border-radius:9px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:${CHAT_THING_INK.workout}22;color:${CHAT_THING_INK.workout}">${icon("calendar-check", 16)}</span>`,
-        fmtDate(d.date), TN("exercise", d.lifts.size) + (d.sets ? " · " + TN("set", d.sets) : ""))).join("")}</div>`
-      : `<div style="padding:18px 6px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T("chat.pickNoDays")}</div>`;
-  } else if (step === "plan") {
-    /* what is coming first, soonest first; then what has gone by, newest
-       first, since a plan that was missed can still be somebody's Thursday */
-    const today = todayStr();
-    const all = plansSorted(state.plans).filter((x) => (x.entries || []).length);
-    const ahead = all.filter((x) => x.date >= today);
-    const gone = all.filter((x) => x.date < today).reverse();
-    const row = (x) => {
-      const sets = planSetCount(x);
-      return chatPickRow("plan", x.id,
-        `<span style="width:34px;height:34px;border-radius:9px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:${CHAT_THING_INK.plan}22;color:${CHAT_THING_INK.plan}">${icon("calendar-clock", 16)}</span>`,
-        planTitle(x),
-        [fmtDate(x.date), TN("exercise", x.entries.length), sets ? TN("set", sets) : ""].filter(Boolean).join(" · "));
-    };
-    body = all.length ? `<div class="pb-card" style="overflow:hidden">${[...ahead, ...gone].map(row).join("")}</div>`
-      : `<div style="padding:18px 6px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T("chat.pickNoPlans")}</div>`;
-  } else if (step === "note") {
-    /* what is on the notepad, as its grid orders it: pinned, then newest */
-    const ns = (state.notes || []).filter((n) => !n.trashedAt && !noteEmpty(n))
-      .sort((a, b) => (!!b.pinned - !!a.pinned) || (b.createdAt || 0) - (a.createdAt || 0));
-    body = ns.length ? `<div class="pb-card" style="overflow:hidden">${ns.map((n) => {
-      const first = String(n.title || "").trim() || String(n.body || "").trim().split("\n")[0] || (noteItems(n).find((i) => String(i.text).trim()) || {}).text || "";
-      return chatPickRow("note", n.id,
-        `<span style="width:34px;height:34px;border-radius:9px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:${n.color ? noteBg(n.color) : CHAT_THING_INK.note + "22"};color:${CHAT_THING_INK.note}">${icon("sticky-note", 16)}</span>`,
-        esc(first), n.list ? TN("notes.itemN", noteItems(n).length) : noteWhen(n.updatedAt));
-    }).join("")}</div>`
-      : `<div style="padding:18px 6px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T("chat.pickNoNotes")}</div>`;
-  } else if (step === "record") {
-    const lifts = chatRecordLifts();
-    body = lifts.length ? `<div class="pb-card" style="overflow:hidden">${lifts.map((r) => {
-      const ex = (state.library || []).find((x) => x.name === r.name);
-      return chatPickRow("record", r.name, ex ? chatExMark(ex) : chatDot("#8a8f97"), esc(exLabel(r.name)), T("chat.lastTrained", { date: fmtShort(r.last) }));
-    }).join("")}</div>`
-      : `<div style="padding:18px 6px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T("chat.pickNoRecords")}</div>`;
-  } else if (step === "rank") {
-    const f = stdForm();
-    const ready = !!f.sex && +decimalize(f.bw) > 0;
-    const rows = [];
-    for (const ex of state.library || []) {
-      const slug = stdSlugFor(ex);
-      const sEx = slug ? stdOf(slug) : null;
-      const best = sEx ? stdBestSetFor(ex, sEx) : null;
-      if (best) rows.push({ ex, sEx, best });
-    }
-    const last = ui.stdResult && stdOf(ui.stdResult.slug);
-    body = `${ready ? "" : `<div class="pb-card2" style="padding:10px 12px;margin-bottom:10px;font-size:12px;color:var(--steel);line-height:1.5">${T("chat.pickRankSetup")}</div>`}
-      ${last ? `${sectionTitle(T("chat.pickRankLast"))}<div class="pb-card" style="overflow:hidden;margin-bottom:14px">${chatPickRow("rank", "last",
-        `<span style="width:34px;height:34px;border-radius:9px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:var(--surface2);color:${ui.stdResult.rank >= 0 ? STD_COLORS[STD_LEVELS[ui.stdResult.rank]] : "var(--muted)"}">${icon("medal", 16)}</span>`,
-        esc(stdName(last)), ui.stdResult.rank >= 0 ? stdLevelLabel(STD_LEVELS[ui.stdResult.rank]) : T("chat.rankUnder"))}</div>` : ""}
-      ${rows.length ? `${sectionTitle(T("chat.pickRankLifts"))}<div class="pb-card" style="overflow:hidden">${rows.map(({ ex, sEx, best }) =>
-        chatPickRow("rank", ex.name, chatExMark(ex), esc(exLabelOf(ex)),
-          esc(stdName(sEx)) + " · " + (sEx.reps ? TN("rep", +best.reps) : `${esc(best.reps)} × ${esc(trimNum(best.weight, 2))} ${best.unit}`), ready)).join("")}</div>`
-        : last ? "" : `<div style="padding:18px 6px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${T("chat.pickNoRanks")}</div>`}`;
-  }
-
-  return sheet(back, "chatAttach", body, 78);
+  /* one field over whichever list this is, there once it has more than
+     one row to look through */
+  const ph = step === "exercise" ? T("lib.search") : T("common.search");
+  return sheet(back, "chatAttach", `
+    ${chatAttachItems(step).length > 1 ? searchField("chatAttachQ", a.q, ph) : ""}
+    <div id="chatAttachList">${chatAttachListHTML()}</div>
+  `, 78);
 }
 
 /* ── what a long press on a message offers ────────────────────────────── */
@@ -12470,8 +12541,20 @@ function renderPresets() {
       ${T("preset.empty")}
     </div>`;
 
-  return (presets.length > 1 ? reorderBar("preset-reorder", false, T("preset.reorder")) : "") +
-    presets.map((p) => {
+  /* the search sits above the reorder toggle, as the library's does, and
+     turning reorder on clears it: a search result has no order to change */
+  return (presets.length > 1 ? searchField("presetq", ui.presetQ, T("preset.search")) + reorderBar("preset-reorder", false, T("preset.reorder")) : "") +
+    `<div id="presetList">${presetListHTML()}</div>
+    <div style="font-size:12px;color:var(--faint);line-height:1.55;margin:2px 4px 10px">
+      ${T("preset.footer", { icon: icon("pin", 11) })}
+    </div>`;
+}
+
+/* the preset cards under the Library's search, patched in place as it is typed */
+function presetListHTML() {
+  const shown = (state.presets || []).filter((p) => presetMatches(p, ui.presetQ));
+  if (!shown.length) return searchNone();
+  return shown.map((p) => {
     const exs = p.exercises || [];
     return `<div class="pb-card" style="margin-bottom:12px;overflow:hidden">
       <div style="padding:13px 14px">
@@ -12488,9 +12571,7 @@ function renderPresets() {
         <button data-action="open-preset" data-id="${esc(p.id)}" style="flex:1;padding:12px;color:var(--muted);font-weight:600;font-size:13px;border-left:1px solid var(--border-soft);display:flex;align-items:center;justify-content:center;gap:6px">${icon("pencil", 13)} ${T("common.edit")}</button>
       </div>
     </div>`;
-  }).join("") + `<div style="font-size:12px;color:var(--faint);line-height:1.55;margin:2px 4px 10px">
-      ${T("preset.footer", { icon: icon("pin", 11) })}
-    </div>`;
+  }).join("");
 }
 
 /* full-screen editor for a saved preset (rename, trim exercises, delete) */
@@ -15001,7 +15082,12 @@ function renderPresetPickerList() {
       ${T("preset.pickerEmpty")}
     </div>`;
 
-  return presets.map((p) => {
+  /* the picker's one search field reads both segments, so "squat" typed on
+     Exercises still means squat after a tap on Presets (a lone preset has
+     no field over it, so nothing it cannot see narrows it either) */
+  const shown = presets.filter((p) => presets.length < 2 || presetMatches(p, ui.pickerQ));
+  if (!shown.length) return searchNone();
+  return shown.map((p) => {
     const exs = p.exercises || [];
     return `<div class="pb-card" style="margin-bottom:12px;overflow:hidden">
       <div style="padding:13px 14px">
@@ -15021,13 +15107,17 @@ function renderPresetPickerList() {
 
 function renderExercisePicker(library) {
   const seg = ui.pickerSeg;
+  /* Presets gets the field too once there is more than one to look through.
+     Only Exercises takes the caret by itself: a tap on Presets is there to
+     look at the cards, and a keyboard springing up would cover them. */
+  const ph = seg === "exercises" ? T("pick.search") : T("preset.search");
   return fullScreen(60, `
     <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px">
       <button data-action="close-picker" aria-label="${T("a11y.back")}" style="color:var(--muted);padding:4px">${icon("arrow-left", 21)}</button>
       <div style="position:relative;flex:1">
-        ${seg === "exercises"
+        ${seg === "exercises" || (state.presets || []).length > 1
           ? `${icon("search", 15, 'style="position:absolute;left:11px;top:12px;color:var(--faint)"')}
-             <input class="pb-input" style="padding-left:34px" placeholder="${T("pick.search")}" aria-label="${T("pick.search")}" data-bind="pickq" value="${esc(ui.pickerQ)}" data-autofocus>`
+             <input class="pb-input" style="padding-left:34px" placeholder="${ph}" aria-label="${ph}" data-bind="pickq" value="${esc(ui.pickerQ)}" ${seg === "exercises" ? "data-autofocus" : ""}>`
           : `<div class="pb-num" style="font-size:17px;font-weight:700;padding:8px 2px">${T("preset.pickerTitle")}</div>`}
       </div>
     </div>
@@ -16481,7 +16571,13 @@ function unlockAudio() {
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!AC) return;
     if (!audioCtx) audioCtx = new AC();
-    if (audioCtx.state === "suspended") audioCtx.resume();
+    if (audioCtx.state !== "running") {
+      /* notes handed to a context that could not start are old news by the
+         time a tap starts it, and would all play at once (dropHeldChime) */
+      dropHeldChime();
+      const p = audioCtx.resume();
+      if (p && p.catch) p.catch(() => {});
+    }
   } catch { /* audio is a nicety, never a blocker */ }
 }
 
@@ -16717,9 +16813,30 @@ function timerNotifsTidy() {
    And a chime started while hidden that the audio never played (iOS
    suspends the context in the background, and a suspended context plays
    its queue the moment it resumes) is called off when the app comes back,
-   rather than going off in the hand of somebody who already knows. */
+   rather than going off in the hand of somebody who already knows. The
+   same goes for one rung ON screen by a page that has had no tap since it
+   loaded (relaunched or updated mid-rest), whose audio is not allowed to
+   start yet: the next tap would have played it, minutes late, so that tap
+   drops it instead (unlockAudio).
+
+   A PROFILE OFF SCREEN AT THE DEADLINE counts as away too. A rest started
+   in one profile runs out while another is open (only the server's push can
+   announce it then, since the engine sweeps the profile on screen); coming
+   back to the first one used to ring it a second time, late. sweepTimers
+   notes when the profile on screen changed (profileSince). */
 let visibleSince = document.hidden ? null : Date.now();
-let heldChime = null;   // {nodes, end} of a chime started while hidden
+let heldChime = null;   // {nodes, end} of a chime the audio could not play yet
+let sweptProfile = profiles.active, profileSince = Date.now();
+
+/* WebKit lets only a tap start the audio, so a page that loaded with a rest
+   already running (relaunched or updated mid-rest) could not chime when it
+   ran out. The first tap anywhere while a rest runs starts it. Only then: a
+   running audio context is not free, and somebody not resting has no use for one. */
+const timerTapUnlock = () => {
+  if (((state && state.timers) || []).some((t) => t.endsAt) && (!audioCtx || audioCtx.state !== "running")) unlockAudio();
+};
+document.addEventListener("touchend", timerTapUnlock, true);
+document.addEventListener("click", timerTapUnlock, true);
 
 function dropHeldChime() {
   const h = heldChime;
@@ -16731,7 +16848,7 @@ function dropHeldChime() {
 function fireTimer(t) {
   const over = Date.now() - t.endsAt;
   const hidden = document.hidden;
-  const cameBack = !hidden && !(visibleSince != null && visibleSince <= t.endsAt);
+  const cameBack = !hidden && !(visibleSince != null && visibleSince <= t.endsAt && profileSince <= t.endsAt);
   const pushHasIt = hidden && !!t.cloudId && over >= PUSH_GRACE_MS;
   /* We got here first, so the server's copy has nothing left to say and is
      handed back before it can say it, unless it is the one saying it. */
@@ -16740,7 +16857,9 @@ function fireTimer(t) {
   if (!cameBack && !pushHasIt) {
     if (!hidden) {
       try { if (navigator.vibrate) navigator.vibrate([250, 120, 250, 120, 400]); } catch { /* ignore */ }
-      playSound(soundOf(t), volumeOf(t));
+      const chime = playSound(soundOf(t), volumeOf(t));
+      /* held, not played, by a context that may not start yet (see above) */
+      if (chime && audioCtx.state !== "running") heldChime = chime;
     } else if (audioCtx && audioCtx.state === "running") {
       /* only if the audio is really going: a suspended context would hold
          these notes and play them on the way back in */
@@ -16754,6 +16873,9 @@ function fireTimer(t) {
 /* Fire anything that has run out. Returns true when something changed, so the
    caller knows a re-render is due. */
 function sweepTimers() {
+  /* every firing comes through here, so this is where a change of profile
+     is seen before any of the new one's timers can ring (see fireTimer) */
+  if (profiles.active !== sweptProfile) { sweptProfile = profiles.active; profileSince = Date.now(); }
   const due = (state.timers || []).filter((t) => t.endsAt && t.endsAt <= Date.now());
   if (!due.length) return false;
   due.forEach(fireTimer);
@@ -16891,11 +17013,13 @@ async function cloudTimerStart(t, secs) {
   /* which rest this is, taken now rather than after the awaits below, when
      the profile it belongs to may no longer be the one on screen */
   const ref = timerRef(t);
+  /* and which run of it, so we can tell whether it is still the same one
+     when the round trip comes back. Read before the first await: read after
+     it, a Pause or a Stop landing in between was taken for the run itself
+     (both null), and the alarm stayed booked for a rest that was stopped. */
+  const run = t.endsAt;
   try {
     if (C.pushBlockedReason() || !(await C.pushEnabled())) return;
-    /* what the run was when we asked, so we can tell whether it is still
-       the same one when the round trip comes back */
-    const run = t.endsAt;
     const name = timerLabel(t) || T("timers.listTitle");
     /* `ref` is what the push is tagged with, so it is the same
        notification as notifyDone's and can be taken down the same way
@@ -17175,7 +17299,8 @@ function updateTimerPreview() {
 }
 
 /* ══════════════════════════ STOPWATCH ══════════════════════════════
-   The Log tab's third mini tab, beside History and Calendar. The timers
+   The Timer tab's second half, behind the segment beside the countdowns
+   (it began as a mini tab on the Log tab). The timers
    already in the app all count DOWN to something (a rest, a hold), and
    there was nothing that counted up, which is what you want for the other
    half of a session: how long a circuit took, how long the whole workout
@@ -20914,7 +21039,7 @@ const actions = {
   },
 
   "library-seg": (el) => { ui.librarySeg = el.dataset.id; ui.presetOrder = false; render(); },
-  "preset-reorder": () => { ui.presetOrder = !ui.presetOrder; render(); },
+  "preset-reorder": () => { ui.presetOrder = !ui.presetOrder; if (ui.presetOrder) ui.presetQ = ""; render(); },
   "pinned-reorder": () => { ui.pinnedOrder = !ui.pinnedOrder; render(); },
   "timer-reorder": () => { ui.timerOrder = !ui.timerOrder; render(); },
   "entry-reorder": () => { ui.entryOrder = !ui.entryOrder; render(); },
@@ -21194,6 +21319,7 @@ const actions = {
        length goes back too; otherwise editing 90s to 120s leaves a push
        booked for a rest that no longer exists */
     if (existing) { cloudTimerCancel(existing); timerCloseNotifs(existing); }
+    if (existing && ui.timerToast && ui.timerToast.id === existing.id) ui.timerToast = null;
     const row = existing
       ? { ...existing, cloudId: null, name, key: keepKey, duration, pinned: !!form.t.pinned, ...alert, endsAt: null, remaining: null, doneAt: null }
       : { id: form.t.id, name, duration, pinned: !!form.t.pinned, ...alert, endsAt: null, remaining: null, doneAt: null, createdAt: Date.now() };
@@ -21650,6 +21776,13 @@ function handleBind(el) {
     ui.pickerQ = v;
     const list = document.getElementById("pickList");
     if (list) { list.innerHTML = renderPickerList(state.library); if (window.lucide) lucide.createIcons(); }
+    repaintList("presetPickList", renderPresetPickerList);
+  } else if (bind === "presetq") {
+    ui.presetQ = v;
+    repaintList("presetList", presetListHTML);
+  } else if (bind === "histq") {
+    ui.historyQ = v;
+    repaintList("histList", () => historyDaysHTML(state.log, state.library, computeBadges(state.log), state.settings, state.settings.units));
   } else if (bind === "chatPlanDate") {
     if (ui.chatView) { ui.chatView.planDate = v; render(); }
   } else if (bind === "chatAttachQ") {

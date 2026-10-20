@@ -868,7 +868,10 @@ async function route(request, env, url, ctx) {
   }
 
   if (seg[0] === "v1" && seg[1] === "seeds" && seg[2] && seg.length === 3 && method === "DELETE") {
-    const seed = normalizeSeed(decodeURIComponent(seg[2]));
+    /* a malformed %-escape is a bad code, not a server error */
+    let raw = null;
+    try { raw = decodeURIComponent(seg[2]); } catch { /* answered below */ }
+    const seed = raw == null ? null : normalizeSeed(raw);
     if (!seed) return fail(400, "bad_request", "That is not a code.");
 
     const row = await env.DB.prepare("SELECT profile_id FROM seeds WHERE seed = ?").bind(seed).first();

@@ -187,11 +187,11 @@ EX.uk = [
    "Навантажує низ преса й згиначі стегна. Повільно й підконтрольно; якщо розгойдуєтеся, тренуєте лише інерцію."],
   ["Планка (з вагою)", "Власна вага", "Ролик для преса",
    "Тренує глибокий кор (поперечний м'яз живота) і прес. Антирозгинальна сила, що захищає поперек, а не випробовує його; напружте сідниці й не давайте тазу провисати."],
-  ["Кардіо: ходьба в гору", "Доріжка", "Велотренажер · Веслування",
+  ["Ходьба в гору", "Доріжка", "Велотренажер · Веслування",
    "Тренує серце й легені, злегка навантажуючи литки. Низькоударне й дружнє до суглобів, рахується як хвилини × інтенсивність; ставте крутий нахил і не тримайтеся за поручні."],
-  ["Кардіо: велотренажер", "Велотренажер", "Ходьба в гору · Веслування",
+  ["Велотренажер", "Велотренажер", "Ходьба в гору · Веслування",
    "Тренує серце й легені та злегка навантажує квадрицепси. Нульовий удар, ідеально поруч із днем ніг; тримайте чесний опір, а не просто крутіть."],
-  ["Кардіо: веслування", "Веслувальний тренажер", "Велотренажер",
+  ["Веслування", "Веслувальний тренажер", "Велотренажер",
    "Кондиція на все тіло, яка ще й працює середину спини. Починайте гребок ногами й тримайте спину нейтральною весь рух."],
 ];
 
@@ -272,11 +272,11 @@ EX.sv = [
    "Träffar nedre magen och höftböjarna. Långsamt och kontrollerat; svingar du tränar du bara fart."],
   ["Planka (med vikt)", "Kroppsvikt", "Ab wheel",
    "Tränar den djupa bålen (transversus abdominis) och magen. Anti-extensionsstyrka som skyddar ländryggen i stället för att testa den; spänn sätet och låt inte höften sjunka."],
-  ["Kondition: lutande gång", "Löpband", "Cykling · Rodd",
+  ["Lutande gång", "Löpband", "Cykling · Rodd",
    "Tränar hjärta och lungor och belastar vaderna lätt. Skonsamt mot lederna, loggas som minuter × intensitet; sätt en brant lutning och skippa ledstängerna."],
-  ["Kondition: cykling", "Cykel", "Lutande gång · Rodd",
+  ["Cykling", "Cykel", "Lutande gång · Rodd",
    "Tränar hjärta och lungor och belastar framsida lår lätt. Noll stöt, perfekt intill bendagen; håll motståndet ärligt i stället för att bara snurra."],
-  ["Kondition: rodd", "Roddmaskin", "Cykling",
+  ["Rodd", "Roddmaskin", "Cykling",
    "Helkroppskondition som dessutom jobbar mitten av ryggen. Starta draget med benen och håll ryggen neutral hela vägen."],
 ];
 
@@ -422,6 +422,7 @@ UI.en = {
   /* ── log: history & drafts ──────────────────────────────────────── */
   "log.history": "History",
   "log.search": "Search your log…",
+  "log.showOlder": "Show older ({days})",
   "log.calendar": "Calendar",
   "log.notepad": "Notepad",
   "notes.new": "New note",
@@ -1830,6 +1831,7 @@ UI.uk = {
 
   "log.history": "Історія",
   "log.search": "Пошук у журналі…",
+  "log.showOlder": "Показати старіші ({days})",
   "log.calendar": "Календар",
   "log.notepad": "Нотатник",
   "notes.new": "Нова нотатка",
@@ -3229,6 +3231,7 @@ UI.sv = {
 
   "log.history": "Historik",
   "log.search": "Sök i loggen…",
+  "log.showOlder": "Visa äldre ({days})",
   "log.calendar": "Kalender",
   "log.notepad": "Anteckningar",
   "notes.new": "Ny anteckning",

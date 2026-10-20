@@ -8,7 +8,7 @@
    Scope note: this file must stay in the repo root. A service worker can only
    control pages at or below its own URL, and the app lives at /zenofit/.       */
 
-const VERSION = "zenofit-v58";
+const VERSION = "zenofit-v59";
 /* Fetched photos, keyed by id (see the PHOTOS block in app.js). Not part of
    the shell and not versioned with it: a photo's id IS its content, so a
    new build has nothing to invalidate, and clearing it on every deploy
@@ -41,16 +41,33 @@ const SHELL = [
   "./fonts/barlow-condensed-700-latin.woff2",
   "./logoC.png",
   "./icon-192.png",
+  "./icon-512.png",
+  "./icon-maskable-512.png",
   "./manifest.webmanifest",
 ];
 
+/* ── AN UPDATE THAT CANNOT DOWNLOAD MUST NOT REPLACE ONE THAT WORKS ──────
+   This used to be one `addAll`, with any failure swallowed so the worker
+   installed anyway. On a weak signal that meant: one file of the new build
+   failed, the new worker activated with an EMPTY cache, activate deleted the
+   old one, and an app that had opened offline the day before no longer did.
+   Now each file is fetched on its own and the failures get one more try.
+   If the shell is still incomplete and an older copy is cached, the install
+   fails on purpose: the working version stays, and the browser tries the
+   update again on a later launch. A first install keeps whatever it got,
+   since there is nothing older to protect. */
 self.addEventListener("install", (e) => {
-  e.waitUntil(
-    caches.open(VERSION)
-      .then((c) => c.addAll(SHELL))
-      .then(() => self.skipWaiting())
-      .catch(() => self.skipWaiting())   // one missing file never blocks install
-  );
+  e.waitUntil((async () => {
+    const c = await caches.open(VERSION);
+    const fetchAll = (list) => Promise.all(list.map((u) => c.add(u).then(() => null, () => u)));
+    let missing = (await fetchAll(SHELL)).filter(Boolean);
+    if (missing.length) missing = (await fetchAll(missing)).filter(Boolean);
+    if (missing.length) {
+      const older = (await caches.keys()).some((k) => k !== VERSION && k !== PHOTO_CACHE);
+      if (older) { await caches.delete(VERSION); throw new Error("shell incomplete: " + missing.join(", ")); }
+    }
+    await self.skipWaiting();
+  })());
 });
 
 self.addEventListener("activate", (e) => {

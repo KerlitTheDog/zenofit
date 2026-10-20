@@ -8,20 +8,20 @@
  * a new table. */
 export async function limited(env, key, windowMs, max) {
   const now = Date.now();
+  /* One statement that counts and answers, so it is exact: the read and the
+     write used to be two, and a burst of parallel requests could all read
+     the count before any of them wrote it, and all pass. A refused request
+     is counted too, which changes nothing: the window still opens again at
+     the same moment. (SQLite reads the OLD row in every SET expression, so
+     both CASEs see the window as it was.) */
   const row = await env.DB.prepare(
-    "SELECT window_start, count FROM rate_limits WHERE key = ?"
-  ).bind(key).first();
-
-  if (!row || now - row.window_start > windowMs) {
-    await env.DB.prepare(
-      "INSERT INTO rate_limits (key, window_start, count) VALUES (?, ?, 1) " +
-      "ON CONFLICT(key) DO UPDATE SET window_start = excluded.window_start, count = 1"
-    ).bind(key, now).run();
-    return false;
-  }
-  if (row.count >= max) return true;
-  await env.DB.prepare("UPDATE rate_limits SET count = count + 1 WHERE key = ?").bind(key).run();
-  return false;
+    "INSERT INTO rate_limits (key, window_start, count) VALUES (?, ?, 1) " +
+    "ON CONFLICT(key) DO UPDATE SET " +
+    "  count = CASE WHEN ? - window_start > ? THEN 1 ELSE count + 1 END, " +
+    "  window_start = CASE WHEN ? - window_start > ? THEN excluded.window_start ELSE window_start END " +
+    "RETURNING count"
+  ).bind(key, now, now, windowMs, now, windowMs).first();
+  return !!row && row.count > max;
 }
 
 /* ── COUNTING ONLY WHAT WENT WRONG ──────────────────────────────────────

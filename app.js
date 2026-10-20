@@ -343,6 +343,13 @@ function shortUnder(ex, parentName) {
 const photoAway = (ex) => !!(ex && !ex.image && (ex.imageMissing || ex.photoId));
 const photoComing = (ex) => !!(ex && !ex.image && ex.photoId);
 
+/* English shows a built-in by its stored name, and three of them carried the
+   spreadsheet's "Cardio: " prefix, which was how the sheet told a cardio row
+   apart. A group says that now, so the label drops it; the stored name, which
+   is identity, stays as it was. */
+const EX_LABEL_EN = {};
+for (const d of DEFAULT_LIBRARY) if (/^Cardio: /.test(d.name)) EX_LABEL_EN[d.id] = d.name.slice(8);
+
 function exLabelOf(ex) {
   if (!ex) return "";
   /* a variation reads as its parent plus what makes it one, composed now
@@ -353,7 +360,7 @@ function exLabelOf(ex) {
     return p ? `${exLabelOf(p)} · ${own}` : ex.name;
   }
   const row = exRow(ex);
-  if (!row) return ex.name;
+  if (!row) return (!ex.custom && EX_LABEL_EN[ex.id] && ex.name === DEFAULT_LIBRARY[DEFAULT_INDEX[ex.id]].name) ? EX_LABEL_EN[ex.id] : ex.name;
   /* A built-in the user RENAMED is theirs now, the same rule exFieldOf
      applies to the prose below. Without it the library went on showing the
      shipped name in a translated UI while the log, the plans and the
@@ -840,6 +847,62 @@ const entryOnRecord = (e, isDraft) => isDraft
   ? !!(ui.workoutSheet && ui.workoutSheet.entries.some((x) => x.id === e.id))
   : (state.log || []).some((x) => x.id === e.id);
 
+/* ── ONE LIFT, ONE ROW, PER DAY ───────────────────────────────────────
+   A lift done twice in a day is one lift with more sets, never two rows.
+   Every way of adding a lift used to make a new row without looking: a
+   preset dealt Hamstring Curl into the day, the lift's own window said
+   Log exercise, and the day ended up with the preset's blank row waiting
+   for numbers AND the logged one, the blank (and the plan target it was
+   carrying) stranded beside it. So every way in asks first:
+     - the doors that open a lift's form open the row the day already has
+       (`dayLiftForm`): its sets, its plan target and all;
+     - saving a form that is not a row yet joins a row of the same lift
+       instead of adding one (save-entry-form), and so does saving the day
+       into the log, against the rows saved earlier that day (`logPut`).
+   `mergeLift` is the rule for joining. The row already there keeps its
+   identity (id, position, plan link, superset mark); a row that was still
+   blank simply takes the new numbers, and two rows that both hold sets
+   become one list of sets. What it cannot join honestly it refuses (null)
+   and the caller keeps both: two cardio sessions, two different kinds,
+   or sets weighed in two different units, because adding them up would
+   be the app making a number up. */
+const LIFT_KEEPS = ["id", "createdAt", "date", "plan", "planFrom", "planIx", "superWith"];
+function mergeLift(into, from) {
+  if (!into || !from || into === from || into.exercise !== from.exercise || kindOf(into) !== kindOf(from)) return null;
+  const keep = {};
+  for (const k of LIFT_KEEPS) if (into[k] !== undefined) keep[k] = into[k];
+  const notes = String(from.notes || "").trim() || into.notes || "";
+  if (!entryHasData(into)) return { ...from, ...keep, notes };
+  if (!entryHasData(from)) return { ...into, notes: String(into.notes || "").trim() || notes };
+  if (!isSetKind(kindOf(into)) || !isDetailed(into) || !isDetailed(from) || unitOf(into) !== unitOf(from)) return null;
+  return syncEntry({ ...into, notes: String(into.notes || "").trim() || notes,
+    setList: [...filledSets(into), ...filledSets(from)] });
+}
+
+/* the row the open sheet already has for this lift: the first one still
+   waiting for numbers, else the last one, which is where more sets go */
+const sheetLift = (name) => {
+  const rows = ((ui.workoutSheet && ui.workoutSheet.entries) || []).filter((x) => x.exercise === name);
+  return rows.find((x) => !entryHasData(x)) || rows[rows.length - 1] || null;
+};
+
+/* The entry form for a lift in the open sheet: its row if it has one */
+function dayLiftForm(ex) {
+  const have = sheetLift(ex.name);
+  return { f: have ? { ...have } : newEntry(ex.name, ex.muscle, exKind(ex)), isDraft: true };
+}
+
+/* Rows going into the log, each joining a row of the same lift on the same
+   day where mergeLift can, so a day saved in two goes is still one day */
+function logPut(log, rows) {
+  const out = [...log];
+  for (const e of rows) {
+    const i = out.findIndex((x) => x.date === e.date && x.exercise === e.exercise && mergeLift(x, e));
+    if (i >= 0) out[i] = mergeLift(out[i], e); else out.push(e);
+  }
+  return out;
+}
+
 /* One-line summary of an entry, shared by the history list and the draft
    cards: how many sets, and the best of them. */
 function entrySummary(e, unit, withRpe = false) {
@@ -1192,7 +1255,7 @@ function muscleOf(name, library, fallback) {
 const groupOfEntry = (e, library) =>
   muscleOf(e.exercise, library || state.library, e.muscle);
 
-/* Dashboard rows: first-appearance order, MAXIFS/COUNTIF equivalents */
+/* Dashboard rows: MAXIFS/COUNTIF equivalents, most recently trained first */
 function dashboardRows(log, library, goals) {
   const seen = new Map();
   for (const e of chronoSort(log)) {
@@ -1209,7 +1272,10 @@ function dashboardRows(log, library, goals) {
     if (e.date > r.last) r.last = e.date;
     if (m != null) r.best = r.best == null ? m : Math.max(r.best, m);
   }
-  return [...seen.values()].map((r) => {
+  /* Most recently trained first. The sheet listed lifts in the order they
+     first appeared, so the tab opened on the first lift ever logged, often
+     one dropped months ago, and the list read like an archive. */
+  return [...seen.values()].sort((a, b) => (a.last < b.last ? 1 : a.last > b.last ? -1 : 0)).map((r) => {
     const goal = goals[r.name];
     const progress = goal && r.best != null ? Math.min(1, r.best / goal) : goal ? 0 : null;
     return { ...r, muscle: muscleOf(r.name, library), goal: goal ?? null, progress };
@@ -3660,6 +3726,7 @@ const photoMem = new Map();       // id -> data URL, this session
 const photoWaits = new Map();     // id -> the fetch in flight
 const photoMissAt = new Map();    // id -> when the server last said "not here"
 const photoRefused = new Set();   // ids the store turned down, this session
+let photoRefusedTold = false;     // …and whether the person has heard so
 const photoPrev = new Map();      // library row id -> the picture it held before a row gave it an id
 
 /* ── WHEN THE SERVER'S PHOTO STORE IS FULL ──────────────────────────────
@@ -3846,6 +3913,14 @@ async function photoUpload(rows) {
            and the whole pass waits for the next one */
         if (!e || !e.status || e.status === 429 || e.status >= 500) throw e;
         photoRefused.add(id);
+        /* and said once a session, in their language: the picture stays on
+           this phone but will not reach their other devices, and nothing
+           else would ever tell them why */
+        if (!photoRefusedTold) {
+          photoRefusedTold = true;
+          appToast(apiErrText(e), "var(--gold)");
+          if (!syncTyping()) render();
+        }
       }
     }
   } finally { photoUpWrite(up); }
@@ -6344,6 +6419,7 @@ const ui = {
   libraryQ: "",
   presetQ: "",          // the search over Library -> Presets
   historyQ: "",         // the search over the Log tab's history
+  historyShown: 30,     // …and how many of its days are drawn (HISTORY_PAGE at a time)
   libraryFilter: "All",
   librarySeg: "exercises", // exercises | presets, Library sub-tab
   /* ── chat ─────────────────────────────────────────────────────────
@@ -6389,6 +6465,7 @@ function resetTransient() {
   ui.libraryQ = "";
   ui.presetQ = "";
   ui.historyQ = "";
+  ui.historyShown = HISTORY_PAGE;
   ui.libraryFilter = "All";
   ui.librarySeg = "exercises";
   ui.exHistAll = false;
@@ -6853,6 +6930,61 @@ function flashLogDay() {
   card.classList.add("pb-flash");
 }
 
+/* ── THE BACK BUTTON CLOSES A WINDOW, NOT THE APP ─────────────────────
+   Nothing here ever touched the browser's history, so Android's back
+   button (and a back swipe) had nothing to go back to and closed the whole
+   app from inside any window: a half-typed set, the picker, a sheet.
+
+   So while there is something to go back FROM (a window open, or a tab
+   other than Home) the page keeps ONE extra history entry, and a back
+   press spends it: the top window is closed by pressing its own close
+   control, so every window keeps its own rules about closing (a filled-in
+   exercise still asks, the workout window still parks the day), and with
+   no window open the press goes Home. Only from Home does back leave the
+   app, as it does in every other app. Every window has a close control by
+   the same convention: a sheet's X, and the first header button of a full
+   screen (close, cancel, back or exit in its action). A window closed by
+   hand gives the entry back, so the next back press is not a dud. */
+const BACK_CLOSE = /close|cancel|back|exit/;
+let backGuard = false, backIgnore = false;
+
+function backTarget() {
+  if (!accountOn() || !profiles.active) return null;
+  const root = app.querySelector(".pb-root");
+  if (!root) return null;
+  let top = null, topZ = -Infinity;
+  for (const el of root.children) {
+    if (!el.hasAttribute("data-layer") || el.classList.contains("pb-trans")) continue;
+    const z = parseInt(el.style.zIndex, 10) || 0;
+    if (z >= topZ) { topZ = z; top = el; }
+  }
+  if (top) {
+    if (top.dataset.layer === "fs" && BACK_CLOSE.test(top.dataset.action || "")) return top;
+    return top.querySelector('button[data-action="overlay-close"]')
+      || [...top.querySelectorAll("button[data-action]")].find((b) => BACK_CLOSE.test(b.dataset.action)) || null;
+  }
+  return ui.tab !== "home" ? "home" : null;
+}
+
+function backSync() {
+  const want = !!backTarget();
+  try {
+    if (want && !backGuard) { history.pushState({ zfBack: 1 }, ""); backGuard = true; }
+    else if (!want && backGuard) { backGuard = false; backIgnore = true; history.back(); }
+  } catch { backIgnore = false; /* no history to work with: back stays the browser's */ }
+}
+
+/* a guard left from before a reload belongs to the page that pushed it */
+try { if (history.state && history.state.zfBack) history.replaceState(null, ""); } catch { /* fine */ }
+window.addEventListener("popstate", () => {
+  if (backIgnore) { backIgnore = false; backSync(); return; }
+  backGuard = false;                 // the entry just left was the guard
+  const t = backTarget();
+  if (t === "home") { ui.tab = "home"; resetTransient(); render(); }
+  else if (t) t.click();
+  backSync();                        // a window still open, or one that said no
+});
+
 /* ── A FOOTER THAT GROWS HAS TO BE MEASURED, NOT GUESSED ──────────────
    The workout sheet and the entry form both park their save button over a
    scrolling list, fading the list out under it, and the clearance that list
@@ -7143,6 +7275,7 @@ function render() {
   paintTimers();   // put the freshly mounted rings/digits at the right position
   startStopwatchEngine();   // …and pick the stopwatch back up if this frame drew one
   persist();       // every frame is a save point, see snapshotDrafts()
+  backSync();      // a back press has something to close, or leaves (THE BACK BUTTON)
 }
 
 /* ── WHAT A SCREEN READER HEARS, AND WHERE A KEYBOARD CAN GO ───────────
@@ -8159,6 +8292,8 @@ function renderHistory(log, library, badges, settings, unit) {
    whole; otherwise by its lifts (name, group or the lift's own note), and
    then shows only the lifts that matched, which is the answer to "how has
    my bench gone" without scrolling past every other lift of every day. */
+const HISTORY_PAGE = 30;   // days drawn per page of the Log tab's history
+
 function historyDaysHTML(log, library, badges, settings, unit) {
   const byDate = {};
   for (const e of log) (byDate[e.date] = byDate[e.date] || []).push(e);
@@ -8167,10 +8302,27 @@ function historyDaysHTML(log, library, badges, settings, unit) {
   const liftHit = (e) => nameMatches(e.exercise, q) ||
     textHas(q, e.notes, groupOfEntry(e, library), groupLabel(groupOfEntry(e, library)));
 
-  const days = dates.map((date) => {
+  const hits = [];
+  for (const date of dates) {
     const entries = byDate[date].sort((a, b) => a.createdAt - b.createdAt);
-    const only = textHas(q, fmtDate(date), dayNoteOn(date)) ? null : new Set(entries.filter(liftHit));
-    if (only && !only.size) return "";
+    /* nothing typed, nothing to match: formatting every date for a search
+       nobody asked for was most of what was left of the cost */
+    const only = !String(q || "").trim() || textHas(q, fmtDate(date), dayNoteOn(date)) ? null : new Set(entries.filter(liftHit));
+    if (!only || only.size) hits.push({ date, entries, only });
+  }
+  /* A YEAR OF TRAINING IS NOT ONE FRAME. Every day ever logged used to be
+     drawn on every render of this tab, and render() runs under every tap of
+     a workout opened from here: measured on a mid-range phone, 0.1 s with a
+     month of training, 1.3 s with a year and 3 s with two. So the newest
+     HISTORY_PAGE days are drawn and the rest wait behind *Show older*; a
+     search narrows first and pages after, and a jump to an older day (a
+     calendar day, a point on a graph) opens the pages down to it. */
+  const jump = ui.logJump ? hits.findIndex((h) => h.date === ui.logJump) : -1;
+  if (jump >= ui.historyShown) ui.historyShown = jump + HISTORY_PAGE;
+  const shown = hits.slice(0, ui.historyShown);
+  const more = hits.length - shown.length;
+
+  const days = shown.map(({ date, entries, only }) => {
     /* a program-week label, and nothing to say in rolling mode */
     const wk = rollingWeeks() ? null : weekOf(date, settings.startDate);
     const sets = entries.filter((e) => e.kind !== "cardio").reduce((a, e) => a + (+e.sets || 0), 0);
@@ -8263,7 +8415,9 @@ function historyDaysHTML(log, library, badges, settings, unit) {
       ${leftLine}
     </div>`;
   }).join("");
-  return days || searchNone();
+  return (days || searchNone()) + (more
+    ? `<button data-action="history-more" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:13.5px;margin-bottom:12px">${icon("chevrons-down", 16)} ${T("log.showOlder", { days: TN("day", more) })}</button>`
+    : "");
 }
 
 /* ───────────────────────────── VOLUME ─────────────────────────────── */
@@ -8854,6 +9008,7 @@ function renderProgress(log, library, goals, badges, settings, unit) {
       </div>
     </div>`;
 
+  const selRow = rows.find((r) => r.name === sel);
   const glance = {
     logged: log.length,
     sets: log.filter((e) => e.kind !== "cardio").reduce((a, e) => a + (+e.sets || 0), 0),
@@ -8861,9 +9016,12 @@ function renderProgress(log, library, goals, badges, settings, unit) {
     goalsHit: rows.filter((r) => r.goal != null && r.best != null && r.best >= r.goal).length,
   };
 
-  const selRow = rows.find((r) => r.name === sel);
+  /* only the sessions in the kind the lift is read in today, as in its own
+     window (exerciseHistory): a rep count and a kilo on one line was a graph
+     of nothing */
   const series = sel
-    ? chronoSort(log).filter((e) => e.exercise === sel).map((e) => ({ ...e, m: metricOf(e) })).filter((e) => e.m != null)
+    ? chronoSort(log).filter((e) => e.exercise === sel && kindOf(e) === (selRow ? selRow.kind : kindOf(e)))
+      .map((e) => ({ ...e, m: metricOf(e) })).filter((e) => e.m != null)
     : [];
   /* every dot carries the entry that made it, so tapping one can open the
      session behind the number instead of just showing it again */
@@ -8898,8 +9056,8 @@ function renderProgress(log, library, goals, badges, settings, unit) {
     ? `<div class="pb-card pb-scroll" data-scrollkey="prog-detail" style="margin-bottom:20px;max-height:210px;overflow-y:auto">
         ${[...series].reverse().map((e) => `<button data-action="chart-pick" data-scope="main" data-id="${e.id}" style="width:100%;text-align:left;display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--border-soft);font-size:13px;color:var(--text);background:${ui.chartSel.main === e.id ? "rgba(233,185,73,.08)" : "transparent"}">
           <span style="color:var(--muted);width:84px;flex-shrink:0">${fmtShort(e.date)}</span>
-          <span style="flex:1;color:var(--faint);font-size:12px">${e.kind === "cardio" ? `${esc(e.minutes)} min × RPE ${esc(e.intensity)}` : `${esc(e.reps)} × ${esc(e.weight)} ${unitOf(e)}`}</span>
-          <span class="pb-num" style="font-weight:700;font-size:15.5px;color:${badges[e.id]?.badge === "pr" ? "var(--gold)" : "var(--text)"}">${e.m}</span>
+          <span style="flex:1;min-width:0;color:var(--faint);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${entrySummary(e, unit)}</span>
+          <span class="pb-num" style="font-weight:700;font-size:15.5px;color:${badges[e.id]?.badge === "pr" ? "var(--gold)" : "var(--text)"}">${metricShow(kindOf(e), e.m)}</span>
         </button>`).join("")}
       </div>`
     : "";
@@ -13463,7 +13621,7 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
       ${planning ? "" : renderTimerList()}
     </div>
 
-    <div data-footer-for="worksheet" style="position:absolute;bottom:0;left:0;right:0;padding:12px 16px calc(18px + var(--pb-sab));background:linear-gradient(transparent, var(--bg) 30%)">
+    <div data-footer-for="worksheet" style="position:absolute;bottom:0;left:0;right:0;padding:22px 16px calc(18px + var(--pb-sab));background:linear-gradient(transparent, var(--bg) 18px)">
       ${!planning && emptyCount ? `<div style="font-size:11.5px;color:var(--faint);text-align:center;margin-bottom:8px;line-height:1.45">${emptyCount === 1 ? T("wo.stillNeedOne") : T("wo.stillNeed", { n: TN("exercise", emptyCount) })}</div>` : ""}
       ${planning && draft.entries.length ? `<div style="font-size:11.5px;color:var(--faint);text-align:center;margin-bottom:8px;line-height:1.45">${T("plan.footNote")}</div>` : ""}
       ${!planning && !draft.editing && draft.entries.length ? `<div style="font-size:11.5px;color:var(--faint);text-align:center;margin-bottom:8px;line-height:1.45">${T("wo.draftNote")}</div>` : ""}
@@ -14799,7 +14957,7 @@ function renderPicStudio() {
       <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:16px 2px 0">${T("pic.hint")}</div>
     </div>
 
-    <div data-footer-for="pic" style="position:absolute;bottom:0;left:0;right:0;padding:12px 16px calc(18px + var(--pb-sab));background:linear-gradient(transparent, var(--bg) 30%);display:flex;gap:8px">
+    <div data-footer-for="pic" style="position:absolute;bottom:0;left:0;right:0;padding:22px 16px calc(18px + var(--pb-sab));background:linear-gradient(transparent, var(--bg) 18px);display:flex;gap:8px">
       <button data-action="pic-save" data-pic-out class="pb-btn pb-ghost" ${ready ? "" : "disabled"} style="flex:1;padding:14px 0;font-size:14.5px;opacity:${ready ? 1 : 0.5}">${icon("download", 16)} ${T("pic.save")}</button>
       <button data-action="pic-share" data-pic-out class="pb-btn pb-gold" ${ready ? "" : "disabled"} style="flex:1.4;padding:14px 0;font-size:15px;opacity:${ready ? 1 : 0.5};${!picBlob || canShare ? "" : "display:none"}">${icon("share-2", 16)} ${T("pic.share")}</button>
     </div>
@@ -15789,7 +15947,7 @@ function renderEntryFields(form, unit) {
       ${planning ? "" : renderTimerList()}
     </div>
 
-    <div data-footer-for="entryform" style="position:absolute;bottom:0;left:0;right:0;padding:12px 16px calc(18px + var(--pb-sab));background:linear-gradient(transparent, var(--bg) 30%)">
+    <div data-footer-for="entryform" style="position:absolute;bottom:0;left:0;right:0;padding:22px 16px calc(18px + var(--pb-sab));background:linear-gradient(transparent, var(--bg) 18px)">
       ${(() => {
         const face = entrySaveFace(f, { planning, lineUp, onRecord });
         return `<button id="entrySaveBtn" data-action="save-entry-form" data-face="${esc(face.glyph + "|" + face.label)}" ${valid ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:15px 0;font-size:16px;opacity:${valid ? 1 : 0.45}">
@@ -18961,7 +19119,7 @@ function commitWorkout(draft) {
     const stamped = filled.map((e, i) => ({ ...e, date: draft.date, createdAt: now + i }));
     ui.workoutSheet = null;
     if (sum) ui.planResult = planResultOf(draft, sum);
-    patch({ log: [...kept, ...stamped], plans, unlogged, dayNotes });
+    patch({ log: logPut(kept, stamped), plans, unlogged, dayNotes });
     return;
   }
   const stamped = filled.map((e, i) => ({ ...e, date: draft.date, createdAt: Date.now() + i }));
@@ -18972,7 +19130,7 @@ function commitWorkout(draft) {
      of the plan it was answering rides on in state.plans; the targets it has
      already handed out are inside the entries now. */
   patch({
-    log: [...state.log, ...stamped],
+    log: logPut(state.log, stamped),
     dayDrafts: draftId ? (state.dayDrafts || []).filter((d) => d.id !== draftId) : state.dayDrafts,
     plans,
     unlogged,
@@ -19815,7 +19973,16 @@ const actions = {
        not deal its exercises out twice. */
     w.planIds = w.planIds || [];
     if (!w.planIds.includes(p.id)) {
-      w.entries = [...w.entries, ...(p.entries || []).map((pe, i) => planEntryToDraftEntry(pe, p.id, i))];
+      /* a lift the day already has takes the plan's target onto its own
+         row rather than getting a second, planned row beside it */
+      const add = [];
+      (p.entries || []).forEach((pe, i) => {
+        const d = planEntryToDraftEntry(pe, p.id, i);
+        const have = sheetLift(d.exercise);
+        if (have && have.planFrom == null) { have.plan = d.plan; have.planFrom = d.planFrom; have.planIx = d.planIx; }
+        else add.push(d);
+      });
+      w.entries = [...w.entries, ...add];
       w.planIds.push(p.id);
       if (!w.planName) w.planName = p.name || "";
     }
@@ -20448,11 +20615,19 @@ const actions = {
     const name = el.dataset.name;
     const ex = state.library.find((x) => x.name === name);
     if (!ex) return;
-    if (!ui.workoutSheet) ui.workoutSheet = sheetForDay(todayStr());
     ui.exWin = null; ui.exWinEdit = false; ui.exWinDraft = null;
     ui.picking = false; ui.pickerQ = ""; ui.pickerQuick = null;
-    ui.entryForm = { f: newEntry(ex.name, ex.muscle, exKind(ex)), isDraft: true };
     ui.setForm = null;
+    /* and the lift's row in it, when the day already has one (see ONE
+       LIFT, ONE ROW, PER DAY): in the open or parked sheet, else as saved
+       earlier today, opened the way the Log tab opens a row */
+    const parked = !ui.workoutSheet && (state.dayDrafts || []).some((d) => d.date === todayStr());
+    const saved = !ui.workoutSheet && !parked && state.log
+      .filter((e) => e.date === todayStr() && e.exercise === ex.name)
+      .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))[0];
+    if (saved) { ui.entryForm = { f: { ...saved }, isDraft: false }; ui.tab = "log"; render(); return; }
+    if (!ui.workoutSheet) ui.workoutSheet = sheetForDay(todayStr());
+    ui.entryForm = dayLiftForm(ex);
     render();
   },
   "exwin-close": () => { ui.exWin = null; ui.exWinEdit = false; ui.exWinDraft = null; ui.exWinAttach = null; render(); },
@@ -21076,7 +21251,7 @@ const actions = {
   "apply-preset": (el) => {
     const p = (state.presets || []).find((x) => x.id === el.dataset.id);
     if (!p || !ui.workoutSheet) return;
-    ui.workoutSheet.entries = [...ui.workoutSheet.entries, ...presetToEntries(p)];
+    ui.workoutSheet.entries = [...ui.workoutSheet.entries, ...presetToEntries(p).filter((e) => !sheetLift(e.exercise))];
     ui.picking = false; ui.pickerQ = ""; ui.pickerQuick = null; ui.pickerSeg = "exercises";
     render();
   },
@@ -21084,7 +21259,11 @@ const actions = {
     const p = (state.presets || []).find((x) => x.id === el.dataset.id);
     if (!p) return;
     ui.tab = "log"; ui.logSeg = "history"; resetTransient();
-    ui.workoutSheet = { date: todayStr(), entries: presetToEntries(p) };
+    /* into today's workout, the same one every other door opens: it used
+       to start a second, empty one over a day already parked */
+    if (ui.workoutSheet && (ui.workoutSheet.planning || ui.workoutSheet.date !== todayStr())) closeWorksheet();
+    if (!ui.workoutSheet) ui.workoutSheet = sheetForDay(todayStr());
+    ui.workoutSheet.entries = [...ui.workoutSheet.entries, ...presetToEntries(p).filter((e) => !sheetLift(e.exercise))];
     render();
   },
   "preset-pin": (el) => {
@@ -21140,7 +21319,7 @@ const actions = {
     const ex = state.library.find((x) => x.id === el.dataset.id);
     if (!ex) return;
     ui.picking = false; ui.pickerQ = ""; ui.pickerQuick = null;
-    ui.entryForm = { f: newEntry(ex.name, ex.muscle, exKind(ex)), isDraft: true };
+    ui.entryForm = dayLiftForm(ex);
     render();
   },
   "edit-draft-entry": (el) => {
@@ -21451,6 +21630,11 @@ const actions = {
     ui.timerToast = null;
     writeNow(); render();
   },
+  /* the next page of the history, drawn into the list in place */
+  "history-more": () => {
+    ui.historyShown += HISTORY_PAGE;
+    repaintList("histList", () => historyDaysHTML(state.log, state.library, computeBadges(state.log), state.settings, state.settings.units));
+  },
   "toast-open": () => { ui.timerToast = null; ui.tab = "timer"; resetTransient(); render(); },
   /* ── a picture of what you did (see picOpen) ──────────────────────── */
   "pic-open": (el) => picOpen(el.dataset.mode, el.dataset.ref),
@@ -21560,8 +21744,13 @@ const actions = {
        the app can produce. */
     if (!planning && !isDraft && !exists && !entryHasData(f)) return;
     if (isDraft) {
+      /* the net under every door in: a new row for a lift the day already
+         has joins that row (ONE LIFT, ONE ROW, PER DAY) */
+      const twin = !exists && sheetLift(f.exercise);
+      const joined = twin && mergeLift(twin, f);
       ui.workoutSheet.entries = exists
         ? ui.workoutSheet.entries.map((x) => (x.id === f.id ? f : x))
+        : joined ? ui.workoutSheet.entries.map((x) => (x === twin ? joined : x))
         : [...ui.workoutSheet.entries, f];
       ui.entryForm = null; ui.setForm = null; render();
     } else {
@@ -21654,6 +21843,7 @@ const actions = {
    answering your girlfriend, and nothing in the chat actions writes
    `state`, which is the test everything else on this list has to pass. */
 const READ_OK = new Set([
+  "history-more",
   "nav", "fab", "log-seg", "timer-seg", "library-seg", "prog-seg", "picker-seg", "pick-filter", "lib-filter",
   "chat-open", "chat-close", "chat-send", "chat-start", "chat-find-clear", "chat-earlier",
   "chat-retry", "chat-menu", "chat-mute", "chat-block", "chat-unblock", "chat-blocks-open", "chat-leave",
@@ -21782,6 +21972,7 @@ function handleBind(el) {
     repaintList("presetList", presetListHTML);
   } else if (bind === "histq") {
     ui.historyQ = v;
+    ui.historyShown = HISTORY_PAGE;
     repaintList("histList", () => historyDaysHTML(state.log, state.library, computeBadges(state.log), state.settings, state.settings.units));
   } else if (bind === "chatPlanDate") {
     if (ui.chatView) { ui.chatView.planDate = v; render(); }

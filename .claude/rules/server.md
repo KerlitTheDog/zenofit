@@ -10,7 +10,7 @@ Loaded by itself whenever a file under `api/` is opened. What each feature does,
 - **Replies are written for people.** A refusal is `fail()` with a sentence of the route's own, never an exception's message; the detail goes to `wrangler tail` only. A new error code a person can meet gets its words in all three languages in the same commit (docs/sync.md).
 - **D1 refuses a LIKE or GLOB pattern longer than 50 characters**, and only when it actually evaluates one, so a test passes and production fails. Match inside a payload with `json_extract`, never LIKE (docs/photos.md).
 - **Statements are set-based, never a loop per row**: the free plan allows fifty D1 queries per request (docs/accounts.md, deleting an account).
-- **Anything that mints an identity or can be looped is rate limited** through `limited` / `limitOf` in `limits.js`, keyed by `addressKey` (docs/accounts.md).
+- **Anything that mints an identity or can be looped is rate limited** through `limited` / `limitOf` in `limits.js`, keyed by `addressKey` (docs/accounts.md). `limited` counts and answers in ONE statement (`INSERT ... ON CONFLICT ... RETURNING count`), so a burst of parallel requests cannot all read the count before any of them writes it.
 - **CORS is an allowlist** (`ALLOWED_ORIGINS` in `wrangler.toml`): a local preview must be served from one of those origins (port 8080) or it cannot log in.
 - **Migrations**: an additive one ships without asking; a DROP, a DELETE or an ALTER that loses a column stops and asks (CLAUDE.md). Migrations go up before the Worker.
 - **Local `wrangler dev` runs on the main PC only** (on the laptop, Windows blocks the Workers runtime), so the local-only checks and dependency bumps happen there (CLAUDE.md, *Two computers*).

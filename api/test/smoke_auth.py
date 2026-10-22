@@ -225,6 +225,47 @@ check("and naming no endpoint keeps no subscription", b.get("subscriptions") == 
 s, b = call("POST", "/v1/auth/logout-others")
 check("with no token it is refused", s == 401, (s, b))
 
+print("\n== a forgotten password: recovery codes ==")
+# Shown once at signup; any one, with the username, sets a new password and
+# ends every other login. The account is put back on PW at the end, so
+# cleanup can still sign in to delete it.
+import re
+REC = "zt_rec_" + tag
+s, b = call("POST", "/v1/auth/register", body={"username": REC, "key": derive(REC, PW)})
+codes = b.get("recoveryCodes") or []
+check("signing up answers with 8 recovery codes", s == 201 and len(codes) == 8 and len(set(codes)) == 8, (s, b))
+check("each reads abcde-fghjk, nothing that misreads", all(re.fullmatch(r"[2-9a-hjkmnp-z]{5}-[2-9a-hjkmnp-z]{5}", c) for c in codes), codes)
+REC_TOKEN = b.get("token")
+s, b = call("GET", "/v1/me", token=REC_TOKEN)
+check("the account says 8 are unused", s == 200 and b.get("recoveryLeft") == 8, (s, b))
+NEWPW = "a brand new password"
+s, b = call("POST", "/v1/auth/recover", body={"username": REC, "code": "22222-22222", "key": derive(REC, NEWPW)})
+check("a wrong code is refused", s == 401 and b.get("error") == "bad_code", (s, b))
+s, b = call("POST", "/v1/auth/recover", body={"username": "zt_nobody_" + tag, "code": codes[0], "key": derive(REC, NEWPW)})
+check("an unknown name gets the SAME refusal", s == 401 and b.get("error") == "bad_code", (s, b))
+s, b = call("POST", "/v1/auth/recover", body={"username": REC, "code": codes[0].replace("-", "").upper(), "key": derive(REC, NEWPW)})
+check("the right code, typed in capitals without the dash, sets a new password", s == 200 and b.get("token") and b.get("codesLeft") == 7, (s, b))
+NEW_TOKEN_REC = b.get("token")
+s, b = call("GET", "/v1/me", token=REC_TOKEN)
+check("every login the account had is ended", s == 401, (s, b))
+s, b = call("GET", "/v1/me", token=NEW_TOKEN_REC)
+check("this phone is signed in, with 7 codes left", s == 200 and b.get("recoveryLeft") == 7, (s, b))
+s, b = call("POST", "/v1/auth/login", body={"username": REC, "key": derive(REC, PW)})
+check("the old password no longer opens it", s == 401, (s, b))
+s, b = call("POST", "/v1/auth/login", body={"username": REC, "key": derive(REC, NEWPW)})
+check("the new one does", s == 200, (s, b))
+s, b = call("POST", "/v1/auth/recover", body={"username": REC, "code": codes[0], "key": derive(REC, PW)})
+check("a spent code does not work twice", s == 401 and b.get("error") == "bad_code", (s, b))
+s, b = call("POST", "/v1/auth/recovery-codes", token=NEW_TOKEN_REC, body={"key": derive(REC, PW)})
+check("new codes need the password: a wrong one is refused", s == 403 and b.get("error") == "bad_password", (s, b))
+s, b = call("POST", "/v1/auth/recovery-codes", token=NEW_TOKEN_REC, body={"key": derive(REC, NEWPW)})
+fresh = b.get("recoveryCodes") or []
+check("the right one makes 8 new codes", s == 200 and len(fresh) == 8 and not set(fresh) & set(codes), (s, b))
+s, b = call("POST", "/v1/auth/recover", body={"username": REC, "code": codes[1], "key": derive(REC, PW)})
+check("and every old unused code stops working", s == 401, (s, b))
+s, b = call("POST", "/v1/auth/recover", body={"username": REC, "code": fresh[0], "key": derive(REC, PW)})
+check("a new code works (and puts the old password back)", s == 200 and b.get("codesLeft") == 7, (s, b))
+
 LOCAL = API.startswith("http://127.0.0.1") or API.startswith("http://localhost")
 
 def fresh_addr():

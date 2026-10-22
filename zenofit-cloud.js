@@ -215,6 +215,30 @@
     }
   }
 
+  /* ── RECOVERY CODES ────────────────────────────────────────────────────
+     The way back in when the password is forgotten. register() already
+     answers with the account's first set (recoveryCodes); this makes a new
+     set, replacing every unused one, behind the password. Resolves
+     {recoveryCodes}; a wrong password throws 403 bad_password. */
+  async function newRecoveryCodes(password) {
+    const d = read(DEVICE_KEY) || {};
+    return call("POST", "/v1/auth/recovery-codes", { key: await deriveKey(d.username, password) });
+  }
+
+  /* One code, the username and a new password: the code is spent, the
+     password changes, every other login of the account ends, and this
+     phone is signed in. Resolves {userId, username, token, codesLeft};
+     a wrong pair throws 401 bad_code. */
+  async function recover(username, code, password) {
+    const key = await deriveKey(username, password);
+    const res = await call("POST", "/v1/auth/recover", { username, code, key }, { noAuth: true });
+    write(DEVICE_KEY, { userId: res.userId, token: res.token, username: res.username });
+    return res;
+  }
+
+  /* who this token is, and how many recovery codes are left unused */
+  const me = () => call("GET", "/v1/me");
+
   /* Every other login of this account ends (POST /v1/auth/logout-others);
      this one stays. Names this phone's push endpoint so it keeps ringing.
      Resolves {signedOut: n}; throws like `call` does. */
@@ -690,7 +714,7 @@
   window.ZenofitCloud = {
     API,
     ensureDevice, hasDevice,
-    deriveKey, register, signIn, signOut, signOutOthers, account, signedIn, nameAvailable, verifyPassword,
+    deriveKey, register, signIn, signOut, signOutOthers, newRecoveryCodes, recover, me, account, signedIn, nameAvailable, verifyPassword,
     deleteAccount, forgetAccount,
     isStandalone, isIOS, pushBlockedReason,
     enablePush, refilePush, disablePush, pushEnabled, testPush, pushEndpoint, setPushPrefs, pushStatus,

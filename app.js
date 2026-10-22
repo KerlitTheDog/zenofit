@@ -2691,6 +2691,8 @@ function closeEverything() {
   /* the sync sheets name a profile by id, so leaving one open across a
      switch would point them at somebody else's */
   ui.syncSheet = null; ui.joinSheet = null; ui.syncError = null; ui.accountSheet = null; ui.deleteAcct = null;
+  /* another account's codes must never be left on screen for the next one */
+  ui.recoveryShow = null; ui.recoveryForm = null; ui.recoveryLeft = null;
   /* a password given to Storage check opens that screen for that visit
      and not for whatever comes after it */
   ui.showStorage = false; ui.storUnlock = null; ui.storUnlocked = new Set();
@@ -6318,6 +6320,9 @@ const ui = {
   rosterLoading: false, // first login on this device: the account's list is on its way
   signingOut: false,    // logging out is sending what has not gone up yet
   deleteAcct: null,     // {password, busy, error} the sheet that deletes the account, see accountErased
+  recoveryShow: null,   // {codes, copied} recovery codes on screen, the one time they are shown
+  recoveryForm: null,   // {password, busy, error} the password asked before new codes are made
+  recoveryLeft: null,   // how many unused codes the account has, from GET /v1/me (null: not known yet)
   firstProfileName: "", // the name field on the no-profiles screen
   syncSheet: null,      // {localId, grants, code, copied} the share sheet
   joinSheet: null,      // {code, busy, error} redeeming somebody's code
@@ -7211,6 +7216,8 @@ function render() {
   if (ui.profileForm) html += renderProfileForm();
   if (ui.accountSheet) html += renderAccountSheet();
   if (ui.deleteAcct) html += renderDeleteAccount();
+  if (ui.recoveryForm) html += renderRecoveryForm();
+  if (ui.recoveryShow) html += renderRecoveryCodes();
   if (ui.syncSheet) html += renderSyncSheet();
   if (ui.joinSheet) html += renderJoinSheet();
   if (ui.showBody) html += renderBodyWindow(body, unit);
@@ -7439,6 +7446,8 @@ function renderGate(scrolls) {
     if (ui.storUnlock) html += renderStorUnlock();
     if (ui.joinSheet) html += renderJoinSheet();
     if (ui.deleteAcct) html += renderDeleteAccount();
+    /* a new account lands here, with its codes on top */
+    if (ui.recoveryShow) html += renderRecoveryCodes();
   }
   html += `</div></div>`;
   app.innerHTML = html;
@@ -7451,9 +7460,36 @@ function renderGate(scrolls) {
   if (af && document.activeElement !== af && !syncTyping()) af.focus();
 }
 
-const freshLogin = () => ({ username: "", password: "", busy: false, error: null, confirmCreate: false });
+const freshLogin = () => ({ username: "", password: "", busy: false, error: null, confirmCreate: false, recover: false, code: "" });
 const LOGIN_NAME_RE = /^[a-z0-9][a-z0-9._-]{2,23}$/;
 const loginReady = (f) => LOGIN_NAME_RE.test((f.username || "").trim()) && !!(f.password || "") && !f.busy;
+/* a code is ten characters, so a half-typed one waits rather than scolds */
+const recoverReady = (f) => loginReady(f) && String(f.code || "").replace(/[\s-]/g, "").length === 10;
+
+/* ── A FORGOTTEN PASSWORD ─────────────────────────────────────────────
+   The same screen, in its other mode: the username, one recovery code
+   and a new password (POST /v1/auth/recover). The server only ever sees
+   a key derived from a password, so there is nothing it could email; the
+   codes the account was given at signup are the way back. */
+function renderRecoverForm(f) {
+  const ok = recoverReady(f);
+  return `<form id="loginForm" novalidate style="display:flex;flex-direction:column">
+    <div style="font-size:15px;font-weight:700;margin-bottom:6px">${T("recover.title")}</div>
+    <div style="font-size:12.5px;color:var(--muted);line-height:1.55;margin-bottom:14px">${T("recover.body")}</div>
+    ${field(T("acct.username"),
+      `<input class="pb-input" data-bind="loginName" value="${esc(f.username)}" placeholder="${esc(T("acct.usernamePh"))}" autocapitalize="none" autocorrect="off" autocomplete="username" spellcheck="false" maxlength="24">`)}
+    ${field(T("recover.code"),
+      `<input class="pb-input" data-bind="loginCode" value="${esc(f.code || "")}" placeholder="abcde-fghjk" autocapitalize="none" autocorrect="off" autocomplete="one-time-code" spellcheck="false" maxlength="14" data-autofocus>`)}
+    ${field(T("recover.newPassword"),
+      `<input class="pb-input" type="password" data-bind="loginPass" value="${esc(f.password)}" autocapitalize="none" autocorrect="off" autocomplete="new-password" spellcheck="false">`)}
+    <div id="loginErr" style="font-size:12.5px;color:var(--red);margin:-4px 0 12px;line-height:1.5;display:${f.error ? "block" : "none"}">${f.error ? esc(f.error) : ""}</div>
+    <button id="loginGoBtn" type="submit" data-action="login-recover" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
+      ${icon("key", 16)} ${T(f.busy ? "acct.working" : "recover.go")}
+    </button>
+    <button type="button" data-action="login-recover-cancel" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;font-size:13.5px;margin-top:8px">${T("recover.back")}</button>
+    <div style="font-size:11.5px;color:var(--faint);margin-top:10px;line-height:1.55">${T("acct.passwordHint")}</div>
+  </form>`;
+}
 
 /* ── ONE FORM, AND IT ASKS BEFORE IT MAKES AN ACCOUNT ─────────────────
    Logging in and signing up are the same two fields, and the server
@@ -7483,7 +7519,7 @@ function renderLoginGate() {
       return `<div class="pb-card2" style="display:flex;gap:9px;align-items:flex-start;padding:12px 14px;margin-bottom:16px;font-size:12.5px;line-height:1.55;color:var(--muted)">
         ${icon("user-plus", 15, 'style="flex-shrink:0;margin-top:1px;color:var(--gold)"')}<span>${T("link.invited", { name: esc(pStr(l.invite, 24)) })}</span></div>`;
     })()}
-    <form id="loginForm" novalidate style="display:flex;flex-direction:column">
+    ${f.recover ? renderRecoverForm(f) : `<form id="loginForm" novalidate style="display:flex;flex-direction:column">
     ${field(T("acct.username"),
       `<input class="pb-input" data-bind="loginName" value="${esc(f.username)}" placeholder="${esc(T("acct.usernamePh"))}" autocapitalize="none" autocorrect="off" autocomplete="username" spellcheck="false" maxlength="24" data-autofocus>`)}
     ${field(T("acct.password"),
@@ -7493,6 +7529,7 @@ function renderLoginGate() {
       <button id="loginGoBtn" type="submit" data-action="login-go" ${ok && !f.confirmCreate ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
         ${icon("log-in", 16)} ${T(f.busy ? "acct.working" : "login.go")}
       </button>
+      <button type="button" data-action="login-forgot" class="pb-btn pb-ghost" style="width:100%;padding:10px 0;font-size:13px;margin-top:8px;color:var(--muted)">${T("login.forgot")}</button>
     </div>
     <div id="loginConfirm" class="pb-card2" style="display:${f.confirmCreate ? "block" : "none"};padding:14px">
       <div style="font-size:13.5px;line-height:1.55;margin-bottom:12px">${T("login.noAccount", { name: `<b>${esc(name)}</b>` })}</div>
@@ -7502,8 +7539,8 @@ function renderLoginGate() {
       <button type="button" data-action="login-cancel" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;font-size:13.5px;margin-top:8px">${T("login.cancel")}</button>
       <div style="font-size:11.5px;color:var(--faint);margin-top:10px;line-height:1.55">${T("acct.passwordHint")}</div>
     </div>
-    </form>
-    <div style="font-size:11.5px;color:var(--faint);margin-top:16px;line-height:1.6">${T("login.hint")}</div>
+    </form>`}
+    ${f.recover ? "" : `<div style="font-size:11.5px;color:var(--faint);margin-top:16px;line-height:1.6">${T("login.hint")}</div>`}
     <div style="font-size:11.5px;color:var(--faint);margin-top:8px;line-height:1.6">${T("acct.warning")}</div>
   </div>`;
 }
@@ -7515,9 +7552,9 @@ function updateLoginForm() {
   const f = ui.login;
   if (!f) return;
   const btn = document.getElementById("loginGoBtn");
-  if (btn) { const ok = loginReady(f); btn.disabled = !ok || f.confirmCreate; btn.style.opacity = ok ? 1 : 0.45; }
+  if (btn) { const ok = f.recover ? recoverReady(f) : loginReady(f); btn.disabled = !ok || (!f.recover && f.confirmCreate); btn.style.opacity = ok ? 1 : 0.45; }
   const pw = document.querySelector('[data-bind="loginPass"]');
-  if (pw) pw.autocomplete = f.confirmCreate ? "new-password" : "current-password";
+  if (pw) pw.autocomplete = f.confirmCreate || f.recover ? "new-password" : "current-password";
   const err = document.getElementById("loginErr");
   if (err) { err.textContent = f.error || ""; err.style.display = f.error ? "block" : "none"; }
   const main = document.getElementById("loginMain");
@@ -18050,6 +18087,15 @@ function renderAccountSheet() {
     ${mine.length ? rows(mine) : `<div style="font-size:12.5px;color:var(--faint);margin:0 2px 14px">${T("profiles.noneYours")}</div>`}
     ${theirs.length ? sectionTitle(T("profiles.sharedTitle")) + rows(theirs) : ""}
     <div style="font-size:11.5px;color:var(--faint);margin-bottom:16px;line-height:1.55">${T("acct.listHint")}</div>
+    <div class="pb-card2" style="display:flex;align-items:center;gap:12px;padding:12px 14px">
+      ${icon("key", 18, 'style="flex-shrink:0;color:var(--gold)"')}
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13.5px;font-weight:600">${T("acct.recovery")}</div>
+        <div style="font-size:12px;line-height:1.45;margin-top:2px;color:${ui.recoveryLeft === 0 ? "var(--red)" : "var(--muted)"}">${
+          ui.recoveryLeft == null ? T("acct.recoveryHint") : ui.recoveryLeft ? T("acct.recoveryLeft", { n: ui.recoveryLeft }) : T("acct.recoveryNone")}</div>
+      </div>
+      <button data-action="codes-make-open" class="pb-btn pb-ghost" style="flex-shrink:0;padding:8px 12px;font-size:12.5px">${T("acct.recoveryMake")}</button>
+    </div>
     <div class="pb-hairline" style="margin:16px 0"></div>
     <button data-action="acct-signout" ${ui.signingOut ? "disabled" : ""} class="pb-btn" style="width:100%;padding:12px 0;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3);opacity:${ui.signingOut ? 0.45 : 1}">
       ${icon("log-out", 15)} ${T(ui.signingOut ? "acct.signingOut" : "acct.signOut")}
@@ -18112,6 +18158,59 @@ function updateDeleteForm() {
   if (btn) { const ok = !!f.password && !f.busy; btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
   const err = document.getElementById("delAcctErr");
   if (err) { err.textContent = f.error || ""; err.style.display = f.error ? "block" : "none"; }
+}
+
+/* ── RECOVERY CODES ON SCREEN ─────────────────────────────────────────
+   The one time they are shown: right after signing up, and after new ones
+   are made from the account sheet. The server keeps only their hashes, so
+   this sheet is the only chance to copy them; closing it by mistake costs
+   a new set (with the password), never the account. */
+function renderRecoveryCodes() {
+  const f = ui.recoveryShow;
+  return sheet(T("codes.title"), "recoveryShow", `
+    <div style="font-size:13px;color:var(--muted);line-height:1.6;margin-bottom:14px">${T("codes.body")}</div>
+    <div class="pb-card2" style="display:grid;grid-template-columns:1fr 1fr;gap:10px 16px;padding:14px 16px;margin-bottom:14px;font:600 16px/1.3 ui-monospace,Menlo,Consolas,monospace;letter-spacing:.03em;user-select:text;-webkit-user-select:text">
+      ${f.codes.map((c) => `<span>${esc(c)}</span>`).join("")}
+    </div>
+    <button data-action="codes-copy" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;font-size:13.5px;margin-bottom:8px">${icon(f.copied ? "check" : "copy", 15)} ${T(f.copied ? "codes.copied" : "codes.copy")}</button>
+    <button data-action="overlay-close" data-target="recoveryShow" class="pb-btn pb-gold" style="width:100%;padding:12px 0;font-size:14.5px">${T("codes.done")}</button>
+  `, 130);
+}
+
+/* New codes replace every unused one, so they cost the password, as
+   deleting the account does: a token on a borrowed phone must not be
+   enough to make codes that would set a new password. */
+function renderRecoveryForm() {
+  const f = ui.recoveryForm;
+  const ok = !!f.password && !f.busy;
+  return sheet(T("codes.makeTitle"), "recoveryForm", `
+    <div style="font-size:13px;color:var(--muted);line-height:1.6;margin-bottom:14px">${T("codes.makeBody")}</div>
+    ${field(T("acct.password"),
+      `<input class="pb-input" type="password" data-bind="recoveryPass" value="${esc(f.password)}" autocapitalize="none" autocorrect="off" autocomplete="current-password" spellcheck="false">`)}
+    <div id="recErr" style="font-size:12.5px;color:var(--red);margin:-4px 0 12px;line-height:1.5;display:${f.error ? "block" : "none"}">${f.error ? esc(f.error) : ""}</div>
+    <button id="recBtn" data-action="codes-make-go" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:12px 0;font-size:14.5px;opacity:${ok ? 1 : 0.45}">
+      ${icon("key", 15)} ${T(f.busy ? "acct.working" : "codes.makeGo")}
+    </button>
+  `, 128);
+}
+function updateRecoveryForm() {
+  const f = ui.recoveryForm;
+  if (!f) return;
+  const btn = document.getElementById("recBtn");
+  if (btn) { const ok = !!f.password && !f.busy; btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.45; }
+  const err = document.getElementById("recErr");
+  if (err) { err.textContent = f.error || ""; err.style.display = f.error ? "block" : "none"; }
+}
+
+/* How many codes the account has left, for the account sheet. Painted when
+   it arrives, unless a field is being typed in on top of the sheet. */
+function recoveryCount() {
+  const C = window.ZenofitCloud;
+  if (!C || !C.me) return;
+  C.me().then((r) => {
+    ui.recoveryLeft = r && typeof r.recoveryLeft === "number" ? r.recoveryLeft : null;
+    if (ui.accountSheet && !ui.recoveryForm && !ui.deleteAcct) render();
+  }, () => { /* no signal: the sheet says what codes are for instead */ });
 }
 
 /* The other end of the same code. A joined profile is a NEW local profile,
@@ -19431,6 +19530,7 @@ const actions = {
     ui.accountSheet = {};
     render();
     rosterSync();
+    recoveryCount();
   },
 
   /* ── LOGGING IN, AND ASKING BEFORE AN ACCOUNT IS MADE ───────────────
@@ -19476,8 +19576,9 @@ const actions = {
       ui.login = { ...f, error: T("login.pwShort") }; updateLoginForm(); return;
     }
     ui.login = { ...f, busy: true, error: null }; render();
+    let res;
     try {
-      await C.register(f.username.trim(), f.password);
+      res = await C.register(f.username.trim(), f.password);
     } catch (e) {
       const code = e && e.code;
       ui.login = { ...ui.login, busy: false, confirmCreate: code !== "name_taken" && code !== "bad_username",
@@ -19488,10 +19589,74 @@ const actions = {
       return;
     }
     await enterAccount();
+    /* the new account's recovery codes, the one time they are shown */
+    if (res && Array.isArray(res.recoveryCodes) && res.recoveryCodes.length) {
+      ui.recoveryShow = { codes: res.recoveryCodes, copied: false };
+      render();
+    }
   },
   "login-cancel": () => {
     ui.login = { ...ui.login, confirmCreate: false, error: null };
     render();
+  },
+  "login-forgot": () => {
+    ui.login = { ...ui.login, recover: true, code: "", password: "", error: null, confirmCreate: false };
+    render();
+  },
+  "login-recover-cancel": () => {
+    ui.login = { ...ui.login, recover: false, code: "", password: "", error: null };
+    render();
+  },
+  "login-recover": async () => {
+    const f = ui.login;
+    const C = window.ZenofitCloud;
+    if (!f || !C || !C.recover || !recoverReady(f)) return;
+    if (f.password.length < 8) { ui.login = { ...f, error: T("recover.pwShort") }; updateLoginForm(); return; }
+    ui.login = { ...f, busy: true, error: null }; render();
+    let res;
+    try {
+      res = await C.recover(f.username.trim(), f.code, f.password);
+    } catch (e) {
+      ui.login = { ...ui.login, busy: false, error: e && e.code === "bad_code" ? T("recover.errCode") : apiErrText(e, "login.offline") };
+      render();
+      return;
+    }
+    await enterAccount();
+    try { alert(res.codesLeft > 0 ? T("recover.done", { n: res.codesLeft }) : T("recover.doneLast")); } catch { /* no UI to say it in */ }
+  },
+
+  /* ── RECOVERY CODES, FROM THE ACCOUNT SHEET ──────────────────────── */
+  "codes-make-open": () => {
+    ui.recoveryForm = { password: "", busy: false, error: null };
+    render();
+  },
+  "codes-make-go": async () => {
+    const f = ui.recoveryForm;
+    const C = window.ZenofitCloud;
+    if (!f || f.busy || !f.password || !C || !C.newRecoveryCodes) return;
+    ui.recoveryForm = { ...f, busy: true, error: null }; render();
+    try {
+      const r = await C.newRecoveryCodes(f.password);
+      ui.recoveryForm = null;
+      ui.recoveryLeft = r.recoveryCodes.length;
+      ui.recoveryShow = { codes: r.recoveryCodes, copied: false };
+    } catch (e) {
+      if (!ui.recoveryForm) return;
+      const wrong = e && e.code === "bad_password";
+      ui.recoveryForm = { ...ui.recoveryForm, busy: false, password: wrong ? "" : ui.recoveryForm.password,
+        error: wrong ? T("codes.errWrong") : apiErrText(e, "acct.errFailed") };
+    }
+    render();
+  },
+  /* the username goes in with them: a list of codes pasted into a notes
+     app a year from now has to say what it opens */
+  "codes-copy": async () => {
+    const f = ui.recoveryShow;
+    if (!f) return;
+    const me = (signedInAs() || {}).username || "";
+    try { await navigator.clipboard.writeText(`${T("codes.copyHead")} ${me}\n${f.codes.join("\n")}\n`); }
+    catch { return; /* no clipboard here: the codes stay on screen to copy by hand */ }
+    if (ui.recoveryShow) { ui.recoveryShow = { ...ui.recoveryShow, copied: true }; render(); }
   },
 
   /* ── LOGGING OUT SENDS FIRST, THEN SAYS WHAT IT COULD NOT ───────────
@@ -21896,6 +22061,7 @@ const READ_OK = new Set([
   "profiles-reorder",
   "open-sync", "sync-copy-code",
   "open-account", "acct-signout", "acct-signout-others", "login-go", "login-create", "login-cancel", "first-profile-create",
+  "login-forgot", "login-recover", "login-recover-cancel", "codes-make-open", "codes-make-go", "codes-copy",
   /* the account is not the training on screen, and a read-only profile
      being open must not stand between somebody and deleting their account */
   "acct-delete-open", "acct-delete-go",
@@ -22214,6 +22380,13 @@ function handleBind(el) {
   } else if (bind === "loginPass") {
     ui.login = { ...ui.login, password: v, error: null };
     updateLoginForm();
+  } else if (bind === "loginCode") {
+    ui.login = { ...ui.login, code: v, error: null };
+    updateLoginForm();
+  } else if (bind === "recoveryPass") {
+    if (!ui.recoveryForm) return;
+    ui.recoveryForm = { ...ui.recoveryForm, password: v, error: null };
+    updateRecoveryForm();
   } else if (bind === "unlockPass") {
     ui.storUnlock = { ...ui.storUnlock, password: v, error: null };
     updateUnlockForm();

@@ -23,7 +23,7 @@
  * DELETE /v1/me), and every phone still holding one of its tokens told so.
  */
 
-import { cleanUsername, cleanKey, newSalt, hashKey, sameHash } from "./auth.js";
+import { cleanUsername, cleanKey, newSalt, hashKey, sameHash, cleanCode, hashCode, newRecoveryCodes } from "./auth.js";
 import { newSeed, normalizeSeed } from "./seeds.js";
 import { accessFor, canRead, canWrite, canAdmin } from "./access.js";
 import { sendToUser } from "./push.js";
@@ -370,6 +370,9 @@ async function route(request, env, url, ctx) {
     const salt = newSalt();
     const hash = await hashKey(salt, key);
     const now = Date.now();
+    /* the way back in if the password is ever forgotten, shown once by the
+       app and never again (POST /v1/auth/recover) */
+    const rc = await newRecoveryCodes();
 
     /* Already a device? Then this is a claim, not a signup, and the row it
        claims is the one that owns whatever has already been synced. Turning
@@ -379,22 +382,67 @@ async function route(request, env, url, ctx) {
     if (existing) {
       if (existing.username) return fail(409, "already_claimed", "This device is already signed in to an account.");
       await env.DB.prepare(
-        "UPDATE users SET username = ?, username_lc = ?, pw_hash = ?, pw_salt = ?, claimed_at = ? WHERE id = ?"
-      ).bind(username, lc, hash, salt, now, existing.id).run();
-      return json({ userId: existing.id, username, claimed: true });
+        "UPDATE users SET username = ?, username_lc = ?, pw_hash = ?, pw_salt = ?, claimed_at = ?, recovery = ? WHERE id = ?"
+      ).bind(username, lc, hash, salt, now, rc.hashes, existing.id).run();
+      return json({ userId: existing.id, username, claimed: true, recoveryCodes: rc.codes });
     }
 
     const id = newId();
     const token = newToken();
     const th = await sha256Hex(token);
     await env.DB.prepare(
-      "INSERT INTO users (id, display_name, token_hash, created_at, last_seen_at, username, username_lc, pw_hash, pw_salt, claimed_at) " +
-      "VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)"
-    ).bind(id, th, now, now, username, lc, hash, salt, now).run();
+      "INSERT INTO users (id, display_name, token_hash, created_at, last_seen_at, username, username_lc, pw_hash, pw_salt, claimed_at, recovery) " +
+      "VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).bind(id, th, now, now, username, lc, hash, salt, now, rc.hashes).run();
     await env.DB.prepare(
       "INSERT INTO tokens (token_hash, user_id, label, created_at, last_seen_at) VALUES (?, ?, 'signin', ?, ?)"
     ).bind(th, id, now, now).run();
-    return json({ userId: id, username, token, claimed: false }, 201);
+    return json({ userId: id, username, token, claimed: false, recoveryCodes: rc.codes }, 201);
+  }
+
+  /* ── A FORGOTTEN PASSWORD: A RECOVERY CODE SETS A NEW ONE ──────────────
+     The server never sees a password, so there is nothing to reset by
+     email; the account's one-time codes (users.recovery, migration 0012)
+     are the way back. One code, the username and the new password's key:
+     the code is spent, the new password is set, and every login the
+     account had ends with its push subscriptions (a forgotten password is
+     also what a stolen one looks like), and this phone is signed in. One
+     reply for every failure, as login gives, and a miss counts against
+     login's own limits, so codes are not a way round them. The UPDATE
+     names the list it read, so two phones spending the same code at once
+     cannot both win. */
+  if (p === "/v1/auth/recover" && method === "POST") {
+    const body = await readJson(request).catch(() => ({}));
+    const username = cleanUsername(body.username);
+    const code = cleanCode(body.code);
+    const key = cleanKey(body.key);
+    if (!key) return fail(400, "bad_request", "Missing or malformed key. The app derives this from the password.");
+    const keys = loginKeys(request, username && username.toLowerCase());
+    if (await loginBlocked(env, keys)) return tooManyLogins();
+    const row = username
+      ? await env.DB.prepare("SELECT id, username, recovery FROM users WHERE username_lc = ?").bind(username.toLowerCase()).first()
+      : null;
+    let left = [];
+    try { left = JSON.parse((row && row.recovery) || "[]"); } catch { left = []; }
+    const h = code ? await hashCode(code) : "";
+    if (!row || !code || !left.includes(h)) {
+      if (row) await loginMissed(env, keys);
+      return fail(401, "bad_code", "That username and recovery code do not match an account.");
+    }
+    const rest = JSON.stringify(left.filter((x) => x !== h));
+    const salt = newSalt();
+    const spent = await env.DB.prepare("UPDATE users SET pw_hash = ?, pw_salt = ?, recovery = ? WHERE id = ? AND recovery = ?")
+      .bind(await hashKey(salt, key), salt, rest, row.id, row.recovery).run();
+    if (!spent.meta.changes) return fail(401, "bad_code", "That username and recovery code do not match an account.");
+    const token = newToken();
+    const now = Date.now();
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM tokens WHERE user_id = ?").bind(row.id),
+      env.DB.prepare("DELETE FROM push_subs WHERE user_id = ?").bind(row.id),
+      env.DB.prepare("INSERT INTO tokens (token_hash, user_id, label, created_at, last_seen_at) VALUES (?, ?, 'signin', ?, ?)")
+        .bind(await sha256Hex(token), row.id, now, now),
+    ]);
+    return json({ userId: row.id, username: row.username, token, codesLeft: left.length - 1 });
   }
 
   if (p === "/v1/auth/login" && method === "POST") {
@@ -481,7 +529,31 @@ async function route(request, env, url, ctx) {
   }
 
   if (p === "/v1/me" && method === "GET") {
-    return json({ userId: user.id, displayName: user.display_name, createdAt: user.created_at });
+    const r = await env.DB.prepare("SELECT recovery FROM users WHERE id = ?").bind(user.id).first();
+    let recoveryLeft = 0;
+    try { recoveryLeft = JSON.parse((r && r.recovery) || "[]").length; } catch { /* none */ }
+    return json({ userId: user.id, displayName: user.display_name, createdAt: user.created_at, recoveryLeft });
+  }
+
+  /* A fresh set of recovery codes, replacing every unused one: for an
+     account made before codes existed, one that has spent them, or codes
+     that may have been seen. Behind the PASSWORD, as deleting the account
+     is: whoever holds a token from a borrowed phone must not be able to
+     make codes that would let them set a new password. */
+  if (p === "/v1/auth/recovery-codes" && method === "POST") {
+    const body = await readJson(request).catch(() => ({}));
+    const row = await env.DB.prepare("SELECT id, username_lc, pw_hash, pw_salt FROM users WHERE id = ?").bind(user.id).first();
+    if (!row || !row.pw_hash) return fail(403, "account_required", "Recovery codes belong to an account with a password.");
+    const keys = loginKeys(request, row.username_lc);
+    if (await loginBlocked(env, keys)) return tooManyLogins();
+    const key = cleanKey(body.key);
+    if (!key || !sameHash(await hashKey(row.pw_salt, key), row.pw_hash)) {
+      await loginMissed(env, keys);
+      return fail(403, "bad_password", "That is not this account's password.");
+    }
+    const rc = await newRecoveryCodes();
+    await env.DB.prepare("UPDATE users SET recovery = ? WHERE id = ?").bind(rc.hashes, row.id).run();
+    return json({ recoveryCodes: rc.codes });
   }
 
   /* ── LOGGING OUT ENDS THE TOKEN, NOT ONLY THE PHONE'S COPY OF IT ────────

@@ -51,6 +51,39 @@ export function sameHash(a, b) {
   return diff === 0;
 }
 
+/* ── recovery codes ────────────────────────────────────────────────────
+   Eight one-time codes, ten characters each from 31 that cannot be misread
+   (no 0, o, 1, i or l): about 50 bits apiece, and guessing counts against
+   login's own limits. Shown as "abcde-fghjk"; typed any case, with or
+   without the dash. Only their SHA-256 is stored (users.recovery). */
+const CODE_ABC = "23456789abcdefghjkmnpqrstuvwxyz";
+export const RECOVERY_CODES = 8;
+
+export function cleanCode(input) {
+  const s = typeof input === "string" ? input.toLowerCase().replace(/[\s-]/g, "") : "";
+  return s.length === 10 && [...s].every((c) => CODE_ABC.includes(c)) ? s : "";
+}
+
+export async function hashCode(code) {
+  return hex(await crypto.subtle.digest("SHA-256", enc.encode("zenofit-recovery:" + code)));
+}
+
+/* { codes: ["abcde-fghjk", ...], hashes: JSON for users.recovery } */
+export async function newRecoveryCodes() {
+  const codes = [];
+  while (codes.length < RECOVERY_CODES) {
+    let s = "";
+    while (s.length < 10) {
+      const b = new Uint8Array(16);
+      crypto.getRandomValues(b);
+      for (const v of b) if (v < 248 && s.length < 10) s += CODE_ABC[v % 31];   // 248 = 31 * 8, so no letter is likelier
+    }
+    codes.push(s.slice(0, 5) + "-" + s.slice(5));
+  }
+  const hashes = await Promise.all(codes.map((c) => hashCode(cleanCode(c))));
+  return { codes, hashes: JSON.stringify(hashes) };
+}
+
 /* ── what a username is allowed to be ─────────────────────────────────
    Letters, digits, and the three separators people actually use, 3 to 24
    characters, starting with a letter or a digit. No spaces, because a

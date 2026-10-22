@@ -39,7 +39,7 @@
     btn.textContent = say("update.reload", "Reload");
     btn.style.cssText =
       "flex:0 0 auto;border:0;border-radius:9px;padding:8px 14px;" +
-      "font:600 14px system-ui,sans-serif;background:#4f7cff;color:#fff;";
+      "font:600 14px system-ui,sans-serif;background:#3f68dc;color:#fff;";
     btn.onclick = function () {
       btn.disabled = true;
       window.__zenofitSW.wantReload = true;

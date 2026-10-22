@@ -155,7 +155,13 @@ body { background: var(--outer); }
    Every color the app draws with comes from these variables, so a theme
    is just a different set of values. `data-theme` is stamped on <html> by
    app.js, and before the first paint by theme.js, which index.html loads
-   in its head.                                                           */
+   in its head.
+
+   Every text colour clears WCAG AA (4.5:1) on every background it sits on,
+   tints included, in both themes: --faint and --red, --green, --gold were
+   raised or deepened until they did, and the light theme's backgrounds came
+   up a step so its three greys can stay three. A colour that is data (a
+   muscle group's) goes through inkFor() in app.js when it is text.      */
 
 :root,
 :root[data-theme="dark"]{
@@ -165,9 +171,9 @@ body { background: var(--outer); }
   --bg:#1e1f22; --surface:#2b2d31; --surface2:#313338; --raise:#3a3d44;
   --border:#3f4248; --border-soft:#292b2f;
   --nav-bg:rgba(30,31,34,.96);
-  --text:#f2f3f5; --muted:#b5bac1; --faint:#80848e;
+  --text:#f2f3f5; --muted:#b5bac1; --faint:#9ca0a8;
   --gold:#e9b949; --gold-ink:#1a1507;
-  --red:#d05a50; --blue:#5d8bcc; --green:#6aa465; --steel:#aab4c0;
+  --red:#de8880; --blue:#5d8bcc; --green:#73ab6f; --steel:#aab4c0;
   /* The five strength-standard tiers (Progress → Standards). Each is its own
      variable rather than borrowing --steel or --red, so retuning one never
      moves anything else; GOLD is the one exception and is deliberately the
@@ -184,14 +190,14 @@ body { background: var(--outer); }
 }
 :root[data-theme="light"]{
   color-scheme:light;
-  /* Clean light: grey base, white cards, deeper gold for contrast */
+  /* Clean light: grey base, near-white cards, deeper gold for contrast */
   --outer:#c7cbd1;
-  --bg:#dddddd; --surface:#ececec; --surface2:#e8eaed; --raise:#dcdfe4;
+  --bg:#e8e8e8; --surface:#f4f4f4; --surface2:#f0f1f3; --raise:#e3e5e9;
   --border:#d0d4da; --border-soft:#e4e6ea;
   --nav-bg:rgba(255,255,255,.94);
-  --text:#1f2124; --muted:#5b5f66; --faint:#868b93;
-  --gold:#a9761a; --gold-ink:#ffffff;
-  --red:#c23b32; --blue:#3f74c4; --green:#4f8a46; --steel:#5f6b78;
+  --text:#1f2124; --muted:#4d5157; --faint:#63676d;
+  --gold:#855c14; --gold-ink:#ffffff;
+  --red:#ad352d; --blue:#3f74c4; --green:#44783c; --steel:#5f6b78;
   /* deepened the same way --gold is, so a tier name stays readable on a
      near-white card */
   --tier-wood:#7d5133; --tier-gold:var(--gold); --tier-diamond:#08616f;

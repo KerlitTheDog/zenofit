@@ -6549,8 +6549,34 @@ const decimalize = (v) => String(v ?? "").replace(/,/g, ".");
 const icon = (name, size = 16, extra = "") =>
   `<svg ${extra} width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ""}</svg>`;
 
+/* A colour that is DATA (a muscle group's, a chip's literal) used as text:
+   nudged toward white in the dark theme and toward black in the light one
+   until it clears 4.5:1 (WCAG AA) on the theme's page and input
+   backgrounds. The dot or fill drawn in the same colour keeps it exactly as
+   picked, and a theme token (var(--gold)) passes through untouched, since
+   the tokens already clear it (styles.css). */
+const inkCache = new Map();
+function inkFor(hex) {
+  if (!/^#[0-9a-f]{6}$/i.test(hex || "")) return hex;
+  const light = document.documentElement.getAttribute("data-theme") === "light";
+  const key = (light ? "l" : "d") + hex;
+  if (!inkCache.has(key)) {
+    const cs = getComputedStyle(document.documentElement);
+    /* the page and input backgrounds, and each with the 8% of this colour a
+       chip lays under its own text */
+    const base = ["--bg", "--surface2"].map((v) => cs.getPropertyValue(v).trim());
+    const tint = (b) => picHex(picRgb(hex).map((v, i) => v * 0.08 + picRgb(b)[i] * 0.92));
+    const bgs = [...base, ...base.map(tint)].map(picLum);
+    const ok = (h) => bgs.every((b) => { const l = picLum(h); return (Math.max(l, b) + 0.05) / (Math.min(l, b) + 0.05) >= 4.6; });
+    let out = hex;
+    for (let k = 0; k <= 1 && !ok(out); k += 0.04) out = picShade(hex, light ? -k : k);
+    inkCache.set(key, out);
+  }
+  return inkCache.get(key);
+}
+
 const chip = (children, color, style = "") =>
-  `<span class="pb-chip" style="color:${color || "var(--muted)"};border-color:${(color || "var(--border)")}55;background:${(color || "#000")}14;${style}">${children}</span>`;
+  `<span class="pb-chip" style="color:${color ? inkFor(color) : "var(--muted)"};border-color:${(color || "var(--border)")}55;background:${(color || "#000")}14;${style}">${children}</span>`;
 
 const sectionTitle = (children, right = "") =>
   `<div style="display:flex;align-items:baseline;justify-content:space-between;margin:2px 2px 10px"><div class="pb-label">${children}</div>${right}</div>`;
@@ -8481,10 +8507,10 @@ function renderCalendar(log, library, marks, planned, range, legend, unfinished 
       : "1px solid transparent";
 
     return `<button data-action="cal-day" data-d="${c.iso}"
-      style="position:relative;aspect-ratio:1;border-radius:9px;background:${bg};border:${border};display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:0;opacity:${c.inMonth ? 1 : 0.35};${pickAfter ? "outline:1px solid rgba(233,185,73,.25);outline-offset:-1px;" : ""}">
+      style="position:relative;aspect-ratio:1;border-radius:9px;background:${bg};border:${border};display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;padding:0;${pickAfter ? "outline:1px solid rgba(233,185,73,.25);outline-offset:-1px;" : ""}">
       ${owes ? `<span aria-hidden="true" style="position:absolute;top:3px;right:3px;width:6px;height:6px;border-radius:3px;border:1.5px solid var(--gold);box-sizing:border-box"></span>` : ""}
-      <span class="pb-num" style="font-size:13px;font-weight:${isToday ? 700 : 600};color:${isToday ? "var(--gold)" : inWeek || dl || isSel ? "var(--text)" : "var(--muted)"};line-height:1">${c.day}</span>
-      <span style="display:flex;gap:2px;height:5px;align-items:center">
+      <span class="pb-num" style="font-size:13px;font-weight:${isToday ? 700 : 600};color:${isToday ? "var(--gold)" : inWeek || dl || isSel ? (c.inMonth ? "var(--text)" : "var(--muted)") : c.inMonth ? "var(--muted)" : "var(--faint)"};line-height:1">${c.day}</span>
+      <span style="display:flex;gap:2px;height:5px;align-items:center;opacity:${c.inMonth ? 1 : 0.35}">
         ${groups.map((g) => `<span style="width:4px;height:4px;border-radius:2px;background:${colorFor(g)}"></span>`).join("")}
         ${ghosts.map((g) => `<span style="width:5px;height:5px;border-radius:3px;border:1.5px solid ${colorFor(g)};box-sizing:border-box"></span>`).join("")}
       </span>
@@ -9576,7 +9602,7 @@ function renderStdPickerList() {
     ? stdSlugFor((state.library || []).find((x) => x.name === forName))
     : (ui.std && ui.std.slug);
   return DEFAULT_GROUPS.map((g) => g.name).filter((g) => match.some((e) => e.group === g)).map((g) => `<div style="margin-bottom:14px">
-    ${sectionTitle(`<span style="color:${colorFor(g)}">${T("group." + g)}</span>`)}
+    ${sectionTitle(`<span style="color:${inkFor(colorFor(g))}">${T("group." + g)}</span>`)}
     <div class="pb-card" style="overflow:hidden">
       ${match.filter((e) => e.group === g).map((e, i, arr) => `<button data-action="std-pick" data-slug="${e.slug}" style="width:100%;display:flex;align-items:center;gap:10px;padding:12px 14px;text-align:left;color:var(--text);border-bottom:${i < arr.length - 1 ? "1px solid var(--border-soft)" : "none"};background:${e.slug === chosen ? "rgba(233,185,73,.07)" : "transparent"}">
         <div style="flex:1;min-width:0;font-weight:600;font-size:14px">${esc(stdName(e))}</div>
@@ -10282,7 +10308,7 @@ function chatThreadBodyHTML(f) {
       ? `<span style="display:inline-flex;align-items:center;gap:8px">${m.error && m.kind === "image" ? `<span style="font-size:10.5px;color:var(--red)">${esc(m.error)}</span>` : ""}<button data-action="chat-retry" data-id="${esc(f.threadId)}" data-c="${esc(m.clientId || "")}" style="display:inline-flex;align-items:center;gap:4px;color:var(--red);font-size:10.5px;font-weight:600;padding:2px 0">${icon("rotate-ccw", 11)} ${T("chat.retry")}</button></span>`
       : m.pending
         ? `<span style="font-size:10px;color:var(--faint)">${T("chat.sending")}</span>`
-        : `<span style="font-size:10px;color:${onGold ? "rgba(26,21,7,.55)" : "var(--faint)"}">${chatStamp(m.at)}</span>`;
+        : `<span style="font-size:10px;color:${onGold ? "var(--gold-ink);opacity:.85" : "var(--faint)"}">${chatStamp(m.at)}</span>`;
     /* what a long press opens, see chatOpenMsgMenu */
     const press = `data-msgpress="${esc(m.messageId)}" data-tid="${esc(f.threadId)}"`;
     const side = mine ? "flex-end" : "flex-start";
@@ -12165,7 +12191,7 @@ function renderLibraryList(library) {
   return groups.filter((g) => shown.some((x) => x.muscle === g)).map((g) => {
     const rows = shown.filter((x) => x.muscle === g);
     if (ordering) return `<div style="margin-bottom:16px">
-      ${sectionTitle(`<span style="color:${colorFor(g)}">${esc(groupLabel(g))}</span>`)}
+      ${sectionTitle(`<span style="color:${inkFor(colorFor(g))}">${esc(groupLabel(g))}</span>`)}
       <div class="pb-card" style="overflow:hidden">
         ${rows.map((ex, i) => reorderRow("libExercise", i, rows.length,
           esc(exLabelOf(ex)), esc(exFieldOf(ex, "equipment")), "",
@@ -12177,7 +12203,7 @@ function renderLibraryList(library) {
     const here = new Set(rows.map((x) => x.id));
     const nested = (ex) => !!(ex.variantOf && here.has(ex.variantOf));
     return `<div style="margin-bottom:16px">
-    ${sectionTitle(`<span style="color:${colorFor(g)}">${esc(groupLabel(g))}</span>`)}
+    ${sectionTitle(`<span style="color:${inkFor(colorFor(g))}">${esc(groupLabel(g))}</span>`)}
     <div class="pb-card" style="overflow:hidden">
       ${nestVariations(rows).map((ex, i, arr) => `<button data-action="open-exercise-window" data-name="${esc(ex.name)}" style="width:100%;display:flex;align-items:center;gap:10px;padding:11px 14px 11px ${nested(ex) ? 30 : 14}px;text-align:left;color:var(--text);border-bottom:${i < arr.length - 1 ? "1px solid var(--border-soft)" : "none"}">
         ${nested(ex) ? icon("corner-down-right", 13, 'style="color:var(--faint);flex-shrink:0;margin-right:-2px"') : ""}
@@ -15181,7 +15207,7 @@ function renderPickerList(library) {
     html += `<div class="pb-card" style="padding:14px;margin-bottom:12px">
       <div style="font-weight:700;font-size:14px;margin-bottom:10px">${T("pick.whichMuscle", { name: esc(quick.name) })}</div>
       <div style="display:flex;flex-wrap:wrap;gap:6px">
-        ${pickable.map((g) => `<button data-action="quick-add-muscle" data-g="${esc(g)}" class="pb-chip" style="padding:8px 14px;font-size:13px;color:${colorFor(g)};border-color:${colorFor(g)}55;background:${colorFor(g)}14">${esc(groupLabel(g))}</button>`).join("")}
+        ${pickable.map((g) => `<button data-action="quick-add-muscle" data-g="${esc(g)}" class="pb-chip" style="padding:8px 14px;font-size:13px;color:${inkFor(colorFor(g))};border-color:${colorFor(g)}55;background:${colorFor(g)}14">${esc(groupLabel(g))}</button>`).join("")}
         <button data-action="group-new" data-then="quickadd" title="${T("groups.newMuscleGroup")}" class="pb-chip" style="padding:8px 12px;font-size:13px;color:var(--gold);border-color:rgba(233,185,73,.4);background:rgba(233,185,73,.08)">${icon("plus", 13, 'stroke-width="2.6"')}</button>
       </div>
       <button data-action="quick-add-muscle" data-g="${esc(UNCATEGORIZED)}" class="pb-btn pb-ghost" style="width:100%;padding:10px 0;font-size:13px;margin-top:10px;border-style:dashed;color:var(--muted)">
@@ -15203,7 +15229,7 @@ function renderPickerList(library) {
     const rows = match.filter((x) => x.muscle === g);
     const here = new Set(rows.map((x) => x.id));
     return `<div style="margin-bottom:14px">
-    ${sectionTitle(`<span style="color:${colorFor(g)}">${esc(groupLabel(g))}</span>`)}
+    ${sectionTitle(`<span style="color:${inkFor(colorFor(g))}">${esc(groupLabel(g))}</span>`)}
     <div class="pb-card" style="overflow:hidden">
       ${nestVariations(rows).map((ex, i, arr) => {
         const nested = !!(ex.variantOf && here.has(ex.variantOf));

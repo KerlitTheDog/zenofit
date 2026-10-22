@@ -194,6 +194,37 @@ check("while the account's other devices stay signed in", s == 200, (s, b))
 s, b = call("POST", "/v1/auth/logout")
 check("logging out with no token is refused, not a crash", s == 401, (s, b))
 
+print("\n== logging out every other device ==")
+# One button ends every login of the account but the one asking, with the
+# push subscriptions of the phones it ends; the asking phone keeps its own.
+def subscribe(tok):
+    ep = "https://fcm.googleapis.com/fcm/send/" + secrets.token_urlsafe(24)
+    s, b = call("POST", "/v1/push/subscribe", token=tok,
+                body={"endpoint": ep, "keys": {"p256dh": secrets.token_urlsafe(65), "auth": secrets.token_urlsafe(16)}})
+    assert s == 201, (s, b)
+    return ep
+# The first account, never a device: a claimed device's token ended here
+# would leave cleanup unable to tell that device is gone.
+PHONE = call("POST", "/v1/auth/login", body={"username": NAME, "key": derive(NAME, PW)})[1].get("token")
+MINE = subscribe(PHONE)
+subscribe(NEW_TOKEN); subscribe(SECOND)
+s, b = call("POST", "/v1/auth/logout-others", token=PHONE, body={"endpoint": MINE})
+check("it answers how many it ended", s == 200 and b.get("signedOut") == 2, (s, b))   # NEW_TOKEN, SECOND
+s, b = call("GET", "/v1/me", token=PHONE)
+check("the phone that asked stays signed in", s == 200, (s, b))
+for tok in (NEW_TOKEN, SECOND):
+    s, b = call("GET", "/v1/profiles", token=tok)
+    check("the other login is refused as a plain 401, so it shows login and deletes nothing",
+          s == 401 and b.get("error") == "unauthorized", (s, b))
+s, b = call("GET", "/v1/push/status?endpoint=" + MINE, token=PHONE)
+check("only this phone's push subscription is left", s == 200 and b.get("subscriptions") == 1, (s, b))
+s, b = call("POST", "/v1/auth/logout-others", token=PHONE, body={})
+check("again, with nothing else signed in, ends none", s == 200 and b.get("signedOut") == 0, (s, b))
+s, b = call("GET", "/v1/push/status", token=PHONE)
+check("and naming no endpoint keeps no subscription", b.get("subscriptions") == 0, (s, b))
+s, b = call("POST", "/v1/auth/logout-others")
+check("with no token it is refused", s == 401, (s, b))
+
 LOCAL = API.startswith("http://127.0.0.1") or API.startswith("http://localhost")
 
 def fresh_addr():

@@ -215,6 +215,14 @@
     }
   }
 
+  /* Every other login of this account ends (POST /v1/auth/logout-others);
+     this one stays. Names this phone's push endpoint so it keeps ringing.
+     Resolves {signedOut: n}; throws like `call` does. */
+  function signOutOthers() {
+    const push = read(PUSH_KEY);
+    return call("POST", "/v1/auth/logout-others", { endpoint: push && push.endpoint ? push.endpoint : null });
+  }
+
   /* ── DELETING THE ACCOUNT ──────────────────────────────────────────────
      For good, on the server (DELETE /v1/me), which asks for the password
      again and is given the derived key, exactly as a login is. Throws like
@@ -682,7 +690,7 @@
   window.ZenofitCloud = {
     API,
     ensureDevice, hasDevice,
-    deriveKey, register, signIn, signOut, account, signedIn, nameAvailable, verifyPassword,
+    deriveKey, register, signIn, signOut, signOutOthers, account, signedIn, nameAvailable, verifyPassword,
     deleteAccount, forgetAccount,
     isStandalone, isIOS, pushBlockedReason,
     enablePush, refilePush, disablePush, pushEnabled, testPush, pushEndpoint, setPushPrefs, pushStatus,

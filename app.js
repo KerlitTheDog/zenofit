@@ -18039,6 +18039,9 @@ function renderAccountSheet() {
       ${icon("log-out", 15)} ${T(ui.signingOut ? "acct.signingOut" : "acct.signOut")}
     </button>
     <div style="font-size:11.5px;color:var(--faint);margin-top:10px;line-height:1.55">${T("acct.signOutHint")}</div>
+    <button data-action="acct-signout-others" class="pb-btn" style="width:100%;padding:11px 0;margin-top:14px;font-size:13px;background:transparent;color:var(--steel);border:1px solid var(--border)">
+      ${icon("monitor-smartphone", 14)} ${T("acct.signOutOthers")}
+    </button>
     ${deleteAcctBtn()}
   `, 124);
 }
@@ -19492,6 +19495,16 @@ const actions = {
     ui.signingOut = false;
     if (!confirm(n ? T("acct.confirmSignOutUnsynced", { n }) : T("acct.confirmSignOut"))) { render(); return; }
     leaveAccount();
+  },
+
+  /* Every other login of this account ends on the server; this phone stays
+     signed in and loses nothing, and so do the others, which only see the
+     login screen next time (docs/accounts.md). */
+  "acct-signout-others": async () => {
+    const C = window.ZenofitCloud;
+    if (!C || !C.signOutOthers || !confirm(T("acct.confirmSignOutOthers"))) return;
+    try { alert(T("acct.signedOutOthers", { n: (await C.signOutOthers()).signedOut })); }
+    catch (e) { alert(apiErrText(e)); }
   },
 
   /* ── DELETING THE ACCOUNT: THE SERVER FIRST, THEN THIS PHONE ─────────
@@ -21868,7 +21881,7 @@ const READ_OK = new Set([
   "profile-menu", "profile-add", "profile-duplicate", "profile-delete", "profile-form-save",
   "profiles-reorder",
   "open-sync", "sync-copy-code",
-  "open-account", "acct-signout", "login-go", "login-create", "login-cancel", "first-profile-create",
+  "open-account", "acct-signout", "acct-signout-others", "login-go", "login-create", "login-cancel", "first-profile-create",
   /* the account is not the training on screen, and a read-only profile
      being open must not stand between somebody and deleting their account */
   "acct-delete-open", "acct-delete-go",

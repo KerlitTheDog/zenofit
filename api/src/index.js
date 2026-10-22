@@ -506,6 +506,23 @@ async function route(request, env, url, ctx) {
     return json({ loggedOut: true });
   }
 
+  /* Every login of this account but the one asking ends, for a phone left
+     signed in somewhere or a token copied off one. Their push subscriptions
+     go with them: every one of the account's but this phone's own, which it
+     names as logout does (no endpoint, none kept). Those phones get a plain
+     401 next time and show the login screen with nothing deleted. */
+  if (p === "/v1/auth/logout-others" && method === "POST") {
+    const h = (request.headers.get("Authorization") || "").match(/^Bearer\s+(.+)$/i);
+    const hash = await sha256Hex(h[1].trim());
+    const body = await readJson(request).catch(() => ({}));
+    const endpoint = body && typeof body.endpoint === "string" ? body.endpoint : "";
+    const r = await env.DB.batch([
+      env.DB.prepare("DELETE FROM tokens WHERE user_id = ? AND token_hash != ?").bind(user.id, hash),
+      env.DB.prepare("DELETE FROM push_subs WHERE user_id = ? AND endpoint != ?").bind(user.id, endpoint),
+    ]);
+    return json({ signedOut: r[0].meta.changes });
+  }
+
   /* ── DELETING THE ACCOUNT, FOR GOOD ──────────────────────────────────────
      Everything that is only this account's leaves the server in one
      transaction (account.js says what, what stays, and why), and every

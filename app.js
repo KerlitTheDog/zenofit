@@ -5293,7 +5293,6 @@ function chatRepaint() {
     scroll.innerHTML = chatThreadBodyHTML(f);
     const err = document.getElementById("chatErr");
     if (err) err.innerHTML = chatErrHTML(f);
-    if (window.lucide) lucide.createIcons();
     if (ui.chatStick) chatStickBottom();
     else scroll.scrollTop = top;
   } else if (!f && ui.tab === "chat") {
@@ -5821,9 +5820,8 @@ async function refreshNow() {
 }
 
 /* The control itself, drawn into both headers so it is in the same place on
-   every tab. The spin lives on a wrapper rather than on the icon, because
-   the icon is a lucide placeholder until after the frame is built and what
-   it hands back is not this element. */
+   every tab. The spin lives on a wrapper rather than on the icon, so the
+   button keeps one shape whatever the glyph inside it is. */
 function refreshBtn(size, pad) {
   const label = esc(T("a11y.refresh"));
   return `<button data-action="refresh-now" title="${label}" aria-label="${label}" style="color:var(--muted);padding:${pad}px;display:flex;align-items:center">
@@ -6542,12 +6540,14 @@ const durValue = (secs) => {
 /* the stored form of a typed number: 82,5 → 82.5 */
 const decimalize = (v) => String(v ?? "").replace(/,/g, ".");
 
-/* aria-hidden rides onto the <svg> lucide draws (it copies the element's
-   attributes across): an icon is decoration to a screen reader, and the
-   control around it carries the words: its text, its title, or the
-   label a11yPass gives it. */
+/* The glyph itself, drawn here from ICONS (icons.js), so it is in the
+   frame the moment the HTML is. `extra` goes first because the first of
+   two equal attributes wins: a caller's stroke-width beats the default.
+   aria-hidden: an icon is decoration to a screen reader, and the control
+   around it carries the words: its text, its title, or the label a11yPass
+   gives it. */
 const icon = (name, size = 16, extra = "") =>
-  `<i data-lucide="${name}" width="${size}" height="${size}" aria-hidden="true" ${extra}></i>`;
+  `<svg ${extra} width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name] || ""}</svg>`;
 
 const chip = (children, color, style = "") =>
   `<span class="pb-chip" style="color:${color || "var(--muted)"};border-color:${(color || "var(--border)")}55;background:${(color || "#000")}14;${style}">${children}</span>`;
@@ -6566,7 +6566,7 @@ const searchNone = () => `<div style="padding:18px 6px;text-align:center;font-si
 /* swap a patched list's contents, for those handleBind branches */
 function repaintList(id, html) {
   const el = document.getElementById(id);
-  if (el) { el.innerHTML = html(); if (window.lucide) lucide.createIcons(); }
+  if (el) { el.innerHTML = html(); }
 }
 
 /* The unit dropdown that lives inside a weight field's label: tap "kg" and
@@ -7226,11 +7226,10 @@ function render() {
     if (scrolls[el.dataset.scrollkey] != null) el.scrollTop = scrolls[el.dataset.scrollkey];
   });
 
-  if (window.lucide) lucide.createIcons();
   drawCharts();
 
-  /* after the icons, because they are what settles the final heights this
-     scroll is measured against */
+  /* last, on the finished frame (icons and charts in), because that settles
+     the final heights this scroll is measured against */
   fitScrollFooters();
   if (ui.logJump) flashLogDay();
   if (ui.flashSets) flashSetRows();
@@ -7420,7 +7419,6 @@ function renderGate(scrolls) {
   app.querySelectorAll("[data-scrollkey]").forEach((el) => {
     if (scrolls[el.dataset.scrollkey] != null) el.scrollTop = scrolls[el.dataset.scrollkey];
   });
-  if (window.lucide) lucide.createIcons();
   _lastTab = null;
   _lastOverlayKeys = new Set([...app.querySelectorAll("[data-overlay]")].map((e) => e.dataset.overlay));
   const af = app.querySelector("[data-autofocus]");
@@ -8227,7 +8225,6 @@ function noteSplitItem(el, n, v) {
   const note = noteOf(n.id);
   let row = row0;
   for (const it of fresh) { row.insertAdjacentHTML("afterend", noteItemRow(note, it, false)); row = row.nextElementSibling; }
-  if (window.lucide) lucide.createIcons();
   const ta = row.querySelector("textarea");
   if (!ta) return;
   noteAutosize(ta);
@@ -10134,7 +10131,7 @@ function chatPatchBadge() {
    keystroke and from the clear button, so neither ever costs focus. */
 function chatPatchBody() {
   const box = document.getElementById("chatBody");
-  if (box) { box.innerHTML = chatBodyHTML(); if (window.lucide) lucide.createIcons(); }
+  if (box) { box.innerHTML = chatBodyHTML(); }
   const clear = document.getElementById("chatFindClear");
   if (clear) clear.style.display = (ui.chatFind || "") ? "flex" : "none";
 }
@@ -14735,7 +14732,6 @@ function picPaint() {
     } else {
       box.dataset.format = s.format;
       box.innerHTML = picPreviewInner(s);
-      if (window.lucide) lucide.createIcons();
     }
   }
   const ready = !!picBlob && !s.busy && !s.error;
@@ -15155,7 +15151,6 @@ function pickerPatch() {
   if (chips) chips.innerHTML = pickerChips(state.library);
   const list = document.getElementById("pickList");
   if (list) list.innerHTML = renderPickerList(state.library);
-  if (window.lucide) lucide.createIcons();
 }
 
 /* exercise picker with quick-add (name + muscle only, like the sheet) */
@@ -15387,9 +15382,8 @@ function entryComputed() {
    history. No unit on either: they are the same quantity as the figure
    beside them, whose own label already carries it.
 
-   Text and colour only, no icon: updateEntryPreview rewrites this in
-   place while you type, and a freshly injected lucide placeholder has
-   nothing to turn it into a glyph.                                     */
+   Text and colour only: updateEntryPreview rewrites this in place while
+   you type.                                                            */
 function entryRefCols(metric, lastMetric, bestMetric) {
   const k = ui.entryForm ? kindOf(ui.entryForm.f) : DEFAULT_KIND;
   const col = (label, ref) => {
@@ -15851,7 +15845,6 @@ function cardioTargetMoment() {
   const old = app.querySelector("[data-apptoast]");
   if (old) old.remove();
   app.insertAdjacentHTML("beforeend", renderAppToast());
-  if (window.lucide) lucide.createIcons();
 }
 
 /* put the light on the row(s) a moment just named; spent on this frame, the
@@ -16042,9 +16035,8 @@ function bestEverMetric(f, isDraft) {
    because a comparison that will not name what it compared with is just an
    opinion. It names the POSITION as well as the number ("set 2 last time"),
    since the number alone would read as the session's, which is exactly the
-   thing this stopped being. Text and colour only, no icon: this is
-   rewritten in place while you type (see updateSetPreview) and a freshly
-   injected lucide placeholder has nothing to turn it into a glyph. */
+   thing this stopped being. Text and colour only: this is rewritten in
+   place while you type (see updateSetPreview). */
 function vsLastLine(m, ref) {
   if (!ref) return "";
   const i = ref.index + 1;
@@ -16254,14 +16246,13 @@ function updateEntryPreview() {
   cardioTargetMoment();
   if (s) {
     s.disabled = !valid; s.style.opacity = valid ? 1 : 0.45;
-    /* Rewritten only when it actually changes: lucide.createIcons() walks
-       the document, and this runs on every keystroke. */
+    /* Rewritten only when it actually changes: this runs on every
+       keystroke. */
     const face = entrySaveFace(ui.entryForm.f, c);
     const key = face.glyph + "|" + face.label;
     if (s.dataset.face !== key) {
       s.dataset.face = key;
       s.innerHTML = `${icon(face.glyph, 18)} ${face.label}`;
-      if (window.lucide) lucide.createIcons();
     }
   }
 }
@@ -17089,7 +17080,6 @@ function timerRepaint() {
   if (!root || !ui.timerToast) return;
   root.querySelectorAll("[data-timer-toast]").forEach((el) => el.remove());
   root.insertAdjacentHTML("beforeend", timerToastHTML());
-  if (window.lucide) lucide.createIcons();
 }
 
 let timerEngine = null;
@@ -17450,7 +17440,7 @@ function updateTimerPreview() {
     pct.style.color = vol === 0 ? "var(--faint)" : "var(--gold)";
   }
   /* both speaker icons are already mounted; muting just swaps which one is
-     visible, so lucide never has to redraw mid-drag */
+     visible, so nothing is redrawn mid-drag */
   const on = document.querySelector('[data-volicon="on"]'), off = document.querySelector('[data-volicon="off"]');
   if (on) on.style.display = vol === 0 ? "none" : "inline-flex";
   if (off) off.style.display = vol === 0 ? "inline-flex" : "none";
@@ -18372,7 +18362,6 @@ function chartSelect(id, scope) {
   document.querySelectorAll(`[data-action="chart-pick"][data-scope="${scope}"]`).forEach((el) => {
     el.style.background = el.dataset.id === id ? "rgba(233,185,73,.08)" : "transparent";
   });
-  if (window.lucide) lucide.createIcons();
 }
 
 /* the reset button appears and disappears with the zoom, so the toolbars
@@ -18381,7 +18370,6 @@ function refreshChartToolbars() {
   document.querySelectorAll("[data-charttoolbar]").forEach((el) => {
     el.innerHTML = chartToolbarInner(el.dataset.full === "1", el.dataset.charttoolbar);
   });
-  if (window.lucide) lucide.createIcons();
 }
 
 function drawLineChart() {
@@ -19800,7 +19788,7 @@ const actions = {
     const field = document.querySelector('[data-bind="notesQ"]');
     if (field) { field.value = ""; try { field.focus(); } catch { /* gone */ } }
     const g = document.getElementById("notesGrid");
-    if (g) { g.innerHTML = notesGridHTML(); if (window.lucide) lucide.createIcons(); }
+    if (g) { g.innerHTML = notesGridHTML(); }
     const clear = document.getElementById("notesQClear");
     if (clear) clear.style.display = "none";
   },
@@ -21970,15 +21958,15 @@ function handleBind(el) {
   if (bind === "libq") {
     ui.libraryQ = v;
     const list = document.getElementById("libList");
-    if (list) { list.innerHTML = renderLibraryList(state.library); if (window.lucide) lucide.createIcons(); }
+    if (list) { list.innerHTML = renderLibraryList(state.library); }
   } else if (bind === "progq") {
     ui.progressQ = v;
     const list = document.getElementById("progLifts");
-    if (list) { list.innerHTML = progressLiftsHTML(); if (window.lucide) lucide.createIcons(); }
+    if (list) { list.innerHTML = progressLiftsHTML(); }
   } else if (bind === "pickq") {
     ui.pickerQ = v;
     const list = document.getElementById("pickList");
-    if (list) { list.innerHTML = renderPickerList(state.library); if (window.lucide) lucide.createIcons(); }
+    if (list) { list.innerHTML = renderPickerList(state.library); }
     repaintList("presetPickList", renderPresetPickerList);
   } else if (bind === "presetq") {
     ui.presetQ = v;
@@ -21993,13 +21981,13 @@ function handleBind(el) {
     if (ui.chatAttach) {
       ui.chatAttach.q = v;
       const list = document.getElementById("chatAttachList");
-      if (list) { list.innerHTML = chatAttachListHTML(); if (window.lucide) lucide.createIcons(); }
+      if (list) { list.innerHTML = chatAttachListHTML(); }
     }
   } else if (bind === "attachq") {
     if (ui.exWinAttach) {
       ui.exWinAttach.q = v;
       const list = document.getElementById("attachList");
-      if (list) { list.innerHTML = attachBasesHTML(); if (window.lucide) lucide.createIcons(); }
+      if (list) { list.innerHTML = attachBasesHTML(); }
     }
   } else if (bind === "attach.short") {
     /* the composed label under the field and the Save button both answer to
@@ -22098,7 +22086,7 @@ function handleBind(el) {
     /* the notepad's search: patched, never rendered, and not state */
     ui.notesQ = v;
     const g = document.getElementById("notesGrid");
-    if (g) { g.innerHTML = notesGridHTML(); if (window.lucide) lucide.createIcons(); }
+    if (g) { g.innerHTML = notesGridHTML(); }
     const clear = document.getElementById("notesQClear");
     if (clear) clear.style.display = v ? "flex" : "none";
     return;
@@ -22107,7 +22095,7 @@ function handleBind(el) {
       ui.noteLabels.q = v;
       const n = noteOf(ui.noteLabels.id);
       const list = document.getElementById("noteLabelList");
-      if (list && n) { list.innerHTML = noteLabelListHTML(n); if (window.lucide) lucide.createIcons(); }
+      if (list && n) { list.innerHTML = noteLabelListHTML(n); }
       const btn = document.getElementById("noteLabelAdd");
       if (btn) { const ok = !!v.trim(); btn.disabled = !ok; btn.style.opacity = ok ? 1 : 0.4; }
     }
@@ -22137,7 +22125,7 @@ function handleBind(el) {
   } else if (bind === "stdq") {
     ui.stdQ = v;
     const list = document.getElementById("stdPickList");
-    if (list) { list.innerHTML = renderStdPickerList(); if (window.lucide) lucide.createIcons(); }
+    if (list) { list.innerHTML = renderStdPickerList(); }
   } else if (bind.startsWith("std.")) {
     const key = bind.slice(4), f = stdForm();
     f[key] = v;

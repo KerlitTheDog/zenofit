@@ -66,7 +66,7 @@ Each one's reasons, and the bugs that taught it, are in the doc named beside it.
 - `styles.css`: all styling, driven by CSS custom properties (`.claude/rules/styles.md`).
 - `zenofit-cloud.js`: the only code that talks to the network. `api/`: the Cloudflare Worker it talks to (`.claude/rules/server.md`). Both are optional by design: the app runs unchanged with the API unreachable.
 - `sw.js`: the service worker, for the offline shell and web push (`.claude/rules/service-worker.md`).
-- `lucide.min.js` and `fonts/`: vendored rather than fetched from a CDN, and updated by hand (docs/architecture.md).
+- `icons.js` (the Tabler glyphs the app draws) and `fonts/`: vendored rather than fetched from a CDN, and updated by hand (docs/architecture.md).
 
 # Conventions for every change
 

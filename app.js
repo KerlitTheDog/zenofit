@@ -6788,7 +6788,16 @@ function playLayerExit(root, node) {
   node.classList.remove("pb-sheet");                                   // don't replay the enter slide
   node.querySelectorAll(".pb-sheet").forEach((e) => e.classList.remove("pb-sheet"));
   root.appendChild(node);
-  if (node.dataset.layer === "fs") {
+  const pill = node.dataset.overlay === "pinMenu" && node.querySelector('[role="menu"]');
+  if (pill) {
+    /* the badge menu rolls back up into its badge and fades there, over
+       the same badge drawn underneath (or the next profile's, after a
+       switch, which it crossfades into) */
+    pill.classList.remove("pb-drop");
+    const cap = pill.style.getPropertyValue("--pb-drop-h");
+    pill.animate([{ height: pill.offsetHeight + "px" }, { height: cap, opacity: 1, offset: 0.7 }, { height: cap, opacity: 0 }],
+      { duration: 210, easing: "cubic-bezier(.4,0,.6,1)", fill: "forwards" });
+  } else if (node.dataset.layer === "fs") {
     node.style.animation = "pbSheetOut .2s cubic-bezier(.4,0,1,1) forwards";
   } else {
     node.style.animation = "pbFadeOut .2s ease forwards";              // backdrop dims away
@@ -18081,23 +18090,34 @@ function badgeHTML(look, size) {
   const solid = look.style === "solid";
   return `<span aria-hidden="true" style="width:${size}px;height:${size}px;border-radius:${look.shape === "square" ? Math.round(size * 0.28) : size / 2}px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;font-weight:700;font-size:${fs}px;line-height:1;background:${solid ? look.color : "transparent"};color:${solid ? badgeInk(look.color) : inkFor(look.color)};border:2px solid ${look.color}">${look.icon ? icon(look.icon, Math.round(size * 0.54)) : esc(look.text)}</span>`;
 }
+/* A profile's entry is its badge's look; it is IN THE MENU unless `off`.
+   The two are apart because the badge on screen is always drawn: its look
+   is yours to change whether or not it is pinned, and unpinning keeps it. */
+const pinOn = (pin) => !!pin && !pin.off;
+/* whose a profile is, for a badge made for it now */
+const pinWhoOf = (id) => (id === profiles.active ? String(state.settings.name || "").trim()
+  : ((ui.profileStats || profileStats())[id] || {}).who || "");
+/* a look changed on a profile that had none: kept, but not put in the menu */
+function lookSet(id, change) {
+  pinSet(id, pinsRead()[id] ? change : { off: true, color: badgeColorOf(id), who: pinWhoOf(id), ...change });
+}
 /* A profile's badge and name as the top bar draws them. The one on screen
-   has its person's name even when it is not pinned. */
+   has its person's name even when it has no entry yet. */
 function pinView(p, i, pins) {
   const who = (pins[p.id] && pins[p.id].who) || (p.id === activeProfileId() && String(state.settings.name || "").trim()) || "";
   return { look: badgeLook(p, i, pins[p.id] || { who }), name: who || profileLabel(p, i) };
 }
-/* ONE badge at the top, the profile on screen's, once anything is pinned:
-   a row of them cut the second one off with only two. A tap drops the
-   menu down from it (renderPinMenu). */
+/* ONE badge at the top, always the profile on screen's, in the logo's
+   place: a row of them cut the second one off with only two. A tap drops
+   the menu down from it (renderPinMenu), whose own copy of it lands
+   exactly on top of this one, which stays drawn underneath so that
+   neither opening nor closing ever shows the spot empty. */
 function pinBadge(size) {
-  const pins = pinsRead();
   const list = profileList();
   const i = list.findIndex((p) => p.id === activeProfileId());
-  if (i < 0 || !list.some((p) => pins[p.id])) return "";
-  const v = pinView(list[i], i, pins);
-  /* while the menu is open its own copy sits exactly here */
-  return `<button data-action="pin-menu" data-size="${size}" aria-label="${esc(T("badge.menu", { name: v.name }))}" aria-haspopup="menu" aria-expanded="${!!ui.pinMenu}" style="display:flex;padding:0;flex-shrink:0${ui.pinMenu ? ";visibility:hidden" : ""}">${badgeHTML(v.look, size)}</button>`;
+  if (i < 0) return "";
+  const v = pinView(list[i], i, pinsRead());
+  return `<button data-action="pin-menu" data-size="${size}" aria-label="${esc(T("badge.menu", { name: v.name }))}" aria-haspopup="menu" aria-expanded="${!!ui.pinMenu}" style="display:flex;padding:0;flex-shrink:0">${badgeHTML(v.look, size)}</button>`;
 }
 /* The menu, dropped from the badge at the badge's own spot: the profile on
    screen at the top (a second tap opens its look), every other pinned one
@@ -18115,9 +18135,12 @@ function renderPinMenu() {
     const v = pinView(p, k, pins);
     return `<button data-action="${action}" data-id="${esc(p.id)}" role="menuitem" aria-label="${esc(T(key, { name: v.name }))}" style="display:flex;padding:0;flex-shrink:0">${badgeHTML(v.look, s)}</button>`;
   };
-  const others = list.map((p, k) => ({ p, k })).filter((x) => x.p.id !== id && pins[x.p.id]);
+  const others = list.map((p, k) => ({ p, k })).filter((x) => x.p.id !== id && pinOn(pins[x.p.id]));
+  /* it unrolls from just its top (your badge in its cap) to all of it, and
+     rolls back up the same way (pb-drop, playLayerExit) */
+  const cap = s + 2 * pad + 2, full = (others.length + 2) * (s + 8) - 8 + 2 * pad + 2;
   return `<div data-overlay="pinMenu" data-layer="fs" data-action="pin-menu-close" aria-label="${esc(T("profiles.title"))}" style="position:absolute;inset:0;z-index:110">
-    <div data-stopprop role="menu" class="pb-scroll${_lastOverlayKeys.has("pinMenu") ? "" : " pb-drop"}" style="position:absolute;left:${m.x - pad - 1}px;top:${m.y - pad - 1}px;max-height:calc(100% - ${Math.round(m.y)}px - var(--pb-sab) - 12px);overflow-y:auto;scrollbar-width:none;display:flex;flex-direction:column;align-items:center;gap:8px;padding:${pad}px;border-radius:${s / 2 + pad}px;background:var(--surface2);border:1px solid var(--border);box-shadow:0 8px 24px rgba(0,0,0,.35)">
+    <div data-stopprop role="menu" class="pb-scroll${_lastOverlayKeys.has("pinMenu") ? "" : " pb-drop"}" style="--pb-drop-h:${cap}px;--pb-drop-full:${full}px;box-sizing:border-box;position:absolute;left:${m.x - pad - 1}px;top:${m.y - pad - 1}px;max-height:calc(100% - ${Math.round(m.y)}px - var(--pb-sab) - 12px);overflow-y:auto;scrollbar-width:none;display:flex;flex-direction:column;align-items:center;gap:8px;padding:${pad}px;border-radius:${s / 2 + pad}px;background:var(--surface2);border:1px solid var(--border);box-shadow:0 8px 24px rgba(0,0,0,.35)">
       ${item("pin-menu-own", list[i], i, "badge.onScreen")}
       ${others.map(({ p, k }) => item("pin-switch", p, k, "badge.switchTo")).join("")}
       <button data-action="pin-menu-more" role="menuitem" aria-label="${esc(T("badge.more"))}" style="width:${s}px;height:${s}px;border-radius:${s / 2}px;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--muted)">${icon("dots", Math.round(s * 0.62))}</button>
@@ -18135,24 +18158,24 @@ function pinWhoSync() {
   const who = String(state.settings.name || "").trim();
   if (pin && who && pin.who !== who) pinSet(id, { who });
 }
-/* Pinning, and how the badge looks, in the profile's own sheet. */
+/* How the badge looks, and whether it is in the menu, in the profile's
+   own sheet. The look is there for every profile, pinned or not. */
 function badgeSection(id) {
   const list = profileList();
   const i = list.findIndex((p) => p.id === id);
   if (i < 0) return "";
-  const pin = pinsRead()[id];
+  const pins = pinsRead();
+  const pin = pins[id] || {};
+  const v = pinView(list[i], i, pins);
+  const look = v.look;
   const head = `<div class="pb-hairline" style="margin:16px 0"></div>${sectionTitle(T("badge.title"))}`;
-  if (!pin) return `${head}
-    <button data-action="profile-pin" data-id="${esc(id)}" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:13.5px;color:var(--gold)">${icon("pin", 15)} ${T("badge.pin")}</button>
-    <div style="font-size:11.5px;color:var(--faint);margin-top:8px;line-height:1.55">${T("badge.pinHint")}</div>`;
-  const look = badgeLook(list[i], i, pin);
   const opt = (on) => `border:1px solid ${on ? "var(--gold)" : "var(--border)"};background:${on ? "rgba(233,185,73,.14)" : "var(--surface2)"};color:${on ? "var(--gold)" : "var(--muted)"}`;
   return `${head}
     <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px">
       <span data-badge-preview style="display:flex">${badgeHTML(look, 52)}</span>
       <div style="font-size:12px;color:var(--muted);line-height:1.5">${T("badge.pinHint")}</div>
     </div>
-    ${field(T("badge.text"), `<input class="pb-input" data-bind="badgeText" value="${esc(pin.text || "")}" placeholder="${esc(badgeInitials(pin.who || profileLabel(list[i], i)))}" maxlength="12" autocomplete="off" autocorrect="off" spellcheck="false">`, T("badge.textHint"))}
+    ${field(T("badge.text"), `<input class="pb-input" data-bind="badgeText" value="${esc(pin.text || "")}" placeholder="${esc(badgeInitials(v.name))}" maxlength="12" autocomplete="off" autocorrect="off" spellcheck="false">`, T("badge.textHint"))}
     <div class="pb-label" style="margin-bottom:8px">${T("badge.color")}</div>
     <div style="display:flex;flex-wrap:wrap;gap:9px;margin-bottom:16px">${GROUP_SWATCHES.map((c, n) => `<button data-action="badge-color" data-c="${c}" aria-label="${esc(T("badge.colorN", { n: n + 1 }))}" aria-pressed="${look.color === c}" style="width:32px;height:32px;border-radius:16px;background:${c};${look.color === c ? "box-shadow:0 0 0 2px var(--surface),0 0 0 4px var(--text)" : ""}"></button>`).join("")}
       ${/* any other colour, as a muscle group's: the well wears it once chosen */
@@ -18170,7 +18193,8 @@ function badgeSection(id) {
     ${segControl("badge-shape", look.shape, [["circle", T("badge.circle")], ["square", T("badge.square")]])}
     <div class="pb-label" style="margin-bottom:8px">${T("badge.style")}</div>
     ${segControl("badge-style", look.style, [["solid", T("badge.solid")], ["outline", T("badge.outline")]])}
-    <button data-action="profile-pin" data-id="${esc(id)}" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:13.5px">${icon("pin-off", 15)} ${T("badge.unpin")}</button>`;
+    ${pinOn(pins[id]) ? `<button data-action="profile-pin" data-id="${esc(id)}" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:13.5px">${icon("pin-off", 15)} ${T("badge.unpin")}</button>`
+      : `<button data-action="profile-pin" data-id="${esc(id)}" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:13.5px;color:var(--gold)">${icon("pin", 15)} ${T("badge.pin")}</button>`}`;
 }
 
 function renderProfilesWindow() {
@@ -18198,10 +18222,10 @@ function renderProfilesWindow() {
     const shared = profileShared(p.id);
     const label = profileLabel(p, i);
     const who = (on ? String(state.settings.name || "") : st.who || "").trim();
-    const pinned = !!pins[p.id];
+    const pinned = pinOn(pins[p.id]);
     return `<div style="display:flex;align-items:center;border-bottom:${last ? "none" : "1px solid var(--border-soft)"};background:${on ? "rgba(233,185,73,.06)" : "transparent"}">
       <button ${on ? "" : `data-action="profile-switch" data-id="${esc(p.id)}"`} style="flex:1;min-width:0;display:flex;align-items:center;gap:11px;padding:13px 4px 13px 14px;text-align:left;color:var(--text)">
-        ${pinned ? badgeHTML(badgeLook(p, i, pins[p.id]), 26)
+        ${pins[p.id] ? badgeHTML(badgeLook(p, i, pins[p.id]), 26)
           : `<span style="width:9px;height:9px;border-radius:5px;flex-shrink:0;background:${on ? "var(--gold)" : "var(--border)"}"></span>`}
         <span style="flex:1;min-width:0">
           <span style="display:block;min-width:0;font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(who || label)}</span>
@@ -19879,17 +19903,19 @@ const actions = {
     render();
   },
   "pin-menu-more": () => { ui.pinMenu = null; actions["open-profiles"](); },
+  /* in or out of the menu; unpinning keeps the look (`off`) */
   "profile-pin": (el) => {
     const id = el.dataset.id;
-    if (pinsRead()[id]) pinSet(id, null);
+    const pin = pinsRead()[id];
+    if (pin) pinSet(id, { off: pinOn(pin) ? true : undefined });
     /* its colour is set now, so it is the same on every phone from the start */
-    else pinSet(id, { color: badgeColorOf(id), who: id === profiles.active ? String(state.settings.name || "").trim() : ((ui.profileStats || profileStats())[id] || {}).who || "" });
+    else pinSet(id, { color: badgeColorOf(id), who: pinWhoOf(id) });
     render();
   },
-  "badge-color": (el) => { if (ui.profileForm) { pinSet(ui.profileForm.id, { color: el.dataset.c }); render(); } },
-  "badge-icon": (el) => { if (ui.profileForm) { pinSet(ui.profileForm.id, { icon: el.dataset.i || "" }); render(); } },
-  "badge-shape": (el) => { if (ui.profileForm) { pinSet(ui.profileForm.id, { shape: el.dataset.id }); render(); } },
-  "badge-style": (el) => { if (ui.profileForm) { pinSet(ui.profileForm.id, { style: el.dataset.id }); render(); } },
+  "badge-color": (el) => { if (ui.profileForm) { lookSet(ui.profileForm.id, { color: el.dataset.c }); render(); } },
+  "badge-icon": (el) => { if (ui.profileForm) { lookSet(ui.profileForm.id, { icon: el.dataset.i || "" }); render(); } },
+  "badge-shape": (el) => { if (ui.profileForm) { lookSet(ui.profileForm.id, { shape: el.dataset.id }); render(); } },
+  "badge-style": (el) => { if (ui.profileForm) { lookSet(ui.profileForm.id, { style: el.dataset.id }); render(); } },
   "profile-add": () => { ui.profileForm = { id: null, name: "", mode: "add" }; render(); },
   "profile-menu": (el) => {
     const list = profileList();
@@ -23100,13 +23126,13 @@ function handleBind(el) {
   } else if (bind === "badgeText") {
     if (!ui.profileForm) return;
     const id = ui.profileForm.id;
-    pinSet(id, { text: graphemes(v.trim()).slice(0, 3).join("") });
+    lookSet(id, { text: graphemes(v.trim()).slice(0, 3).join("") });
     const list = profileList();
     const i = list.findIndex((p) => p.id === id);
     const prev = document.querySelector("[data-badge-preview]");
     if (prev && i >= 0) prev.innerHTML = badgeHTML(badgeLook(list[i], i, pinsRead()[id]), 52);
   } else if (bind === "badgeColor") {
-    if (ui.profileForm && /^#[0-9a-f]{6}$/i.test(v)) { pinSet(ui.profileForm.id, { color: v.toLowerCase() }); render(); }
+    if (ui.profileForm && /^#[0-9a-f]{6}$/i.test(v)) { lookSet(ui.profileForm.id, { color: v.toLowerCase() }); render(); }
   } else if (bind === "profileName") {
     ui.profileForm.name = v;
     const btn = document.querySelector('[data-action="profile-form-save"]');

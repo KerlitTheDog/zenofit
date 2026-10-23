@@ -211,6 +211,7 @@ function cleanPins(raw) {
     if (typeof v.icon === "string" && /^[a-z0-9-]{1,32}$/.test(v.icon)) b.icon = v.icon;
     if (PIN_SHAPES.has(v.shape)) b.shape = v.shape;
     if (PIN_STYLES.has(v.style)) b.style = v.style;
+    if (v.off === true) b.off = true;   // a look kept for a profile that is not in the menu
     out[k] = b;
   }
   return out;

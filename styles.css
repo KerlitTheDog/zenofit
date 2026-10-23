@@ -478,9 +478,10 @@ input[type="date"].pb-input::-webkit-date-and-time-value{
 .pb-spin{ animation:pbSpin .9s linear infinite; transform-origin:50% 50%; }
 @keyframes pbSpin{ to{ transform:rotate(360deg); } }
 
-/* The profile menu unrolls downward from its badge (renderPinMenu). */
-.pb-drop{ animation:pbDrop .16s ease-out; }
-@keyframes pbDrop{ from{ clip-path:inset(0 0 100% 0); } to{ clip-path:inset(0); } }
+/* The profile menu unrolls downward from its badge, starting from just the
+   cap around it (renderPinMenu; it rolls back up in playLayerExit). */
+.pb-drop{ animation:pbDrop .2s cubic-bezier(.2,.8,.3,1); }
+@keyframes pbDrop{ from{ height:var(--pb-drop-h); } to{ height:var(--pb-drop-full); } }
 
 @media (prefers-reduced-motion: reduce){
   .pb-sheet,.pb-drop{ animation:none; }

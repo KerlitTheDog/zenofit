@@ -4409,6 +4409,8 @@ async function rosterSync(opts) {
     const res = await C.listProfiles();
     if (!stillMe()) return { ok: false, reason: "switched" };
     const cloud = (res && res.profiles) || [];
+    /* the account's pinned profiles came with the list (PINNED PROFILES) */
+    if (res && "pins" in res) pinsFromServer(res.pins, res.pinsAt);
     rosterAt = Date.now();
     const byRemote = new Map(cloud.map((p) => [p.profileId, p]));
     const linked = (lp) => (syncFor(lp.id) || {}).remoteId;
@@ -4801,6 +4803,7 @@ function accountErased(userId, how) {
   ownersSave(owners);
   try { localStorage.setItem(SYNC_KEY, JSON.stringify(recs)); } catch { /* nothing to forget */ }
   try { localStorage.removeItem(rosterKeyFor(userId)); } catch { /* already gone */ }
+  try { localStorage.removeItem("zenofit:pins:" + userId); } catch { /* already gone */ }   // its pinned profiles
   /* a removal made by nobody in particular was made by whoever was signed
      in, which is this account (see pendingMine) */
   setPendingOps(pendingOps().filter((x) => x.acct && x.acct !== userId));
@@ -17941,19 +17944,97 @@ function renderProfile(f) {
    profile on screen opens its settings. How each badge looks is the
    person's choice (letters or an icon, colour, round or square, filled or
    outlined), because two profiles that both start with L are two Ls.
-   Kept per account on this phone (`zenofit:pins:<userId>`), like which
-   profile is on screen: it is how this phone is set up, not training.
-   `who` is the profile's person (its settings.name) as last seen here, so
-   a badge shows the right initials for a profile that is not open. */
+   PINS ARE THE ACCOUNT'S, like its profile list: log in to an account on
+   any phone and its badges are there, and a second account on the same
+   phone has its own (users.pins, migration 0014). They are keyed by the
+   SERVER's profile id, because each phone has its own local ids; a
+   profile not in the account yet (made with no signal) keeps its pin
+   under `local:<id>` here until it is, then it travels too. They come in
+   with the roster's listing (`pinsFromServer`) and go up whole a moment
+   after an edit (`pinsPush`); the later edit wins, as a name's does.
+   Stored here per account (`zenofit:pins:<userId>`: {at, pushed, pins}),
+   so they draw with no signal. `who` is the profile's person (its
+   settings.name) as last seen, so a badge shows the right initials for a
+   profile that is not open. */
 const pinKey = () => "zenofit:pins:" + (profiles.userId || "");
+function pinStore() {
+  try {
+    const s = JSON.parse(localStorage.getItem(pinKey()) || "null");
+    if (s && typeof s.pins === "object" && s.pins && !Array.isArray(s.pins)) return s;
+  } catch { /* unreadable: start over, the account still has them */ }
+  return { at: 0, pushed: 0, pins: {} };
+}
+function pinStoreWrite(s) { try { localStorage.setItem(pinKey(), JSON.stringify(s)); } catch { /* this session only */ } }
+const pinKeyOf = (localId) => { const r = syncLinked(localId); return r ? r.remoteId : "local:" + localId; };
+/* the pins of the profiles in the list, keyed by their local ids */
 function pinsRead() {
-  try { const p = JSON.parse(localStorage.getItem(pinKey()) || "{}"); return p && typeof p === "object" && !Array.isArray(p) ? p : {}; }
-  catch { return {}; }
+  const s = pinStore().pins;
+  const out = {};
+  for (const p of profileList()) {
+    const v = s[pinKeyOf(p.id)] || s["local:" + p.id];
+    if (v && typeof v === "object") out[p.id] = v;
+  }
+  return out;
 }
 function pinSet(id, change) {
-  const all = pinsRead();
-  if (change === null) delete all[id]; else all[id] = { ...(all[id] || {}), ...change };
-  try { localStorage.setItem(pinKey(), JSON.stringify(all)); } catch { /* this session only */ }
+  const s = pinStore();
+  const k = pinKeyOf(id);
+  const cur = s.pins[k] || s.pins["local:" + id];
+  delete s.pins["local:" + id];
+  if (change === null) delete s.pins[k]; else s.pins[k] = { ...(cur || {}), ...change };
+  s.at = Date.now();
+  pinStoreWrite(s);
+  pinsPushSoon();
+}
+/* a profile that has reached the account since it was pinned: its pin
+   moves to the server's id, so the other phones get it too */
+function pinsMigrate(s) {
+  let moved = false;
+  for (const k of Object.keys(s.pins)) {
+    if (!k.startsWith("local:")) continue;
+    const r = syncLinked(k.slice(6));
+    if (!r) continue;
+    s.pins[r.remoteId] = { ...s.pins[k], ...(s.pins[r.remoteId] || {}) };
+    delete s.pins[k];
+    moved = true;
+  }
+  return moved;
+}
+let pinsPushTimer = null;
+const pinsPushSoon = () => { clearTimeout(pinsPushTimer); pinsPushTimer = setTimeout(pinsPush, 600); };
+async function pinsPush() {
+  const C = window.ZenofitCloud;
+  const me = acctUserId();
+  if (!C || !C.setPins || !me) return;
+  const s = pinStore();
+  const at = s.at;
+  const up = Object.fromEntries(Object.entries(s.pins).filter(([k]) => !k.startsWith("local:")));
+  let r;
+  try { r = await C.setPins(up, at); } catch { return; /* the next roster pass sends them again */ }
+  if (acctUserId() !== me || !r) return;
+  if (r.stale) { pinsTake(r.pins, r.at); return; }
+  const now = pinStore();
+  if (now.at === at) pinStoreWrite({ ...now, pushed: at });   // nothing was edited meanwhile
+}
+/* another phone's later edit: theirs, keeping any pin of a profile that is
+   not in the account yet */
+function pinsTake(pins, at) {
+  const s = pinStore();
+  const clean = {};
+  for (const [k, v] of Object.entries(pins && typeof pins === "object" ? pins : {})) {
+    if (v && typeof v === "object" && !Array.isArray(v)) clean[k] = v;
+  }
+  const local = Object.fromEntries(Object.entries(s.pins).filter(([k]) => k.startsWith("local:")));
+  pinStoreWrite({ at, pushed: at, pins: { ...clean, ...local } });
+  /* not under a field being typed in (the badge's letters) */
+  if (!ui.profileForm && !syncTyping()) render();
+}
+/* the roster's listing brought the account's pins */
+function pinsFromServer(pins, at) {
+  const s = pinStore();
+  if (pinsMigrate(s)) { s.at = Date.now(); pinStoreWrite(s); }
+  if ((s.at || 0) > (s.pushed || 0)) { pinsPushSoon(); return; }   // ours are newer and not sent: send, the server decides
+  if ((at || 0) > (s.at || 0)) pinsTake(pins, at);
 }
 const BADGE_ICONS = ["user", "heart", "star", "flame", "bolt", "crown", "leaf", "paw", "moon", "sun", "dumbbell", "trophy", "target", "medal", "run", "mood-smile"];
 /* what a person reads as one character: an emoji or a flag is one, not two */
@@ -17964,13 +18045,18 @@ const badgeInitials = (s) => {
   if (!w.length) return "?";
   return (graphemes(w[0])[0] + (w.length > 1 ? graphemes(w[1])[0] : "")).toUpperCase();
 };
+/* a profile's own colour from the palette, the same on every phone: from
+   the account's id for it, not this phone's */
+function badgeColorOf(localId) {
+  let h = 0;
+  for (const c of String(pinKeyOf(localId))) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return GROUP_SWATCHES[h % GROUP_SWATCHES.length];
+}
 function badgeLook(p, i, pin) {
   const pi = pin || {};
-  let h = 0;
-  for (const c of String(p.id)) h = (h * 31 + c.charCodeAt(0)) >>> 0;
   return {
     text: graphemes(String(pi.text || "").trim()).slice(0, 3).join("") || badgeInitials(pi.who || profileLabel(p, i)),
-    color: GROUP_SWATCHES.includes(pi.color) ? pi.color : GROUP_SWATCHES[h % GROUP_SWATCHES.length],
+    color: GROUP_SWATCHES.includes(pi.color) ? pi.color : badgeColorOf(p.id),
     icon: BADGE_ICONS.includes(pi.icon) ? pi.icon : "",
     shape: pi.shape === "square" ? "square" : "circle",
     style: pi.style === "outline" ? "outline" : "solid",
@@ -17996,13 +18082,16 @@ function pinStrip(size) {
     return `<button data-action="pin-switch" data-id="${esc(p.id)}" aria-label="${esc(T(on ? "badge.onScreen" : "badge.switchTo", { name }))}"${on ? ' aria-current="true"' : ""} style="display:flex;padding:0;flex-shrink:0">${badgeHTML(badgeLook(p, i, pins[p.id]), size, on)}</button>`;
   }).join("")}</div>`;
 }
-/* the profile on screen keeps its own badge's initials up to date */
+/* The profile on screen keeps its own badge's initials up to date. Never
+   with an empty name: a profile whose rows have not arrived on this phone
+   yet reads as nameless, and that used to wipe the name the account's
+   other phones had already given its badge. */
 function pinWhoSync() {
   const id = activeProfileId();
   if (!id) return;
   const pin = pinsRead()[id];
   const who = String(state.settings.name || "").trim();
-  if (pin && (pin.who || "") !== who) pinSet(id, { who });
+  if (pin && who && pin.who !== who) pinSet(id, { who });
 }
 /* Pinning, and how the badge looks, in the profile's own sheet. */
 function badgeSection(id) {
@@ -18460,10 +18549,11 @@ const healthGated = () => !healthOk && !profileShared(profiles.active);
 /* A link to one of the two documents, opened in a window of the app's own
    (renderLegal), never a tab: an installed app has no browser around it,
    so a tab left nobody a way back, and on an iPhone it opened Safari. A
-   button, because the click dispatcher never stops a link's own
-   navigation. */
+   real link, because a button is one unbreakable box and the full stop
+   after it wrapped onto a line of its own; the click dispatcher stops a
+   link that carries an action from navigating. */
 const legalLink = (page, key) =>
-  `<button type="button" data-action="legal-open" data-page="${page}" class="pb-linkbtn">${T(key)}</button>`;
+  `<a href="${page}.html" data-action="legal-open" data-page="${page}" class="pb-linkbtn">${T(key)}</a>`;
 
 /* ── THE TWO DOCUMENTS, INSIDE THE APP ────────────────────────────────
    The text is read out of privacy.html and terms.html themselves (in
@@ -18484,13 +18574,8 @@ function legalLoad(page) {
       sec.querySelectorAll("h1, nav, script").forEach((n) => n.remove());
       sec.querySelectorAll("a[href]").forEach((a) => {
         const m = /^(privacy|terms)\.html/.exec(a.getAttribute("href"));
-        if (m) {
-          const b = doc.createElement("button");
-          b.type = "button"; b.className = "pb-linkbtn";
-          b.dataset.action = "legal-open"; b.dataset.page = m[1];
-          b.textContent = a.textContent;
-          a.replaceWith(b);
-        } else { a.target = "_blank"; a.rel = "noopener"; }
+        if (m) { a.className = "pb-linkbtn"; a.dataset.action = "legal-open"; a.dataset.page = m[1]; }
+        else { a.target = "_blank"; a.rel = "noopener"; }
       });
       out[code] = sec.innerHTML;
     }
@@ -19737,7 +19822,8 @@ const actions = {
   "profile-pin": (el) => {
     const id = el.dataset.id;
     if (pinsRead()[id]) pinSet(id, null);
-    else pinSet(id, { who: id === profiles.active ? String(state.settings.name || "").trim() : ((ui.profileStats || profileStats())[id] || {}).who || "" });
+    /* its colour is set now, so it is the same on every phone from the start */
+    else pinSet(id, { color: badgeColorOf(id), who: id === profiles.active ? String(state.settings.name || "").trim() : ((ui.profileStats || profileStats())[id] || {}).who || "" });
     render();
   },
   "badge-color": (el) => { if (ui.profileForm) { pinSet(ui.profileForm.id, { color: el.dataset.c }); render(); } },
@@ -22558,6 +22644,9 @@ document.addEventListener("click", (e) => {
      the outer action must not fire (sheet backdrops, goal editor row). */
   const stop = e.target.closest("[data-stopprop]");
   if (stop && el !== stop && el.contains(stop)) return;
+  /* a link that carries an action IS the action, and never navigates the
+     installed app away (legalLink) */
+  if (el.tagName === "A") e.preventDefault();
   if (syncReadOnly() && !READ_OK.has(el.dataset.action)) { toastReadOnly(); return; }
   const fn = actions[el.dataset.action];
   if (fn) fn(el, e);

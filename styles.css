@@ -523,8 +523,8 @@ a:focus-visible, select:focus-visible, .pb-chip:focus-visible{
 [data-layer]:focus{ outline:none; }
 
 /* A link inside a sentence that opens something in the app (the Privacy
-   policy, the Terms): a button, so nothing navigates the installed app
-   away, dressed as the link it reads as. */
+   policy, the Terms): a real link that flows with the sentence, its own
+   navigation stopped by the click dispatcher. */
 .pb-linkbtn{ display:inline; padding:0; margin:0; border:0; background:none; font:inherit; color:var(--gold); text-decoration:underline; cursor:pointer; }
 /* The documents read inside the app (renderLegal), out of privacy.html
    and terms.html */

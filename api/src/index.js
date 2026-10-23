@@ -194,6 +194,28 @@ function addressKey(request) {
   return all.slice(0, 4).map((g) => (parseInt(g, 16) || 0).toString(16)).join(":") + "::/64";
 }
 
+/* An account's pinned profiles (migration 0014), held to the shape the app
+   draws: profile ids to a badge's letters, person, colour, icon, shape and
+   style, each checked, anything else dropped. The app checks them again. */
+const PIN_SHAPES = new Set(["circle", "square"]);
+const PIN_STYLES = new Set(["solid", "outline"]);
+function cleanPins(raw) {
+  const out = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const [k, v] of Object.entries(raw).slice(0, 100)) {
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(k) || !v || typeof v !== "object" || Array.isArray(v)) continue;
+    const b = {};
+    if (typeof v.text === "string") b.text = v.text.slice(0, 24);
+    if (typeof v.who === "string") b.who = v.who.slice(0, 60);
+    if (typeof v.color === "string" && /^#[0-9a-f]{6}$/i.test(v.color)) b.color = v.color;
+    if (typeof v.icon === "string" && /^[a-z0-9-]{1,32}$/.test(v.icon)) b.icon = v.icon;
+    if (PIN_SHAPES.has(v.shape)) b.shape = v.shape;
+    if (PIN_STYLES.has(v.style)) b.style = v.style;
+    out[k] = b;
+  }
+  return out;
+}
+
 /* a Terms version is the date it was published, 2026-10-23 */
 const cleanTermsVersion = (v) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
 
@@ -755,12 +777,41 @@ async function route(request, env, url, ctx) {
       ...(r.client_key ? { clientKey: r.client_key } : {}),
     });
 
+    /* the account's pinned profiles ride along, so every phone the account
+       is on draws the same badges on the same pass (POST /v1/me/pins) */
+    const pr = await env.DB.prepare("SELECT pins, pins_at FROM users WHERE id = ?").bind(user.id).first();
+    let pins = {};
+    try { pins = cleanPins(JSON.parse((pr && pr.pins) || "{}")); } catch { pins = {}; }
+
     return json({
       profiles: [
         ...(owned.results || []).map((r) => shape(r, "owner")),
         ...(joined.results || []).map((r) => shape(r, r.level)),
       ],
+      pins, pinsAt: (pr && pr.pins_at) || 0,
     });
+  }
+
+  /* ── THE ACCOUNT'S PINNED PROFILES ───────────────────────────────────
+     Written whole, with when they were edited (`at`, the phone's clock,
+     held to the server's so a phone set in the future cannot outrank every
+     edit after it). The later edit wins, as a profile's name does: one
+     that is older than what is stored is answered 200 with what is
+     stored, `stale`, and the phone takes that. The UPDATE names the
+     stamp it beat, so two phones saving at once cannot both win. */
+  if (p === "/v1/me/pins" && method === "POST") {
+    const body = await readJson(request).catch(() => ({}));
+    const at = Math.min(Number(body.at), Date.now());
+    if (!Number.isFinite(at) || at <= 0) return fail(400, "bad_request", "When were these changed?");
+    const pins = JSON.stringify(cleanPins(body.pins));
+    if (pins.length > 32_000) return fail(400, "bad_request", "That is more than any badge needs.");
+    const r = await env.DB.prepare("UPDATE users SET pins = ?, pins_at = ? WHERE id = ? AND COALESCE(pins_at, 0) < ?")
+      .bind(pins, at, user.id, at).run();
+    if (r.meta.changes) return json({ at });
+    const cur = await env.DB.prepare("SELECT pins, pins_at FROM users WHERE id = ?").bind(user.id).first();
+    let kept = {};
+    try { kept = cleanPins(JSON.parse((cur && cur.pins) || "{}")); } catch { kept = {}; }
+    return json({ stale: true, pins: kept, at: (cur && cur.pins_at) || 0 });
   }
 
   /* ── A TRAINER'S GLANCE ────────────────────────────────────────────────

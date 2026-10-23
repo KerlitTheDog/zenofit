@@ -278,6 +278,36 @@ check("a 26-profile reorder succeeds", s == 200 and r.get("ordered") == 26, (s, 
 s, lst = call("GET", "/v1/profiles", token=big)
 check("the stored order is the one asked for", ids(lst) == rev, ids(lst))
 
+print("\n== the account's pinned profiles ==")
+# They belong to the account, like its list: every phone it logs in on gets
+# the same badges, the later edit wins, and another account has its own.
+import time
+pa = account("pins")
+second = call("POST", "/v1/auth/login", body={"username": pa["name"], "key": derive(pa["name"], "correct horse battery")})[1]["token"]
+s, b = call("GET", "/v1/profiles", token=pa["token"])
+check("an account with nothing pinned lists none", s == 200 and b.get("pins") == {} and b.get("pinsAt") == 0, b)
+s, b = call("POST", "/v1/me/pins", token=pa["token"], body={"at": 1000, "pins": {
+    "P1": {"text": "BP", "who": "Brad", "color": "#5d8bcc", "icon": "heart", "shape": "square", "style": "outline", "evil": "<script>"},
+    "bad key!": {"text": "x"}, "P2": "not a badge"}})
+check("pins are saved", s == 200 and b.get("at") == 1000, (s, b))
+s, b = call("GET", "/v1/profiles", token=second)
+check("the account's other phone gets them, cleaned, with the list",
+      b.get("pinsAt") == 1000 and b.get("pins") == {"P1": {"text": "BP", "who": "Brad", "color": "#5d8bcc", "icon": "heart", "shape": "square", "style": "outline"}},
+      b.get("pins"))
+s, b = call("POST", "/v1/me/pins", token=second, body={"at": 500, "pins": {"P9": {"text": "old"}}})
+check("an older edit is not kept, and is told what is", s == 200 and b.get("stale") is True and "P1" in b.get("pins", {}) and b.get("at") == 1000, (s, b))
+s, b = call("POST", "/v1/me/pins", token=second, body={"at": 2000, "pins": {"P1": {"color": "javascript:alert(1)", "shape": "star"}}})
+s, b = call("GET", "/v1/profiles", token=pa["token"])
+check("a later one is, and what is not a colour or a shape is dropped", b.get("pinsAt") == 2000 and b.get("pins") == {"P1": {}}, b)
+s, b = call("POST", "/v1/me/pins", token=pa["token"], body={"at": 9e15, "pins": {}})
+s, b = call("GET", "/v1/profiles", token=pa["token"])
+check("a stamp from the future is held to the server's clock", 0 < b.get("pinsAt", 0) <= time.time() * 1000 + 60000, b.get("pinsAt"))
+s, b = call("POST", "/v1/me/pins", token=pa["token"], body={"pins": {}})
+check("a save with no time is refused", s == 400, (s, b))
+other = account("pinsother")
+s, b = call("GET", "/v1/profiles", token=other["token"])
+check("another account has its own, none", b.get("pins") == {}, b.get("pins"))
+
 print("\n%d passed, %d failed" % (len(PASS), len(FAIL)))
 if FAIL:
     print("FAILED:")

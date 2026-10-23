@@ -241,6 +241,11 @@
      version it accepted and whether it consents to health data */
   const me = () => call("GET", "/v1/me");
 
+  /* The account's pinned profiles, written whole with when they were edited
+     (`at`). Resolves {at}, or {stale, pins, at} when another phone's later
+     edit is what the account keeps. */
+  const setPins = (pins, at) => call("POST", "/v1/me/pins", { pins, at });
+
   /* {terms: version} accepts the Terms; {health: true} gives consent to
      health data, {health: false} withdraws it and deletes that data from
      every profile the account owns (docs/privacy.md) */
@@ -721,7 +726,7 @@
   window.ZenofitCloud = {
     API,
     ensureDevice, hasDevice,
-    deriveKey, register, signIn, signOut, signOutOthers, newRecoveryCodes, recover, me, consent, account, signedIn, nameAvailable, verifyPassword,
+    deriveKey, register, signIn, signOut, signOutOthers, newRecoveryCodes, recover, me, consent, setPins, account, signedIn, nameAvailable, verifyPassword,
     deleteAccount, forgetAccount,
     isStandalone, isIOS, pushBlockedReason,
     enablePush, refilePush, disablePush, pushEnabled, testPush, pushEndpoint, setPushPrefs, pushStatus,

@@ -428,6 +428,14 @@ function exFieldOf(ex, field) {
 /* a timer the app seeded keeps a key so "Rest 1:00" can speak Swedish;
    the moment the user renames it, the key is dropped and this returns theirs */
 const timerLabel = (t) => (t && t.key === "rest" ? `${T("timer.rest")} ${fmtClock(t.duration)}` : (t ? t.name : ""));
+/* A notification's title says whose rest it is when the profile has a
+   person's name ("Lika · Rest 1:30"): two people training side by side
+   each run a rest, and the lock screen has to say which one is over. Read
+   while the profile is still the one on screen. */
+const timerWho = (label) => {
+  const n = String(state.settings.name || "").trim().split(/\s+/)[0];
+  return n ? `${n} · ${label}` : label;
+};
 
 /* ─────────────────────────── FORMULA HELPERS ────────────────────────── */
 
@@ -2707,6 +2715,12 @@ function closeEverything() {
 
 function switchProfile(id) {
   if (id === profiles.active || !profiles.list.some((p) => p.id === id)) return;
+  /* Switched from inside a workout (a badge in its header): the other
+     profile opens ITS workout for the same day, picked up where it was
+     parked or a fresh one, so two people training together can log a set
+     each, back and forth, without either day going anywhere. Not from an
+     edit of a logged day or from a plan, which keep their own rules. */
+  const carry = ui.workoutSheet && !ui.workoutSheet.editing && !ui.workoutSheet.planning ? ui.workoutSheet.date : null;
   /* A day half-built when you switch away is PARKED, not merely hidden:
      closeWorksheet is the same back-out the window's own arrow does, so it
      is waiting at the top of the Log tab when you come back rather than
@@ -2721,6 +2735,11 @@ function switchProfile(id) {
   closeEverything();
   resetTransient();
   ui.tab = "home";
+  /* a profile you only read takes no workout */
+  if (carry && !syncReadOnly() && !syncLive(id)) {
+    ui.tab = "log"; ui.logSeg = "history";
+    ui.workoutSheet = sheetForDay(carry);
+  }
   applyTheme(state.settings.theme);
   render();
   /* a live profile has nothing on disk, so what loadState just handed back
@@ -2761,6 +2780,8 @@ function addProfile(name, opts) {
   const blank = opts && opts.forRemote
     ? { ...defaultState(), library: [], groups: [] }
     : defaultState();
+  /* whose training it is, asked when the profile is made */
+  if (opts && opts.who) blank.settings = { ...blank.settings, name: String(opts.who).trim().slice(0, 60) };
   try { localStorage.setItem(stateKeyFor(id), JSON.stringify(blank)); }
   catch (e) { console.error("profile create failed", e); alert(T("profiles.quota")); return null; }
   profiles.list = [...profiles.list, { id, name: (name || "").trim() }];
@@ -2846,8 +2867,10 @@ function profileStats() {
     if (p.id === profiles.active) d = state;
     else { try { d = JSON.parse(localStorage.getItem(stateKeyFor(p.id))); } catch { d = null; } }
     out[p.id] = d
-      ? { days: new Set((d.log || []).map((e) => e.date)).size, entries: (d.log || []).length }
-      : { days: 0, entries: 0 };
+      ? { days: new Set((d.log || []).map((e) => e.date)).size, entries: (d.log || []).length,
+          /* whose training it is, for the Profiles window and the badges */
+          who: String((d.settings && d.settings.name) || "").trim() }
+      : { days: 0, entries: 0, who: "" };
   }
   return out;
 }
@@ -6331,6 +6354,7 @@ const ui = {
   healthGate: null,     // {then, sex, busy, error} consent to health data, asked before the Body window or the sex question
   legal: null,          // {page, lang} the Privacy policy or the Terms, read inside the app (renderLegal)
   firstProfileName: "", // the name field on the no-profiles screen
+  firstProfileWho: "",  // ...and whose training it is, the person's name
   syncSheet: null,      // {localId, grants, code, copied} the share sheet
   joinSheet: null,      // {code, busy, error} redeeming somebody's code
   syncBusy: false,      // a pull or push is in flight
@@ -7094,6 +7118,8 @@ function render() {
      to draw, so there is no app to draw, only the screen that gets you one.
      See renderGate. */
   if (!accountOn() || !profiles.active) { renderGate(scrolls); return; }
+  /* a pinned badge's initials follow its person's name (PINNED PROFILES) */
+  pinWhoSync();
 
   const { settings, library, log, body, goals } = state;
   const unit = settings.units;
@@ -7120,8 +7146,8 @@ function render() {
   /* header (non-home tabs) */
   if (tab !== "home") {
     html += `<div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px;position:sticky;top:0;z-index:20;background:var(--bg);border-bottom:1px solid var(--border-soft)">
-      <img src="logoC.png" alt="${T("a11y.logo")}" width="30" height="30" style="width:30px;height:30px;object-fit:contain;border-radius:8px;display:block;flex-shrink:0">
-      <div class="pb-num" style="font-size:19px;font-weight:700;flex:1">${titles[tab]}</div>
+      ${pinStrip(30) || `<img src="logoC.png" alt="${T("a11y.logo")}" width="30" height="30" style="width:30px;height:30px;object-fit:contain;border-radius:8px;display:block;flex-shrink:0">`}
+      <div class="pb-num" style="font-size:19px;font-weight:700;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${titles[tab]}</div>
       ${rollingWeeks() ? "" : chip(T("common.wkShort", { n: currentWeek }), "var(--gold)")}
       ${refreshBtn(20, 4)}
       <button data-action="open-body" title="${T("a11y.bodyBtn")}" style="color:var(--muted);padding:4px">${icon("ruler", 20)}</button>
@@ -7608,7 +7634,8 @@ function renderNoProfiles() {
       : `<div class="pb-card" style="padding:16px;margin-bottom:14px">
           <div style="font-size:16px;font-weight:700;margin-bottom:6px">${T("noprof.title")}</div>
           <div style="font-size:12.5px;color:var(--muted);line-height:1.55;margin-bottom:14px">${T("noprof.body")}</div>
-          ${field(T("profiles.name"), `<input class="pb-input" data-bind="firstProfileName" value="${esc(ui.firstProfileName || "")}" placeholder="${esc(T("profiles.namePlaceholder"))}">`)}
+          ${field(T("profiles.who"), `<input class="pb-input" data-bind="firstProfileWho" value="${esc(ui.firstProfileWho || "")}" placeholder="${esc(T("profiles.whoPh"))}" maxlength="60">`, T("profiles.whoHint"))}
+          ${field(T("profiles.name"), `<input class="pb-input" data-bind="firstProfileName" value="${esc(ui.firstProfileName || "")}" placeholder="${esc((ui.firstProfileWho || "").trim() || T("profiles.namePlaceholder"))}">`)}
           <button data-action="first-profile-create" class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px">
             ${icon("plus", 16)} ${T("noprof.create")}
           </button>
@@ -7847,7 +7874,8 @@ function renderHome(settings, currentWeek, unit) {
   return `<div class="" style="padding:calc(18px + var(--pb-sat)) 16px 0">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
       <div style="display:flex;align-items:center;gap:11px;min-width:0">
-        <img src="logoC.png" alt="${T("a11y.logo")}" width="46" height="46" style="width:46px;height:46px;object-fit:contain;border-radius:11px;display:block;flex-shrink:0">
+        ${/* pinned profiles take the logo's place, the same spot on every tab */
+          pinStrip(34) || `<img src="logoC.png" alt="${T("a11y.logo")}" width="46" height="46" style="width:46px;height:46px;object-fit:contain;border-radius:11px;display:block;flex-shrink:0">`}
         <div class="pb-num" style="line-height:1.05;min-width:0">
           <div style="font-size:20px;font-weight:700;letter-spacing:.02em;color:var(--text)">ZENOFIT</div>
           <div style="font-size:12.5px;font-weight:600;letter-spacing:.32em;color:var(--gold)">${T("app.tagline")}</div>
@@ -10794,8 +10822,12 @@ async function chatSendThing(threadId, kind, ref) {
   let thing = null;
   try { thing = await chatBuildThing(kind, ref); } catch (e) { console.warn("could not build", kind, e); }
   if (!thing) { alert(T("chat.thingGone")); return null; }
+  /* whose training it came from, when the profile has a person's name: a
+     coach and the person they train trade cards from each other's
+     profiles, and "a squat" says nothing about whose */
+  const who = String(state.settings.name || "").trim().slice(0, 60);
   return chatPost(threadId, {
-    body: thing.body, kind, payload: thing.payload,
+    body: thing.body, kind, payload: who ? { ...thing.payload, who } : thing.payload,
     upload: thing.ups.length ? { ups: thing.ups } : null,
   });
 }
@@ -10885,7 +10917,7 @@ function chatThingCard(m) {
   const head = (thumb, title, sub) => `<div style="display:flex;gap:11px;align-items:center;padding:11px 12px 10px">
     ${thumb}
     <div style="flex:1;min-width:0">
-      <div style="font-size:9.5px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:${ink};margin-bottom:2px">${T("chat.kind." + m.kind)}</div>
+      <div style="font-size:9.5px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:${inkFor(ink)};margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${T("chat.kind." + m.kind)}${typeof p.who === "string" && p.who.trim() ? ` · ${esc(pStr(p.who.trim(), 40))}` : ""}</div>
       <div style="font-weight:700;font-size:14.5px;line-height:1.3;color:var(--text);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;word-break:break-word">${title}</div>
       ${sub ? `<div style="font-size:11.5px;color:var(--faint);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${sub}</div>` : ""}
     </div>
@@ -10906,7 +10938,7 @@ function chatThingCard(m) {
       : tile("dumbbell", color);
     const equip = snapField(snap, "equipment");
     const note = snapField(snap, "note");
-    return head(thumb, esc(snapLabel(snap)), `<span style="color:${color}">●</span> ${esc(snapGroupLabel(snap))}${equip ? " · " + esc(equip) : ""}`) +
+    return head(thumb, esc(snapLabel(snap)), `<span style="color:${inkFor(color)}">●</span> ${esc(snapGroupLabel(snap))}${equip ? " · " + esc(equip) : ""}`) +
       /* the clamp on an inner box: on the padded one, the third line shows
          through the padding under the second */
       (note ? `<div style="padding:0 12px 10px"><div style="font-size:12px;color:var(--muted);line-height:1.45;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">${esc(note)}</div></div>` : "") +
@@ -10974,7 +11006,7 @@ function chatThingCard(m) {
     return `<div style="display:flex;gap:11px;align-items:center;padding:11px 12px 8px">
         <span style="width:50px;height:50px;border-radius:12px;flex-shrink:0;display:flex;align-items:center;justify-content:center;background:var(--surface2);color:${color}">${icon("medal", 22)}</span>
         <div style="flex:1;min-width:0">
-          <div style="font-size:9.5px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:${ink};margin-bottom:2px">${T("chat.kind.rank")}</div>
+          <div style="font-size:9.5px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:${inkFor(ink)};margin-bottom:2px">${T("chat.kind.rank")}</div>
           <div class="pb-num" style="font-size:22px;font-weight:700;line-height:1.05;color:${color}">${lvl ? stdLevelLabel(lvl) : T("chat.rankUnder")}</div>
           <div style="font-size:11.5px;color:var(--faint);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(sEx ? stdName(sEx) : pStr(p.name, 80))}</div>
         </div>
@@ -13667,7 +13699,10 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
   return fullScreen(50, `
     <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px;border-bottom:1px solid var(--border-soft)">
       <button data-action="close-worksheet" title="${planning ? T("plan.closeKeep") : draft.editing ? T("wo.close") : T("wo.closeKeep")}" style="color:var(--muted);padding:4px">${icon("x", 21)}</button>
-      <div class="pb-num" style="font-size:19px;font-weight:700;flex:1">${planning ? (draft.planId ? T("plan.edit") : T("plan.new")) : draft.editing ? T("wo.edit") : T("wo.new")}</div>
+      ${/* switching from here carries the workout over (switchProfile);
+            not from an edit of a logged day or a plan */
+        planning || draft.editing ? "" : pinStrip(28)}
+      <div class="pb-num" style="font-size:19px;font-weight:700;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${planning ? (draft.planId ? T("plan.edit") : T("plan.new")) : draft.editing ? T("wo.edit") : T("wo.new")}</div>
       ${wk ? chip(T("common.week", { n: wk }), planning ? "var(--steel)" : "var(--gold)") : ""}
       ${draft.editing ? `<button data-action="delete-day" title="${T("wo.deleteDay")}" style="color:var(--red);padding:4px">${icon("trash-2", 19)}</button>` : ""}
       ${planning && draft.planId ? `<button data-action="plan-delete" data-id="${esc(draft.planId)}" title="${T("plan.deletePlan")}" style="color:var(--red);padding:4px">${icon("trash-2", 19)}</button>` : ""}
@@ -16928,7 +16963,7 @@ function notifyDone(t) {
   try {
     if (!window.Notification || Notification.permission !== "granted") return;
     if (document.visibilityState === "visible" && document.hasFocus()) return;
-    const title = timerLabel(t) || T("timers.listTitle");
+    const title = timerWho(timerLabel(t) || T("timers.listTitle"));
     const tag = timerTag(t);
     /* the push's own shape (see timer.js), because it is the same
        notification: whichever of the two gets there first is the one that
@@ -17260,9 +17295,10 @@ async function cloudTimerStart(t, secs) {
      it, a Pause or a Stop landing in between was taken for the run itself
      (both null), and the alarm stayed booked for a rest that was stopped. */
   const run = t.endsAt;
+  /* whose rest, read before the first await for the same reason */
+  const name = timerWho(timerLabel(t) || T("timers.listTitle"));
   try {
     if (C.pushBlockedReason() || !(await C.pushEnabled())) return;
-    const name = timerLabel(t) || T("timers.listTitle");
     /* `ref` is what the push is tagged with, so it is the same
        notification as notifyDone's and can be taken down the same way
        (see timerCloseNotifs) */
@@ -17896,10 +17932,115 @@ function renderProfile(f) {
    reason it is everywhere else in this app: a row is what you tap to
    SWITCH, and a grip handle living on one is a mis-tap into somebody else's
    training. */
+/* ── PINNED PROFILES: BADGES ACROSS THE TOP ───────────────────────────
+   Somebody training two people at once (their own profile and somebody
+   else's) switches back and forth all session, and that used to be
+   Settings, Profiles, a row and a confirm, every set. A profile pinned in
+   Settings → Profiles is a badge at the top of every tab and of the
+   workout window; one tap on it switches, and one tap on the badge of the
+   profile on screen opens its settings. How each badge looks is the
+   person's choice (letters or an icon, colour, round or square, filled or
+   outlined), because two profiles that both start with L are two Ls.
+   Kept per account on this phone (`zenofit:pins:<userId>`), like which
+   profile is on screen: it is how this phone is set up, not training.
+   `who` is the profile's person (its settings.name) as last seen here, so
+   a badge shows the right initials for a profile that is not open. */
+const pinKey = () => "zenofit:pins:" + (profiles.userId || "");
+function pinsRead() {
+  try { const p = JSON.parse(localStorage.getItem(pinKey()) || "{}"); return p && typeof p === "object" && !Array.isArray(p) ? p : {}; }
+  catch { return {}; }
+}
+function pinSet(id, change) {
+  const all = pinsRead();
+  if (change === null) delete all[id]; else all[id] = { ...(all[id] || {}), ...change };
+  try { localStorage.setItem(pinKey(), JSON.stringify(all)); } catch { /* this session only */ }
+}
+const BADGE_ICONS = ["user", "heart", "star", "flame", "bolt", "crown", "leaf", "paw", "moon", "sun", "dumbbell", "trophy", "target", "medal", "run", "mood-smile"];
+/* what a person reads as one character: an emoji or a flag is one, not two */
+const graphemes = (s) => (typeof Intl !== "undefined" && Intl.Segmenter
+  ? [...new Intl.Segmenter().segment(String(s))].map((g) => g.segment) : [...String(s)]);
+const badgeInitials = (s) => {
+  const w = String(s || "").trim().split(/\s+/).filter(Boolean);
+  if (!w.length) return "?";
+  return (graphemes(w[0])[0] + (w.length > 1 ? graphemes(w[1])[0] : "")).toUpperCase();
+};
+function badgeLook(p, i, pin) {
+  const pi = pin || {};
+  let h = 0;
+  for (const c of String(p.id)) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return {
+    text: graphemes(String(pi.text || "").trim()).slice(0, 3).join("") || badgeInitials(pi.who || profileLabel(p, i)),
+    color: GROUP_SWATCHES.includes(pi.color) ? pi.color : GROUP_SWATCHES[h % GROUP_SWATCHES.length],
+    icon: BADGE_ICONS.includes(pi.icon) ? pi.icon : "",
+    shape: pi.shape === "square" ? "square" : "circle",
+    style: pi.style === "outline" ? "outline" : "solid",
+  };
+}
+/* black or white on a filled badge, whichever reads on that colour */
+const badgeInk = (hex) => (picLum(hex) > 0.179 ? "#16171a" : "#ffffff");
+function badgeHTML(look, size, on) {
+  const n = graphemes(look.text).length;
+  const fs = Math.round(size * (n > 2 ? 0.34 : n > 1 ? 0.4 : 0.48));
+  const solid = look.style === "solid";
+  return `<span aria-hidden="true" style="width:${size}px;height:${size}px;border-radius:${look.shape === "square" ? Math.round(size * 0.28) : size / 2}px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;font-weight:700;font-size:${fs}px;line-height:1;background:${solid ? look.color : "transparent"};color:${solid ? badgeInk(look.color) : inkFor(look.color)};border:2px solid ${look.color};${on ? "box-shadow:0 0 0 2px var(--bg),0 0 0 4px var(--gold);" : ""}">${look.icon ? icon(look.icon, Math.round(size * 0.54)) : esc(look.text)}</span>`;
+}
+/* The strip: every pinned profile, in the profile list's own order. */
+function pinStrip(size) {
+  const pins = pinsRead();
+  const rows = profileList().map((p, i) => ({ p, i })).filter((x) => pins[x.p.id]);
+  if (!rows.length) return "";
+  const active = activeProfileId();
+  return `<div style="display:flex;align-items:center;gap:8px;padding:4px;margin:-4px;overflow-x:auto;scrollbar-width:none;min-width:0;flex-shrink:1">${rows.map(({ p, i }) => {
+    const on = p.id === active;
+    const name = pins[p.id].who || profileLabel(p, i);
+    return `<button data-action="pin-switch" data-id="${esc(p.id)}" aria-label="${esc(T(on ? "badge.onScreen" : "badge.switchTo", { name }))}"${on ? ' aria-current="true"' : ""} style="display:flex;padding:0;flex-shrink:0">${badgeHTML(badgeLook(p, i, pins[p.id]), size, on)}</button>`;
+  }).join("")}</div>`;
+}
+/* the profile on screen keeps its own badge's initials up to date */
+function pinWhoSync() {
+  const id = activeProfileId();
+  if (!id) return;
+  const pin = pinsRead()[id];
+  const who = String(state.settings.name || "").trim();
+  if (pin && (pin.who || "") !== who) pinSet(id, { who });
+}
+/* Pinning, and how the badge looks, in the profile's own sheet. */
+function badgeSection(id) {
+  const list = profileList();
+  const i = list.findIndex((p) => p.id === id);
+  if (i < 0) return "";
+  const pin = pinsRead()[id];
+  const head = `<div class="pb-hairline" style="margin:16px 0"></div>${sectionTitle(T("badge.title"))}`;
+  if (!pin) return `${head}
+    <button data-action="profile-pin" data-id="${esc(id)}" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:13.5px;color:var(--gold)">${icon("pin", 15)} ${T("badge.pin")}</button>
+    <div style="font-size:11.5px;color:var(--faint);margin-top:8px;line-height:1.55">${T("badge.pinHint")}</div>`;
+  const look = badgeLook(list[i], i, pin);
+  const opt = (on) => `border:1px solid ${on ? "var(--gold)" : "var(--border)"};background:${on ? "rgba(233,185,73,.14)" : "var(--surface2)"};color:${on ? "var(--gold)" : "var(--muted)"}`;
+  return `${head}
+    <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px">
+      <span data-badge-preview style="display:flex">${badgeHTML(look, 52, false)}</span>
+      <div style="font-size:12px;color:var(--muted);line-height:1.5">${T("badge.pinHint")}</div>
+    </div>
+    ${field(T("badge.text"), `<input class="pb-input" data-bind="badgeText" value="${esc(pin.text || "")}" placeholder="${esc(badgeInitials(pin.who || profileLabel(list[i], i)))}" maxlength="12" autocomplete="off" autocorrect="off" spellcheck="false">`, T("badge.textHint"))}
+    <div class="pb-label" style="margin-bottom:8px">${T("badge.color")}</div>
+    <div style="display:flex;flex-wrap:wrap;gap:9px;margin-bottom:16px">${GROUP_SWATCHES.map((c, n) => `<button data-action="badge-color" data-c="${c}" aria-label="${esc(T("badge.colorN", { n: n + 1 }))}" aria-pressed="${look.color === c}" style="width:32px;height:32px;border-radius:16px;background:${c};${look.color === c ? "box-shadow:0 0 0 2px var(--surface),0 0 0 4px var(--text)" : ""}"></button>`).join("")}</div>
+    <div class="pb-label" style="margin-bottom:8px">${T("badge.icon")}</div>
+    <div style="display:flex;flex-wrap:wrap;gap:7px;margin-bottom:16px">
+      <button data-action="badge-icon" data-i="" aria-pressed="${!look.icon}" class="pb-btn" style="height:38px;padding:0 12px;border-radius:10px;font-size:13px;${opt(!look.icon)}">${T("badge.letters")}</button>
+      ${BADGE_ICONS.map((ic) => `<button data-action="badge-icon" data-i="${ic}" aria-label="${esc(T("badge.iconN", { n: BADGE_ICONS.indexOf(ic) + 1 }))}" aria-pressed="${look.icon === ic}" style="width:38px;height:38px;border-radius:10px;display:flex;align-items:center;justify-content:center;${opt(look.icon === ic)}">${icon(ic, 19)}</button>`).join("")}
+    </div>
+    <div class="pb-label" style="margin-bottom:8px">${T("badge.shape")}</div>
+    ${segControl("badge-shape", look.shape, [["circle", T("badge.circle")], ["square", T("badge.square")]])}
+    <div class="pb-label" style="margin-bottom:8px">${T("badge.style")}</div>
+    ${segControl("badge-style", look.style, [["solid", T("badge.solid")], ["outline", T("badge.outline")]])}
+    <button data-action="profile-pin" data-id="${esc(id)}" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:13.5px">${icon("pin-off", 15)} ${T("badge.unpin")}</button>`;
+}
+
 function renderProfilesWindow() {
   const list = profileList();
   const stats = ui.profileStats || {};
   const active = activeProfileId();
+  const pins = pinsRead();
 
   /* ── YOURS, THEN SHARED WITH YOU, AND NOTHING ELSE ─────────────────
      This is the account's list and only the account's list: every profile
@@ -17909,22 +18050,33 @@ function renderProfilesWindow() {
      profile, and read as a list of things that had gone wrong. The only
      fact a row still states is whose training it is, by putting the ones
      somebody shared with you under their own heading, each naming who. */
+  /* A row names the PERSON first when the profile has one (its
+     settings.name, "Lika"), the profile's own label under it
+     ("Likatusichka (copy)"): you switch to somebody, not to a file. One
+     tap switches; there is no "are you sure", because switching loses
+     nothing (switchProfile parks an open day and brings it back). */
   const row = (p, i, last) => {
     const on = p.id === active;
-    const st = stats[p.id] || { days: 0, entries: 0 };
+    const st = stats[p.id] || { days: 0, entries: 0, who: "" };
     const shared = profileShared(p.id);
+    const label = profileLabel(p, i);
+    const who = (on ? String(state.settings.name || "") : st.who || "").trim();
+    const pinned = !!pins[p.id];
     return `<div style="display:flex;align-items:center;border-bottom:${last ? "none" : "1px solid var(--border-soft)"};background:${on ? "rgba(233,185,73,.06)" : "transparent"}">
       <button ${on ? "" : `data-action="profile-switch" data-id="${esc(p.id)}"`} style="flex:1;min-width:0;display:flex;align-items:center;gap:11px;padding:13px 4px 13px 14px;text-align:left;color:var(--text)">
-        <span style="width:9px;height:9px;border-radius:5px;flex-shrink:0;background:${on ? "var(--gold)" : "var(--border)"}"></span>
+        ${pinned ? badgeHTML(badgeLook(p, i, pins[p.id]), 26, false)
+          : `<span style="width:9px;height:9px;border-radius:5px;flex-shrink:0;background:${on ? "var(--gold)" : "var(--border)"}"></span>`}
         <span style="flex:1;min-width:0">
-          <span style="display:block;min-width:0;font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(profileLabel(p, i))}</span>
+          <span style="display:block;min-width:0;font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(who || label)}</span>
+          ${who && who !== label ? `<span style="display:block;min-width:0;font-size:12px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(label)}</span>` : ""}
           ${/* a live profile is not on this phone, so there is nothing here to
                 count; the line under it says when it was last trained instead */
             syncLive(p.id) && !on ? "" : `<span style="display:block;font-size:11.5px;color:var(--faint)">${on ? T("profiles.current") + " · " : ""}${TN("day", st.days)} · ${TN("logEntry", st.entries)}</span>`}
           ${shared ? `<span style="display:block;font-size:11px;margin-top:1px;color:var(--steel)">${profileShareLine(p.id)}</span>${sharedActivityLine(p.id)}` : ""}
         </span>
       </button>
-      <button data-action="profile-menu" data-id="${esc(p.id)}" title="${T("common.edit")}" style="flex-shrink:0;padding:13px 14px;color:var(--faint);align-self:stretch">${icon("pencil", 16)}</button>
+      <button data-action="profile-pin" data-id="${esc(p.id)}" title="${T(pinned ? "badge.unpin" : "badge.pin")}" aria-label="${T(pinned ? "badge.unpin" : "badge.pin")}" aria-pressed="${pinned}" style="flex-shrink:0;padding:13px 6px 13px 8px;color:${pinned ? "var(--gold)" : "var(--faint)"};align-self:stretch">${icon(pinned ? "pin-off" : "pin", 16)}</button>
+      <button data-action="profile-menu" data-id="${esc(p.id)}" title="${T("common.edit")}" style="flex-shrink:0;padding:13px 14px 13px 8px;color:var(--faint);align-self:stretch">${icon("pencil", 16)}</button>
     </div>`;
   };
 
@@ -17967,13 +18119,21 @@ function renderProfileForm() {
   const f = ui.profileForm;
   const ok = f.mode !== "rename" || !!(f.name || "").trim();
   const shared = f.mode === "rename" && profileShared(f.id);
+  /* A new profile asks whose training it is first: that is its person's
+     name (settings.name: the greeting, rest timers, what is sent from it),
+     and the profile's label follows it unless one is typed. */
+  const adding = f.mode === "add";
   return sheet(T("profiles." + f.mode + "Title"), "profileForm", `
     ${shared ? `<div style="font-size:12px;color:var(--steel);line-height:1.5;margin:-4px 0 12px">${profileShareLine(f.id)}</div>` : ""}
-    ${field(T("profiles.name"), `<input class="pb-input" data-bind="profileName" value="${esc(f.name)}" placeholder="${esc(T("profiles.namePlaceholder"))}" data-autofocus>`,
+    ${adding ? field(T("profiles.who"), `<input class="pb-input" data-bind="profileWho" value="${esc(f.who || "")}" placeholder="${esc(T("profiles.whoPh"))}" maxlength="60" data-autofocus>`,
+      T("profiles.whoHint")) : ""}
+    ${field(T("profiles.name"), `<input class="pb-input" data-bind="profileName" value="${esc(f.name)}" placeholder="${esc((adding && (f.who || "").trim()) || T("profiles.namePlaceholder"))}"${adding ? "" : " data-autofocus"}>`,
       T("profiles.nameHint"))}
     <button data-action="profile-form-save" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
       ${icon("check", 16)} ${T(f.mode === "rename" ? "common.saveChanges" : "profiles." + f.mode + "Btn")}
     </button>
+    ${/* the badge before Sharing, Duplicate and Delete: the destructive one stays last */
+      f.mode === "rename" ? badgeSection(f.id) + `<div class="pb-hairline" style="margin:16px 0 8px"></div>` : ""}
     ${f.mode === "rename" ? `<button data-action="open-sync" data-id="${esc(f.id)}" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;margin-top:8px;font-size:13.5px;justify-content:flex-start;padding-left:14px;gap:9px">
       ${icon("users", 15, 'style="color:var(--gold)"')} ${T("share.entry")}
       <span style="flex:1"></span>
@@ -19560,9 +19720,30 @@ const actions = {
     const list = profileList();
     const i = list.findIndex((p) => p.id === id);
     if (i < 0) return;
-    if (!confirm(T("profiles.confirmSwitch", { name: profileLabel(list[i], i) }))) return;
     switchProfile(id);
   },
+  /* a badge across the top: another profile is one tap; the one on screen
+     opens its own settings, badge included (not over a workout, which a
+     switch is for) */
+  "pin-switch": (el) => {
+    const id = el.dataset.id;
+    if (id !== profiles.active) { switchProfile(id); return; }
+    const list = profileList();
+    const i = list.findIndex((p) => p.id === id);
+    if (i < 0 || ui.workoutSheet) return;
+    ui.profileForm = { id, name: list[i].name || "", mode: "rename" };
+    render();
+  },
+  "profile-pin": (el) => {
+    const id = el.dataset.id;
+    if (pinsRead()[id]) pinSet(id, null);
+    else pinSet(id, { who: id === profiles.active ? String(state.settings.name || "").trim() : ((ui.profileStats || profileStats())[id] || {}).who || "" });
+    render();
+  },
+  "badge-color": (el) => { if (ui.profileForm) { pinSet(ui.profileForm.id, { color: el.dataset.c }); render(); } },
+  "badge-icon": (el) => { if (ui.profileForm) { pinSet(ui.profileForm.id, { icon: el.dataset.i || "" }); render(); } },
+  "badge-shape": (el) => { if (ui.profileForm) { pinSet(ui.profileForm.id, { shape: el.dataset.id }); render(); } },
+  "badge-style": (el) => { if (ui.profileForm) { pinSet(ui.profileForm.id, { style: el.dataset.id }); render(); } },
   "profile-add": () => { ui.profileForm = { id: null, name: "", mode: "add" }; render(); },
   "profile-menu": (el) => {
     const list = profileList();
@@ -19576,7 +19757,8 @@ const actions = {
     if (!f) return;
     const name = (f.name || "").trim();
     if (f.mode === "add") {
-      const id = addProfile(name);
+      const who = (f.who || "").trim();
+      const id = addProfile(name || who, { who });
       ui.profileForm = null;
       if (id) {
         syncSet(id, { nameAt: Date.now() });
@@ -19980,9 +20162,10 @@ const actions = {
   /* The no-profiles screen's one field. Made, opened, and sent up to the
      account straight away, like a profile made from the Profiles screen. */
   "first-profile-create": () => {
-    const id = addProfile((ui.firstProfileName || "").trim());
+    const who = (ui.firstProfileWho || "").trim();
+    const id = addProfile((ui.firstProfileName || "").trim() || who, { who });
     if (!id) { render(); return; }
-    ui.firstProfileName = "";
+    ui.firstProfileName = ""; ui.firstProfileWho = "";
     syncSet(id, { nameAt: Date.now() });
     landOnFirstProfile();
     render();
@@ -22327,6 +22510,7 @@ const READ_OK = new Set([
      training's on screen */
   "login-agree", "terms-agree", "terms-accept", "terms-signout", "health-agree", "health-withdraw",
   "legal-open", "legal-lang", "legal-close",
+  "pin-switch", "profile-pin", "badge-color", "badge-icon", "badge-shape", "badge-style",
   /* the account is not the training on screen, and a read-only profile
      being open must not stand between somebody and deleting their account */
   "acct-delete-open", "acct-delete-go",
@@ -22661,6 +22845,10 @@ function handleBind(el) {
     updateDeleteForm();
   } else if (bind === "firstProfileName") {
     ui.firstProfileName = v;
+  } else if (bind === "firstProfileWho") {
+    ui.firstProfileWho = v;
+    const lab = document.querySelector('[data-bind="firstProfileName"]');
+    if (lab) lab.placeholder = v.trim() || T("profiles.namePlaceholder");
   } else if (bind === "joinCode") {
     /* ── TYPING A CODE SOMEBODY READ OUT TO YOU ────────────────────────
        The seed is printed XXXX-XXXX-XX and it is usually being copied off
@@ -22754,6 +22942,20 @@ function handleBind(el) {
       ui.exWinDraft = withKind({ ...ui.exWinDraft, muscle: v }, ui.exWinDraft.kind);
       render();
     }
+  } else if (bind === "profileWho") {
+    if (!ui.profileForm) return;
+    ui.profileForm.who = v;
+    /* the label follows the person until one is typed */
+    const lab = document.querySelector('[data-bind="profileName"]');
+    if (lab) lab.placeholder = v.trim() || T("profiles.namePlaceholder");
+  } else if (bind === "badgeText") {
+    if (!ui.profileForm) return;
+    const id = ui.profileForm.id;
+    pinSet(id, { text: graphemes(v.trim()).slice(0, 3).join("") });
+    const list = profileList();
+    const i = list.findIndex((p) => p.id === id);
+    const prev = document.querySelector("[data-badge-preview]");
+    if (prev && i >= 0) prev.innerHTML = badgeHTML(badgeLook(list[i], i, pinsRead()[id]), 52, false);
   } else if (bind === "profileName") {
     ui.profileForm.name = v;
     const btn = document.querySelector('[data-action="profile-form-save"]');

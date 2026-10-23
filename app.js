@@ -19738,10 +19738,9 @@ const actions = {
     ui.termsGate = null;
     render();
   },
-  "terms-signout": () => {
-    ui.termsGate = null;
-    actions["acct-signout"]();
-  },
+  /* The sheet stays until the logout has really happened (leaveAccount
+     clears it): cancelling the "Log out?" confirm must not be a way past it. */
+  "terms-signout": () => actions["acct-signout"](),
   "health-agree": async () => {
     const f = ui.healthGate;
     const C = window.ZenofitCloud;
@@ -19774,6 +19773,10 @@ const actions = {
     healthOk = false;
     healthRemember(me.userId, false);
     ui.showBody = false; ui.bodyForm = null;
+    /* the Standards form keeps its own copy of the answer, and its verdict
+       was worked out from it */
+    if (ui.std) ui.std.sex = "";
+    ui.stdResult = null;
     if (!profileShared(profiles.active)) patch({ body: [], settings: { ...state.settings, sex: "" } });
     else render();
     alert(T("health.withdrawn"));

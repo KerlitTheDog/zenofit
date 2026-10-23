@@ -7003,10 +7003,17 @@ function backTarget() {
   return ui.tab !== "home" ? "home" : null;
 }
 
+/* Never pushes while its own back() is still on the way (`backIgnore`):
+   history.back() lands later, so a handler that renders an empty screen
+   and then opens a window in the same tick used to push a new guard
+   before the old one was left, the late back() then took the new one
+   away, and `backGuard` went on claiming an entry that was not there.
+   The next close stepped out of the app. The popstate that answers the
+   back() calls this again, and the guard goes in then. */
 function backSync() {
   const want = !!backTarget();
   try {
-    if (want && !backGuard) { history.pushState({ zfBack: 1 }, ""); backGuard = true; }
+    if (want && !backGuard && !backIgnore) { history.pushState({ zfBack: 1 }, ""); backGuard = true; }
     else if (!want && backGuard) { backGuard = false; backIgnore = true; history.back(); }
   } catch { backIgnore = false; /* no history to work with: back stays the browser's */ }
 }

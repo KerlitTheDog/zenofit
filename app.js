@@ -2692,7 +2692,7 @@ function closeEverything() {
      switch would point them at somebody else's */
   ui.syncSheet = null; ui.joinSheet = null; ui.syncError = null; ui.accountSheet = null; ui.deleteAcct = null;
   /* another account's codes must never be left on screen for the next one */
-  ui.recoveryShow = null; ui.recoveryForm = null; ui.recoveryLeft = null;
+  ui.recoveryShow = null; ui.recoveryForm = null; ui.recoveryLeft = null; ui.healthGate = null;
   /* a password given to Storage check opens that screen for that visit
      and not for whatever comes after it */
   ui.showStorage = false; ui.storUnlock = null; ui.storUnlocked = new Set();
@@ -4638,6 +4638,7 @@ async function enterAccount() {
   ui.rosterLoading = false;
   if (!syncLive(activeProfileId())) syncQuiet();
   render();
+  consentCheck();
 }
 
 /* ── WHAT HAS NOT REACHED THE ACCOUNT YET ─────────────────────────────
@@ -4711,6 +4712,8 @@ function leaveAccount(revoked) {
   ui.tab = "home";
   ui.rosterLoading = false;
   ui.syncError = null;
+  /* the Terms and the consent are the account's, asked again of the next */
+  ui.termsGate = null; healthOk = null;
   ui.login = revoked ? { ...freshLogin(), notice: T("login.signedOut") } : freshLogin();
   render();
 }
@@ -4791,6 +4794,7 @@ function accountErased(userId, how) {
   ui.syncError = null;
   ui.signingOut = false;
   ui.timerToast = null;
+  ui.termsGate = null; healthOk = null; healthRemember(userId, false);
   ui.login = { ...freshLogin(), notice: T(how === "here" ? "delacct.doneHere" : "delacct.doneElsewhere") };
   render();
   return true;
@@ -6323,6 +6327,8 @@ const ui = {
   recoveryShow: null,   // {codes, copied} recovery codes on screen, the one time they are shown
   recoveryForm: null,   // {password, busy, error} the password asked before new codes are made
   recoveryLeft: null,   // how many unused codes the account has, from GET /v1/me (null: not known yet)
+  termsGate: null,      // {agree, busy, error} the Terms sheet an account that never accepted them gets
+  healthGate: null,     // {then, sex, busy, error} consent to health data, asked before the Body window or the sex question
   firstProfileName: "", // the name field on the no-profiles screen
   syncSheet: null,      // {localId, grants, code, copied} the share sheet
   joinSheet: null,      // {code, busy, error} redeeming somebody's code
@@ -7218,6 +7224,8 @@ function render() {
   if (ui.deleteAcct) html += renderDeleteAccount();
   if (ui.recoveryForm) html += renderRecoveryForm();
   if (ui.recoveryShow) html += renderRecoveryCodes();
+  if (ui.healthGate) html += renderHealthGate();
+  if (ui.termsGate) html += renderTermsGate();
   if (ui.syncSheet) html += renderSyncSheet();
   if (ui.joinSheet) html += renderJoinSheet();
   if (ui.showBody) html += renderBodyWindow(body, unit);
@@ -7448,6 +7456,7 @@ function renderGate(scrolls) {
     if (ui.deleteAcct) html += renderDeleteAccount();
     /* a new account lands here, with its codes on top */
     if (ui.recoveryShow) html += renderRecoveryCodes();
+    if (ui.termsGate) html += renderTermsGate();
   }
   html += `</div></div>`;
   app.innerHTML = html;
@@ -7533,7 +7542,8 @@ function renderLoginGate() {
     </div>
     <div id="loginConfirm" class="pb-card2" style="display:${f.confirmCreate ? "block" : "none"};padding:14px">
       <div style="font-size:13.5px;line-height:1.55;margin-bottom:12px">${T("login.noAccount", { name: `<b>${esc(name)}</b>` })}</div>
-      <button type="button" data-action="login-create" ${f.busy ? "disabled" : ""} class="pb-btn pb-gold" style="width:100%;padding:12px 0;font-size:14.5px;opacity:${f.busy ? 0.45 : 1}">
+      ${agreeBox("login-agree", f.agree)}
+      <button type="button" data-action="login-create" ${f.busy || !f.agree ? "disabled" : ""} class="pb-btn pb-gold" style="width:100%;padding:12px 0;font-size:14.5px;opacity:${f.busy || !f.agree ? 0.45 : 1}">
         ${icon("user-plus", 16)} ${T(f.busy ? "acct.working" : "login.create")}
       </button>
       <button type="button" data-action="login-cancel" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;font-size:13.5px;margin-top:8px">${T("login.cancel")}</button>
@@ -16336,6 +16346,11 @@ function renderBodyWindow(body, unit) {
     </div>
     <div class="pb-scroll" data-scrollkey="bodywin" style="flex:1;overflow-y:auto;padding-bottom:calc(30px + var(--pb-sab))">
       ${renderBody(body, unit)}
+      ${/* the consent given to open this window, taken back here */
+        healthOk && !profileShared(profiles.active) ? `<div style="padding:6px 16px 0">
+        <button data-action="health-withdraw" class="pb-btn" style="width:100%;padding:11px 0;font-size:13px;background:transparent;color:var(--red);border:1px solid transparent">${icon("trash-2", 14)} ${T("health.withdraw")}</button>
+        <div style="font-size:11.5px;color:var(--faint);line-height:1.55;text-align:center">${T("health.withdrawHint")}</div>
+      </div>` : ""}
     </div>
   `, "bodyWin");
 }
@@ -17846,6 +17861,9 @@ function renderProfile(f) {
       <div style="font-size:11.5px;color:var(--faint);margin-top:10px;line-height:1.5">
         ${T("profile.dataHint")}
       </div>
+      <div style="font-size:12.5px;color:var(--faint);margin-top:20px;line-height:1.6;text-align:center">
+        ${legalLink("privacy", "terms.privacy")} · ${legalLink("terms", "terms.terms")}
+      </div>
     </div>
   `, "profile");
 }
@@ -18211,6 +18229,96 @@ function recoveryCount() {
     ui.recoveryLeft = r && typeof r.recoveryLeft === "number" ? r.recoveryLeft : null;
     if (ui.accountSheet && !ui.recoveryForm && !ui.deleteAcct) render();
   }, () => { /* no signal: the sheet says what codes are for instead */ });
+}
+
+/* ── TERMS, AGE, AND CONSENT TO HEALTH DATA ───────────────────────────
+   docs/privacy.md. The Terms of use and the Privacy policy are two static
+   pages beside the app (terms.html, privacy.html, all three languages in
+   each). Signing up confirms 13 or older and accepts them, and an account
+   that never did (made before they existed, or before a new version) gets
+   a sheet it cannot close on its next launch. Body measurements and the
+   sex setting are data concerning health (GDPR article 9), so the
+   account's explicit consent comes before the Body window or the sex
+   question first opens on a profile of its own; withdrawing it, inside the
+   Body window, deletes that data from every profile the account owns.
+   Recorded on the server (POST /v1/me/consent), so it can be shown who
+   agreed and when, and remembered here, so a phone with no signal does not
+   ask again. */
+const TERMS_VERSION = "2026-10-23";
+const CONSENT_KEY = "zenofit:health";   // { [userId]: true }
+let healthOk = null;                     // the signed-in account's answer: true, false, null (not asked yet)
+
+function healthRemember(userId, on) {
+  try {
+    const all = JSON.parse(localStorage.getItem(CONSENT_KEY) || "{}") || {};
+    if (on) all[userId] = true; else delete all[userId];
+    localStorage.setItem(CONSENT_KEY, JSON.stringify(all));
+  } catch { /* remembered for this session only */ }
+}
+function healthKnown(userId) {
+  try { return !!(JSON.parse(localStorage.getItem(CONSENT_KEY) || "{}") || {})[userId]; } catch { return false; }
+}
+
+/* Asked once per launch and per login. */
+function consentCheck() {
+  const C = window.ZenofitCloud;
+  const me = signedInAs();
+  if (!C || !C.me || !me) return;
+  healthOk = healthKnown(me.userId);
+  C.me().then((r) => {
+    const now = signedInAs();
+    if (!r || !now || now.userId !== me.userId) return;
+    healthOk = !!r.healthConsent;
+    healthRemember(me.userId, healthOk);
+    if (r.termsVersion !== TERMS_VERSION && !ui.termsGate) {
+      ui.termsGate = { agree: false, busy: false, error: null };
+      if (!syncTyping()) render();
+    }
+  }, () => { /* no signal: asked again at the next launch */ });
+}
+
+/* Is this profile's health data the signed-in account's to consent to?
+   Somebody else's shared profile is theirs, consented on their account. */
+const healthGated = () => !healthOk && !profileShared(profiles.active);
+
+const legalLink = (page, key) =>
+  `<a href="${page}.html#${resolveLang(state.settings.lang)}" target="_blank" rel="noopener" style="color:var(--gold);text-decoration:underline">${T(key)}</a>`;
+
+/* "I am 13 or older and accept…", as a checkbox the links can sit beside
+   (a link inside the button would be a control inside a control) */
+const agreeBox = (action, on) => `<div style="display:flex;gap:10px;align-items:flex-start;margin:2px 0 12px">
+    <button type="button" data-action="${action}" role="checkbox" aria-checked="${!!on}" aria-label="${esc(T("terms.agreeShort"))}" style="flex-shrink:0;display:flex;padding:1px;color:${on ? "var(--gold)" : "var(--muted)"}">${icon(on ? "square-check-big" : "square", 22)}</button>
+    <span style="font-size:12.5px;line-height:1.55;color:var(--muted)">${T("terms.agree", { terms: legalLink("terms", "terms.terms"), privacy: legalLink("privacy", "terms.privacy") })}</span>
+  </div>`;
+
+/* No X and no backdrop to tap: the app goes on once they are accepted,
+   and the other way out is logging out. */
+function renderTermsGate() {
+  const f = ui.termsGate;
+  const ok = f.agree && !f.busy;
+  return `<div data-overlay="termsGate" data-layer="sheet" style="position:absolute;inset:0;z-index:200;display:flex;flex-direction:column;justify-content:flex-end;background:rgba(0,0,0,.6)">
+    <div class="pb-sheet-card pb-scroll" style="background:var(--surface);border-top:1px solid var(--border);border-radius:18px 18px 0 0;padding:18px 18px calc(26px + var(--pb-sab));max-height:calc(88% - var(--pb-sat));overflow-y:auto">
+      <div class="pb-num" style="font-size:18.5px;font-weight:700;margin-bottom:10px">${T("terms.gateTitle")}</div>
+      <div style="font-size:13px;color:var(--muted);line-height:1.6;margin-bottom:14px">${T("terms.gateBody")}</div>
+      ${agreeBox("terms-agree", f.agree)}
+      ${f.error ? `<div style="font-size:12.5px;color:var(--red);margin:-4px 0 12px;line-height:1.5">${esc(f.error)}</div>` : ""}
+      <button data-action="terms-accept" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">${T(f.busy ? "acct.working" : "terms.continue")}</button>
+      <button data-action="terms-signout" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;font-size:13.5px;margin-top:8px">${icon("log-out", 15)} ${T("acct.signOut")}</button>
+    </div>
+  </div>`;
+}
+
+/* Asked before the first body measurement or the sex question. "Not now"
+   is the sheet's own X and backdrop: nothing is stored without a yes. */
+function renderHealthGate() {
+  const f = ui.healthGate;
+  return sheet(T("health.title"), "healthGate", `
+    <div style="font-size:13px;color:var(--muted);line-height:1.6;margin-bottom:10px">${T("health.body")}</div>
+    <div style="font-size:12.5px;color:var(--muted);line-height:1.6;margin-bottom:16px">${T("health.more", { privacy: legalLink("privacy", "terms.privacy") })}</div>
+    ${f.error ? `<div style="font-size:12.5px;color:var(--red);margin:-4px 0 12px;line-height:1.5">${esc(f.error)}</div>` : ""}
+    <button data-action="health-agree" ${f.busy ? "disabled" : ""} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${f.busy ? 0.45 : 1}">${T(f.busy ? "acct.working" : "health.agree")}</button>
+    <button data-action="overlay-close" data-target="healthGate" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;font-size:13.5px;margin-top:8px">${T("health.later")}</button>
+  `, 140);
 }
 
 /* The other end of the same code. A joined profile is a NEW local profile,
@@ -19571,14 +19679,14 @@ const actions = {
   "login-create": async () => {
     const f = ui.login;
     const C = window.ZenofitCloud;
-    if (!f || !C || f.busy) return;
+    if (!f || !C || f.busy || !f.agree) return;
     if ((f.password || "").length < 8) {
       ui.login = { ...f, error: T("login.pwShort") }; updateLoginForm(); return;
     }
     ui.login = { ...f, busy: true, error: null }; render();
     let res;
     try {
-      res = await C.register(f.username.trim(), f.password);
+      res = await C.register(f.username.trim(), f.password, TERMS_VERSION);
     } catch (e) {
       const code = e && e.code;
       ui.login = { ...ui.login, busy: false, confirmCreate: code !== "name_taken" && code !== "bad_username",
@@ -19599,6 +19707,71 @@ const actions = {
     ui.login = { ...ui.login, confirmCreate: false, error: null };
     render();
   },
+  "login-agree": () => {
+    ui.login = { ...ui.login, agree: !ui.login.agree, error: null };
+    render();
+  },
+
+  /* ── THE TERMS, AND CONSENT TO HEALTH DATA ───────────────────────── */
+  "terms-agree": () => {
+    if (!ui.termsGate) return;
+    ui.termsGate = { ...ui.termsGate, agree: !ui.termsGate.agree, error: null };
+    render();
+  },
+  "terms-accept": async () => {
+    const f = ui.termsGate;
+    const C = window.ZenofitCloud;
+    if (!f || !f.agree || f.busy || !C || !C.consent) return;
+    ui.termsGate = { ...f, busy: true, error: null }; render();
+    try { await C.consent({ terms: TERMS_VERSION }); }
+    catch (e) {
+      if (ui.termsGate) { ui.termsGate = { ...ui.termsGate, busy: false, error: apiErrText(e, "acct.errFailed") }; render(); }
+      return;
+    }
+    ui.termsGate = null;
+    render();
+  },
+  "terms-signout": () => {
+    ui.termsGate = null;
+    actions["acct-signout"]();
+  },
+  "health-agree": async () => {
+    const f = ui.healthGate;
+    const C = window.ZenofitCloud;
+    const me = signedInAs();
+    if (!f || f.busy || !C || !C.consent || !me) return;
+    ui.healthGate = { ...f, busy: true, error: null }; render();
+    try { await C.consent({ health: true }); }
+    catch (e) {
+      if (ui.healthGate) { ui.healthGate = { ...ui.healthGate, busy: false, error: apiErrText(e, "acct.errFailed") }; render(); }
+      return;
+    }
+    healthOk = true;
+    healthRemember(me.userId, true);
+    ui.healthGate = null;
+    /* and on to what was asked for */
+    if (f.then === "sex") actions["std-sex"]({ dataset: { id: f.sex } });
+    else { ui.showBody = true; render(); }
+  },
+  /* ── WITHDRAWN: THE DATA GOES, ON EVERY PROFILE THE ACCOUNT OWNS ──────
+     The server turns every body row into a deletion and unsets `sex` on
+     all of them, and every device drops them on its next pull; the
+     profile on screen is emptied here at once. A shared profile on
+     screen is somebody else's and is left alone. */
+  "health-withdraw": async () => {
+    const C = window.ZenofitCloud;
+    const me = signedInAs();
+    if (!C || !C.consent || !me || !confirm(T("health.confirmWithdraw"))) return;
+    try { await C.consent({ health: false }); }
+    catch (e) { alert(apiErrText(e, "acct.errFailed")); return; }
+    healthOk = false;
+    healthRemember(me.userId, false);
+    ui.showBody = false; ui.bodyForm = null;
+    if (!profileShared(profiles.active)) patch({ body: [], settings: { ...state.settings, sex: "" } });
+    else render();
+    alert(T("health.withdrawn"));
+  },
+
   "login-forgot": () => {
     ui.login = { ...ui.login, recover: true, code: "", password: "", error: null, confirmCreate: false };
     render();
@@ -19934,7 +20107,10 @@ const actions = {
       patch(fresh);
     }
   },
-  "open-body": () => { ui.showBody = true; render(); },
+  "open-body": () => {
+    if (healthGated()) { ui.healthGate = { then: "body", busy: false, error: null }; render(); return; }
+    ui.showBody = true; render();
+  },
   /* another measurement is another series: its zoom and its dot start over */
   "body-metric": (el) => { ui.bodyMetric = el.dataset.id; ui.chartView.body = null; ui.chartSel.body = null; render(); },
   "close-body": () => { ui.showBody = false; ui.bodyForm = null; render(); },
@@ -20366,6 +20542,7 @@ const actions = {
      lie, and the card names its inputs precisely so it can't. */
   "std-sex": (el) => {
     const sex = el.dataset.id;
+    if (healthGated()) { ui.healthGate = { then: "sex", sex, busy: false, error: null }; render(); return; }
     stdForm().sex = sex;
     ui.stdResult = null;
     /* answered where it is used, and remembered, see the note on
@@ -22062,6 +22239,9 @@ const READ_OK = new Set([
   "open-sync", "sync-copy-code",
   "open-account", "acct-signout", "acct-signout-others", "login-go", "login-create", "login-cancel", "first-profile-create",
   "login-forgot", "login-recover", "login-recover-cancel", "codes-make-open", "codes-make-go", "codes-copy",
+  /* agreeing to the Terms, or to health data, is the account's, not the
+     training's on screen */
+  "login-agree", "terms-agree", "terms-accept", "terms-signout", "health-agree", "health-withdraw",
   /* the account is not the training on screen, and a read-only profile
      being open must not stand between somebody and deleting their account */
   "acct-delete-open", "acct-delete-go",
@@ -22727,4 +22907,7 @@ timerNotifsTidy();      // and nothing left in the shade that the timers above n
   /* Is push on, and is it ringing for the account signed in? See
      notifyAttach; enterAccount asks the same question after a login. */
   notifyAttach();
+  /* and has it accepted the current Terms, and does it consent to health
+     data (see TERMS, AGE, AND CONSENT TO HEALTH DATA) */
+  consentCheck();
 })();

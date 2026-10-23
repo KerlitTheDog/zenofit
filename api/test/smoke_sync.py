@@ -415,6 +415,40 @@ s, b = call("GET", "/v1/profiles/activity?since=2026-03-04", token=coach)
 check("leaving the share takes it off the list", s == 200 and not any(a.get("profileId") == P6 for a in b.get("activity", [])), (s, b))
 call("DELETE", "/v1/profiles/" + P6, token=owner)
 
+print("\n== health consent: given, then withdrawn ==")
+# Body measurements and the sex setting are health data (GDPR art. 9):
+# withdrawing consent deletes them from every profile the account owns, as
+# tombstones every device pulls, and nothing else.
+s, b = call("POST", "/v1/me/consent", token=owner, body={"health": True, "terms": "2026-10-23"})
+check("consent and the terms version are recorded", s == 200 and b.get("healthConsent") is True and b.get("termsVersion") == "2026-10-23", (s, b))
+s, b = call("GET", "/v1/me", token=owner)
+check("and /v1/me says so", b.get("healthConsent") is True and b.get("termsVersion") == "2026-10-23", b)
+s, prof = call("POST", "/v1/profiles", token=owner, body={"name": "Health test"})
+P7 = prof["profileId"]
+call("POST", "/v1/profiles/%s/items" % P7, token=owner, body={"items": [
+    item("body", "HB1", {"id": "HB1", "weight": "80"}), item("body", "HB2", {"id": "HB2", "weight": "81"}),
+    item("settings", "sex", {"v": "male"}), item("log", "HL1", {"id": "HL1", "ok": True})]})
+s, b = call("GET", "/v1/profiles/%s/changes" % P7, token=owner)
+before = b.get("cursor")
+s, b = call("POST", "/v1/me/consent", token=outsider, body={"health": False})
+s, b = call("GET", "/v1/profiles/%s/changes" % P7, token=owner)
+check("somebody else withdrawing touches nothing here",
+      sum(1 for i in b.get("items", []) if i["collection"] == "body" and not i.get("deleted")) == 2, b.get("items"))
+s, b = call("POST", "/v1/me/consent", token=owner, body={"health": False})
+check("withdrawing answers what it deleted", s == 200 and b.get("healthConsent") is False
+      and b.get("deleted", {}).get("body", 0) >= 2 and b.get("deleted", {}).get("sex", 0) >= 1, (s, b))
+s, b = call("GET", "/v1/profiles/%s/changes?cursor=%s" % (P7, before), token=owner)
+got = {(i["collection"], i["itemId"]): i for i in b.get("items", [])}
+check("a pull since then brings the body rows back as deletions",
+      all(got.get(("body", k), {}).get("deleted") for k in ("HB1", "HB2")), list(got))
+check("and the sex setting as unset", (got.get(("settings", "sex")) or {}).get("json") == {"v": ""}, got.get(("settings", "sex")))
+check("and nothing else", ("log", "HL1") not in got, list(got))
+s, b = call("GET", "/v1/me", token=owner)
+check("consent is no longer recorded", b.get("healthConsent") is False, b)
+s, b = call("POST", "/v1/me/consent", token=owner, body={"terms": "not a version"})
+check("a consent call with nothing in it is refused", s == 400, (s, b))
+call("DELETE", "/v1/profiles/" + P7, token=owner)
+
 call("DELETE", "/v1/profiles/" + PID, token=owner)
 call("DELETE", "/v1/profiles/" + P2, token=owner)
 

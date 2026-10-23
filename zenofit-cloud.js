@@ -165,9 +165,10 @@
      The difference matters: claiming keeps every profile already synced from
      this phone, and the server decides which happened from the token it is
      sent, so the app does not have to. */
-  async function register(username, password) {
+  async function register(username, password, terms) {
     const key = await deriveKey(username, password);
-    const res = await call("POST", "/v1/auth/register", { username, key });
+    /* `terms`: the Terms and Privacy policy version accepted on the form */
+    const res = await call("POST", "/v1/auth/register", { username, key, terms });
     /* a claim returns no token, because the one already stored still works */
     const now = read(DEVICE_KEY) || {};
     write(DEVICE_KEY, { userId: res.userId, token: res.token || now.token, username: res.username });
@@ -236,8 +237,14 @@
     return res;
   }
 
-  /* who this token is, and how many recovery codes are left unused */
+  /* who this token is, how many recovery codes are left unused, which Terms
+     version it accepted and whether it consents to health data */
   const me = () => call("GET", "/v1/me");
+
+  /* {terms: version} accepts the Terms; {health: true} gives consent to
+     health data, {health: false} withdraws it and deletes that data from
+     every profile the account owns (docs/privacy.md) */
+  const consent = (body) => call("POST", "/v1/me/consent", body);
 
   /* Every other login of this account ends (POST /v1/auth/logout-others);
      this one stays. Names this phone's push endpoint so it keeps ringing.
@@ -714,7 +721,7 @@
   window.ZenofitCloud = {
     API,
     ensureDevice, hasDevice,
-    deriveKey, register, signIn, signOut, signOutOthers, newRecoveryCodes, recover, me, account, signedIn, nameAvailable, verifyPassword,
+    deriveKey, register, signIn, signOut, signOutOthers, newRecoveryCodes, recover, me, consent, account, signedIn, nameAvailable, verifyPassword,
     deleteAccount, forgetAccount,
     isStandalone, isIOS, pushBlockedReason,
     enablePush, refilePush, disablePush, pushEnabled, testPush, pushEndpoint, setPushPrefs, pushStatus,

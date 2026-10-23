@@ -194,6 +194,9 @@ function addressKey(request) {
   return all.slice(0, 4).map((g) => (parseInt(g, 16) || 0).toString(16)).join(":") + "::/64";
 }
 
+/* a Terms version is the date it was published, 2026-10-23 */
+const cleanTermsVersion = (v) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
+
 const tooManySignups = () =>
   fail(429, "too_many_signups", "Too many new accounts from this network. Wait a while and try again.");
 
@@ -373,6 +376,10 @@ async function route(request, env, url, ctx) {
     /* the way back in if the password is ever forgotten, shown once by the
        app and never again (POST /v1/auth/recover) */
     const rc = await newRecoveryCodes();
+    /* the Terms and Privacy policy version the person accepted on the form,
+       with the 13+ confirmation (docs/privacy.md); an older app sends none,
+       and that account is asked once on its next launch instead */
+    const terms = cleanTermsVersion(body.terms);
 
     /* Already a device? Then this is a claim, not a signup, and the row it
        claims is the one that owns whatever has already been synced. Turning
@@ -382,8 +389,8 @@ async function route(request, env, url, ctx) {
     if (existing) {
       if (existing.username) return fail(409, "already_claimed", "This device is already signed in to an account.");
       await env.DB.prepare(
-        "UPDATE users SET username = ?, username_lc = ?, pw_hash = ?, pw_salt = ?, claimed_at = ?, recovery = ? WHERE id = ?"
-      ).bind(username, lc, hash, salt, now, rc.hashes, existing.id).run();
+        "UPDATE users SET username = ?, username_lc = ?, pw_hash = ?, pw_salt = ?, claimed_at = ?, recovery = ?, terms_version = ?, terms_at = ? WHERE id = ?"
+      ).bind(username, lc, hash, salt, now, rc.hashes, terms, terms ? now : null, existing.id).run();
       return json({ userId: existing.id, username, claimed: true, recoveryCodes: rc.codes });
     }
 
@@ -391,9 +398,9 @@ async function route(request, env, url, ctx) {
     const token = newToken();
     const th = await sha256Hex(token);
     await env.DB.prepare(
-      "INSERT INTO users (id, display_name, token_hash, created_at, last_seen_at, username, username_lc, pw_hash, pw_salt, claimed_at, recovery) " +
-      "VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    ).bind(id, th, now, now, username, lc, hash, salt, now, rc.hashes).run();
+      "INSERT INTO users (id, display_name, token_hash, created_at, last_seen_at, username, username_lc, pw_hash, pw_salt, claimed_at, recovery, terms_version, terms_at) " +
+      "VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    ).bind(id, th, now, now, username, lc, hash, salt, now, rc.hashes, terms, terms ? now : null).run();
     await env.DB.prepare(
       "INSERT INTO tokens (token_hash, user_id, label, created_at, last_seen_at) VALUES (?, ?, 'signin', ?, ?)"
     ).bind(th, id, now, now).run();
@@ -529,10 +536,52 @@ async function route(request, env, url, ctx) {
   }
 
   if (p === "/v1/me" && method === "GET") {
-    const r = await env.DB.prepare("SELECT recovery FROM users WHERE id = ?").bind(user.id).first();
+    const r = await env.DB.prepare("SELECT recovery, terms_version, health_at FROM users WHERE id = ?").bind(user.id).first();
     let recoveryLeft = 0;
     try { recoveryLeft = JSON.parse((r && r.recovery) || "[]").length; } catch { /* none */ }
-    return json({ userId: user.id, displayName: user.display_name, createdAt: user.created_at, recoveryLeft });
+    return json({ userId: user.id, displayName: user.display_name, createdAt: user.created_at, recoveryLeft,
+      termsVersion: (r && r.terms_version) || null, healthConsent: !!(r && r.health_at) });
+  }
+
+  /* ── WHAT THE ACCOUNT AGREES TO ──────────────────────────────────────
+     `terms`: the version of the Terms and Privacy policy accepted, with the
+     13+ confirmation. `health: true`: explicit consent to body measurements
+     and the sex setting (GDPR article 9), asked before either is first
+     used. `health: false` WITHDRAWS it, and that data goes from every
+     profile the account owns, deleted ones included: each body row becomes
+     a tombstone and `sex` goes back to unset, stamped like a push, so every
+     device drops them on its next pull, profiles not open on any phone
+     included. Rows this account wrote into somebody else's profile through
+     a write grant are that person's and stay. Set-based: five statements
+     whatever the account holds. */
+  if (p === "/v1/me/consent" && method === "POST") {
+    const body = await readJson(request).catch(() => ({}));
+    const now = Date.now();
+    const terms = cleanTermsVersion(body.terms);
+    const out = {};
+    if (terms) {
+      await env.DB.prepare("UPDATE users SET terms_version = ?, terms_at = ? WHERE id = ?").bind(terms, now, user.id).run();
+      out.termsVersion = terms;
+    }
+    if (body.health === true) {
+      await env.DB.prepare("UPDATE users SET health_at = ? WHERE id = ?").bind(now, user.id).run();
+      out.healthConsent = true;
+    } else if (body.health === false) {
+      const mine = "SELECT id FROM profiles WHERE owner_id = ?";
+      const seq = "(SELECT item_seq FROM profiles WHERE id = items.profile_id)";
+      const r = await env.DB.batch([
+        env.DB.prepare(`UPDATE profiles SET item_seq = MAX(item_seq + 1, ?) WHERE owner_id = ?`).bind(now, user.id),
+        env.DB.prepare(`UPDATE items SET json = NULL, deleted = 1, updated_at = ${seq}, client_updated_at = ? ` +
+          `WHERE collection = 'body' AND deleted = 0 AND profile_id IN (${mine})`).bind(now, user.id),
+        env.DB.prepare(`UPDATE items SET json = '{"v":""}', updated_at = ${seq}, client_updated_at = ? ` +
+          `WHERE collection = 'settings' AND item_id = 'sex' AND deleted = 0 AND json != '{"v":""}' AND profile_id IN (${mine})`).bind(now, user.id),
+        env.DB.prepare("UPDATE users SET health_at = NULL WHERE id = ?").bind(user.id),
+      ]);
+      out.healthConsent = false;
+      out.deleted = { body: r[1].meta.changes, sex: r[2].meta.changes };
+    }
+    if (!Object.keys(out).length) return fail(400, "bad_request", "Nothing to agree to.");
+    return json(out);
   }
 
   /* A fresh set of recovery codes, replacing every unused one: for an

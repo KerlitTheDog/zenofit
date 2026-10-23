@@ -92,6 +92,7 @@ The detail of every area lives in `docs/`, one file per area, each small enough 
 | Plans, presets, the Calendar tab, weeks, volume, deloads, the week strip on Home | docs/planning.md |
 | Profiles: the roster, switching, a save that will not open, Storage check, live profiles | docs/profiles.md |
 | Accounts: logging in, tokens, limits, logging out, deleting an account | docs/accounts.md |
+| The Privacy policy and Terms pages, accepting them, the 13+ check, consent to health data and withdrawing it | docs/privacy.md |
 | Sharing a profile: codes, read grants, levels, the trainer's glance | docs/sharing.md |
 | Sync: what travels, pull and push, ordering, the wipe guard, errors, the schedule | docs/sync.md |
 | Photos: the store, upload and download, holders and the sweep, ceilings, R2, image scaling | docs/photos.md |

@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- No script at all: the language is picked by the address's #en, #sv or
+     #uk with CSS (:target), so this page needs nothing from the app. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<title>Zenofit: Privacy policy</title>
+<style>
+  :root { color-scheme: light dark; --bg: #f4f4f4; --text: #1f2124; --muted: #4d5157; --gold: #855c14; --line: #d0d4da; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #1e1f22; --text: #f2f3f5; --muted: #b5bac1; --gold: #e9b949; --line: #3f4248; } }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 24px 18px 60px; }
+  nav { display: flex; gap: 14px; font-size: 14px; margin-bottom: 8px; }
+  a { color: var(--gold); }
+  h1 { font-size: 28px; line-height: 1.2; margin: 18px 0 4px; }
+  h2 { font-size: 19px; margin: 28px 0 6px; padding-top: 14px; border-top: 1px solid var(--line); }
+  .ver { color: var(--muted); font-size: 14px; margin: 0 0 18px; }
+  li { margin: 6px 0; }
+  section { display: none; }
+  section:target { display: block; }
+  body:not(:has(section:target)) #en { display: block; }
+</style>
+</head>
+<body>
+<main>
+<nav><a href="#en" hreflang="en">English</a><a href="#sv" hreflang="sv">Svenska</a><a href="#uk" hreflang="uk">Українська</a></nav>
+
+<section id="en" lang="en">
+<h1>Privacy policy</h1>
+<p class="ver">Zenofit · version of 23 October 2026</p>
+<p>Zenofit is a workout tracker. This page says what it stores about you, why, where, for how long, who else handles it, and what you can do about it.</p>
+
+<h2>Who is responsible</h2>
+<p>Zenofit is run by Brad Persson, a private person in Sweden, who is the controller of your personal data. Contact: <a href="mailto:swagerooner@gmail.com">swagerooner@gmail.com</a>.</p>
+
+<h2>What is stored, and why</h2>
+<ul>
+<li><b>Your account</b>: your username; a scrambled form of your password (the password itself never leaves your phone: the app turns it into a key and the server keeps only a salted hash of that key); scrambled forms of your recovery codes; when the account was made and last used; which version of these documents you accepted and when; and when you consented to health data. <i>Why</i>: to give you an account, which is the agreement between us (GDPR article 6(1)(b)).</li>
+<li><b>Your training</b>: workouts, sets, exercises, plans, presets, notes, goals, settings, profile names, and pictures you add to exercises. <i>Why</i>: it is what the app is for, and keeping it in your account puts it on every device you log in on (article 6(1)(b)).</li>
+<li><b>Body measurements and your sex</b>: weight, waist, chest, arm, thigh and glutes check-ins, and the sex setting the Standards use. These are data concerning health. <i>Why</i>: only with your explicit consent (article 9(2)(a)), asked before you first use them. You can withdraw it at any time at the bottom of the Body Measurements window, which deletes them from all your profiles on every device.</li>
+<li><b>Chat</b>: who you talk to, your messages, and the pictures and cards you send, with their times. Messages are stored as plain text on the server. They are not end-to-end encrypted, so the operator could technically read them. <i>Why</i>: to deliver your conversations (article 6(1)(b)).</li>
+<li><b>Sharing</b>: share codes you make, and who has access to which of your profiles (article 6(1)(b)).</li>
+<li><b>Notifications</b>: if you turn them on, the address your browser's push service gives this device, and which kinds you turned off. <i>Why</i>: to notify you; you can turn them off at any time (article 6(1)(b)).</li>
+<li><b>Security records</b>: your IP address, and the username for a failed login, in counters that limit how fast accounts can be made, names checked and passwords guessed; and a hashed token for each device you are logged in on. <i>Why</i>: to protect your account and the service from abuse, a legitimate interest (article 6(1)(f)).</li>
+</ul>
+<p>On your phone, the app keeps your profiles, your login token, a copy of your chats and its own settings in the browser's storage. They stay when you log out, so nothing is lost, and go when you delete your account or clear the site's data.</p>
+<p>There is no advertising, no analytics, no tracking and no selling of data.</p>
+
+<h2>Who else handles it</h2>
+<ul>
+<li><b>Cloudflare</b> runs the server and the database. It handles every request, including your IP address.</li>
+<li><b>GitHub</b> (Microsoft) hosts the app's files and logs the IP address of every visit.</li>
+<li><b>Push services</b> deliver notifications: Google (Chrome and Android), Apple (Safari and iPhone), Mozilla (Firefox) or Microsoft (Edge), depending on your browser. A notification's content is encrypted so they cannot read it; they see that one was sent, and when.</li>
+<li><b>YouTube</b> (Google) loads only when you open a tutorial video, in its privacy-enhanced player.</li>
+<li><b>People you choose</b>: someone you share a profile with sees that profile, someone you chat with sees what you send them, and other users can find your username in chat search.</li>
+</ul>
+<p>These companies are based in the United States. Transfers there are covered by the EU-U.S. Data Privacy Framework or the European Commission's standard contractual clauses.</p>
+
+<h2>How long it is kept</h2>
+<ul>
+<li>Your account and everything in it: until you delete it.</li>
+<li>A profile you delete: 30 days, so a mistake can be undone, then it is purged.</li>
+<li>A login unused for 180 days ends.</li>
+<li>Security counters: about 25 hours.</li>
+<li>A picture nothing uses any more: 3 days. A chat picture no message shows: a week.</li>
+<li>Deleting your account removes all of the above at once, except training you logged into somebody else's profile (it is theirs) and a picture somebody else still uses.</li>
+</ul>
+
+<h2>Your rights</h2>
+<p>You can see and correct everything in the app itself. You can also:</p>
+<ul>
+<li>get a copy of your training: Settings, <i>Export</i> (a file) or <i>Spreadsheet (CSV)</i>;</li>
+<li>delete your account and everything in it: Settings, Account, <i>Delete account</i>;</li>
+<li>withdraw your consent to health data: the Body Measurements window;</li>
+<li>ask for access, correction, deletion or restriction, or object to processing, by writing to <a href="mailto:swagerooner@gmail.com">swagerooner@gmail.com</a>;</li>
+<li>complain to the Swedish Authority for Privacy Protection (IMY), <a href="https://www.imy.se">imy.se</a>, or to the authority where you live.</li>
+</ul>
+
+<h2>Age</h2>
+<p>Zenofit is for people aged 13 and over.</p>
+
+<h2>Changes</h2>
+<p>When this policy changes, the app asks you to accept the new version.</p>
+</section>
+
+<section id="sv" lang="sv">
+<h1>Integritetspolicy</h1>
+<p class="ver">Zenofit · version från 23 oktober 2026</p>
+<p>Zenofit är en träningsdagbok. Här står vad appen sparar om dig, varför, var, hur länge, vilka andra som hanterar det och vad du kan göra.</p>
+
+<h2>Vem som ansvarar</h2>
+<p>Zenofit drivs av Brad Persson, privatperson i Sverige, som är personuppgiftsansvarig. Kontakt: <a href="mailto:swagerooner@gmail.com">swagerooner@gmail.com</a>.</p>
+
+<h2>Vad som sparas, och varför</h2>
+<ul>
+<li><b>Ditt konto</b>: ditt användarnamn; en hashad form av ditt lösenord (själva lösenordet lämnar aldrig telefonen: appen gör om det till en nyckel, och servern sparar bara en saltad hash av nyckeln); hashade former av dina återställningskoder; när kontot skapades och senast användes; vilken version av de här dokumenten du godkänt och när; och när du samtyckte till hälsodata. <i>Varför</i>: för att ge dig ett konto, vilket är avtalet mellan oss (GDPR artikel 6.1 b).</li>
+<li><b>Din träning</b>: pass, set, övningar, planer, mallar, anteckningar, mål, inställningar, profilnamn och bilder du lägger till på övningar. <i>Varför</i>: det är vad appen är till för, och när det sparas i ditt konto finns det på alla enheter du loggar in på (artikel 6.1 b).</li>
+<li><b>Kroppsmått och ditt kön</b>: vikt, midja, bröst, arm, lår och säte, och könsinställningen som Standarder använder. Det är uppgifter om hälsa. <i>Varför</i>: bara med ditt uttryckliga samtycke (artikel 9.2 a), som du får frågan om innan du använder dem första gången. Du kan när som helst återkalla det längst ner i fönstret Kroppsmått, och då raderas de från alla dina profiler på alla enheter.</li>
+<li><b>Chatt</b>: vem du pratar med, dina meddelanden och bilder och kort du skickar, med tidpunkter. Meddelanden sparas som vanlig text på servern. De är inte end-to-end-krypterade, så den som driver tjänsten skulle tekniskt kunna läsa dem. <i>Varför</i>: för att leverera dina samtal (artikel 6.1 b).</li>
+<li><b>Delning</b>: delningskoder du skapar och vem som har tillgång till vilken av dina profiler (artikel 6.1 b).</li>
+<li><b>Aviseringar</b>: om du slår på dem, adressen som webbläsarens push-tjänst ger enheten och vilka sorter du stängt av. <i>Varför</i>: för att avisera dig; du kan stänga av dem när som helst (artikel 6.1 b).</li>
+<li><b>Säkerhetsuppgifter</b>: din IP-adress, och användarnamnet vid en misslyckad inloggning, i räknare som begränsar hur snabbt konton kan skapas, namn kontrolleras och lösenord gissas; och en hashad token för varje enhet du är inloggad på. <i>Varför</i>: för att skydda ditt konto och tjänsten mot missbruk, ett berättigat intresse (artikel 6.1 f).</li>
+</ul>
+<p>På din telefon sparar appen dina profiler, din inloggningstoken, en kopia av dina chattar och sina egna inställningar i webbläsarens lagring. De ligger kvar när du loggar ut, så att inget går förlorat, och försvinner när du raderar ditt konto eller rensar webbplatsens data.</p>
+<p>Ingen reklam, ingen analys, ingen spårning och ingen försäljning av uppgifter.</p>
+
+<h2>Vilka andra som hanterar dem</h2>
+<ul>
+<li><b>Cloudflare</b> driver servern och databasen. Varje förfrågan går dit, med din IP-adress.</li>
+<li><b>GitHub</b> (Microsoft) står värd för appens filer och loggar IP-adressen vid varje besök.</li>
+<li><b>Push-tjänster</b> levererar aviseringar: Google (Chrome och Android), Apple (Safari och iPhone), Mozilla (Firefox) eller Microsoft (Edge), beroende på webbläsare. Innehållet är krypterat så att de inte kan läsa det; de ser att en avisering skickades, och när.</li>
+<li><b>YouTube</b> (Google) laddas bara när du öppnar en instruktionsvideo, i dess integritetsförbättrade spelare.</li>
+<li><b>Personer du väljer</b>: den du delar en profil med ser profilen, den du chattar med ser det du skickar, och andra användare kan hitta ditt användarnamn i chattsökningen.</li>
+</ul>
+<p>Företagen finns i USA. Överföringar dit omfattas av EU–USA-ramverket för dataskydd eller EU-kommissionens standardavtalsklausuler.</p>
+
+<h2>Hur länge de sparas</h2>
+<ul>
+<li>Ditt konto och allt i det: tills du raderar det.</li>
+<li>En profil du raderar: 30 dagar, så att ett misstag kan ångras, sedan rensas den bort.</li>
+<li>En inloggning som inte använts på 180 dagar upphör.</li>
+<li>Säkerhetsräknare: ungefär 25 timmar.</li>
+<li>En bild som inget längre använder: 3 dagar. En chattbild som inget meddelande visar: en vecka.</li>
+<li>När du raderar ditt konto försvinner allt ovan på en gång, utom träning du loggat i någon annans profil (den är deras) och en bild som någon annan fortfarande använder.</li>
+</ul>
+
+<h2>Dina rättigheter</h2>
+<p>Du kan se och rätta allt i själva appen. Du kan också:</p>
+<ul>
+<li>få en kopia av din träning: Inställningar, <i>Exportera</i> (en fil) eller <i>Kalkylblad (CSV)</i>;</li>
+<li>radera ditt konto och allt i det: Inställningar, Konto, <i>Radera konto</i>;</li>
+<li>återkalla ditt samtycke till hälsodata: fönstret Kroppsmått;</li>
+<li>begära tillgång, rättelse, radering eller begränsning, eller invända mot behandling, genom att skriva till <a href="mailto:swagerooner@gmail.com">swagerooner@gmail.com</a>;</li>
+<li>klaga hos Integritetsskyddsmyndigheten (IMY), <a href="https://www.imy.se">imy.se</a>, eller hos myndigheten där du bor.</li>
+</ul>
+
+<h2>Ålder</h2>
+<p>Zenofit är till för dig som är 13 år eller äldre.</p>
+
+<h2>Ändringar</h2>
+<p>När policyn ändras ber appen dig godkänna den nya versionen.</p>
+</section>
+
+<section id="uk" lang="uk">
+<h1>Політика конфіденційності</h1>
+<p class="ver">Zenofit · версія від 23 жовтня 2026 року</p>
+<p>Zenofit є щоденником тренувань. Тут сказано, що застосунок зберігає про вас, навіщо, де, як довго, хто ще це обробляє і що ви можете з цим зробити.</p>
+
+<h2>Хто відповідає</h2>
+<p>Zenofit веде Бред Перссон (Brad Persson), приватна особа у Швеції, який є контролером ваших персональних даних. Контакт: <a href="mailto:swagerooner@gmail.com">swagerooner@gmail.com</a>.</p>
+
+<h2>Що зберігається і навіщо</h2>
+<ul>
+<li><b>Ваш акаунт</b>: ім’я користувача; хешована форма пароля (сам пароль ніколи не покидає телефон: застосунок перетворює його на ключ, а сервер зберігає лише солений хеш цього ключа); хешовані форми кодів відновлення; коли акаунт створено і коли ним востаннє користувалися; яку версію цих документів ви прийняли і коли; і коли ви дали згоду на дані про здоров’я. <i>Навіщо</i>: щоб надати вам акаунт, тобто виконати угоду між нами (GDPR, стаття 6(1)(b)).</li>
+<li><b>Ваші тренування</b>: тренування, підходи, вправи, плани, шаблони, нотатки, цілі, налаштування, назви профілів і фото, які ви додаєте до вправ. <i>Навіщо</i>: для цього і створено застосунок, а збереження в акаунті робить їх доступними на всіх пристроях, де ви входите (стаття 6(1)(b)).</li>
+<li><b>Заміри тіла і ваша стать</b>: вага, талія, груди, рука, стегно та сідниці, а також налаштування статі, яким користуються «Стандарти». Це дані про здоров’я. <i>Навіщо</i>: лише з вашої явної згоди (стаття 9(2)(a)), про яку вас запитають перед першим використанням. Ви можете будь-коли відкликати її внизу вікна «Заміри тіла», і їх буде видалено з усіх ваших профілів на всіх пристроях.</li>
+<li><b>Чат</b>: з ким ви спілкуєтеся, ваші повідомлення, фото й картки, які ви надсилаєте, з часом надсилання. Повідомлення зберігаються на сервері звичайним текстом. Вони не мають наскрізного шифрування, тож технічно власник сервісу міг би їх прочитати. <i>Навіщо</i>: щоб доставляти ваші розмови (стаття 6(1)(b)).</li>
+<li><b>Спільний доступ</b>: коди доступу, які ви створюєте, і хто має доступ до яких ваших профілів (стаття 6(1)(b)).</li>
+<li><b>Сповіщення</b>: якщо ви їх увімкнете, адреса, яку служба push вашого браузера видає цьому пристрою, і які види ви вимкнули. <i>Навіщо</i>: щоб надсилати вам сповіщення; ви можете будь-коли їх вимкнути (стаття 6(1)(b)).</li>
+<li><b>Дані безпеки</b>: ваша IP-адреса, а при невдалому вході ще й ім’я користувача, у лічильниках, що обмежують, як швидко можна створювати акаунти, перевіряти імена й підбирати паролі; і хешований токен для кожного пристрою, на якому ви ввійшли. <i>Навіщо</i>: щоб захистити ваш акаунт і сервіс від зловживань, законний інтерес (стаття 6(1)(f)).</li>
+</ul>
+<p>На вашому телефоні застосунок зберігає профілі, токен входу, копію чатів і власні налаштування у сховищі браузера. Вони лишаються після виходу з акаунта, щоб нічого не загубилося, і зникають, коли ви видаляєте акаунт або очищаєте дані сайту.</p>
+<p>Жодної реклами, аналітики, стеження чи продажу даних.</p>
+
+<h2>Хто ще їх обробляє</h2>
+<ul>
+<li><b>Cloudflare</b> забезпечує роботу сервера й бази даних. Через нього проходить кожен запит, разом із вашою IP-адресою.</li>
+<li><b>GitHub</b> (Microsoft) зберігає файли застосунку і записує IP-адресу кожного відвідування.</li>
+<li><b>Служби push</b> доставляють сповіщення: Google (Chrome і Android), Apple (Safari і iPhone), Mozilla (Firefox) або Microsoft (Edge), залежно від браузера. Вміст сповіщення зашифровано, тож вони не можуть його прочитати; вони бачать лише, що сповіщення надіслано, і коли.</li>
+<li><b>YouTube</b> (Google) завантажується лише тоді, коли ви відкриваєте навчальне відео, у режимі посиленої конфіденційності.</li>
+<li><b>Люди, яких ви обираєте</b>: той, з ким ви ділитеся профілем, бачить цей профіль; той, з ким ви листуєтеся, бачить те, що ви надсилаєте; інші користувачі можуть знайти ваше ім’я в пошуку чату.</li>
+</ul>
+<p>Ці компанії розташовані у США. Передавання даних туди відбувається в межах Рамкової угоди ЄС–США про захист даних або стандартних договірних положень Європейської комісії.</p>
+
+<h2>Як довго дані зберігаються</h2>
+<ul>
+<li>Акаунт і все, що в ньому: доки ви його не видалите.</li>
+<li>Видалений профіль: 30 днів, щоб помилку можна було виправити, потім його остаточно видаляють.</li>
+<li>Вхід, яким не користувалися 180 днів, завершується.</li>
+<li>Лічильники безпеки: близько 25 годин.</li>
+<li>Фото, яке більше ніде не використовується: 3 дні. Фото з чату, яке не показує жодне повідомлення: тиждень.</li>
+<li>Видалення акаунта прибирає все перелічене одразу, крім тренувань, які ви записали в чужий профіль (вони належать власникові профілю), і фото, яке ще використовує хтось інший.</li>
+</ul>
+
+<h2>Ваші права</h2>
+<p>Усе можна переглянути й виправити в самому застосунку. Також ви можете:</p>
+<ul>
+<li>отримати копію своїх тренувань: Налаштування, <i>Експорт</i> (файл) або <i>Таблиця (CSV)</i>;</li>
+<li>видалити акаунт і все, що в ньому: Налаштування, Обліковий запис, <i>Видалити акаунт</i>;</li>
+<li>відкликати згоду на дані про здоров’я: вікно «Заміри тіла»;</li>
+<li>попросити доступ, виправлення, видалення чи обмеження або заперечити проти обробки, написавши на <a href="mailto:swagerooner@gmail.com">swagerooner@gmail.com</a>;</li>
+<li>поскаржитися до шведського Органу із захисту приватності (IMY), <a href="https://www.imy.se">imy.se</a>, або до органу у вашій країні.</li>
+</ul>
+
+<h2>Вік</h2>
+<p>Zenofit призначено для людей віком від 13 років.</p>
+
+<h2>Зміни</h2>
+<p>Коли ця політика зміниться, застосунок попросить вас прийняти нову версію.</p>
+</section>
+</main>
+</body>
+</html>

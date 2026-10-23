@@ -7150,8 +7150,10 @@ function render() {
   if (tab !== "home") {
     html += `<div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px;position:sticky;top:0;z-index:20;background:var(--bg);border-bottom:1px solid var(--border-soft)">
       ${pinStrip(30) || `<img src="logoC.png" alt="${T("a11y.logo")}" width="30" height="30" style="width:30px;height:30px;object-fit:contain;border-radius:8px;display:block;flex-shrink:0">`}
-      <div class="pb-num" style="font-size:19px;font-weight:700;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${titles[tab]}</div>
-      ${rollingWeeks() ? "" : chip(T("common.wkShort", { n: currentWeek }), "var(--gold)")}
+      ${/* the title keeps room for a word however many profiles are pinned:
+            the badges beside it scroll instead */""}
+      <div class="pb-num" style="font-size:19px;font-weight:700;flex:1;min-width:72px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${titles[tab]}</div>
+      ${rollingWeeks() ? "" : chip(T("common.wkShort", { n: currentWeek }), "var(--gold)", "flex-shrink:0;white-space:nowrap")}
       ${refreshBtn(20, 4)}
       <button data-action="open-body" title="${T("a11y.bodyBtn")}" style="color:var(--muted);padding:4px">${icon("ruler", 20)}</button>
       <button data-action="open-profile" style="color:var(--muted);padding:4px">${icon("settings", 20)}</button>
@@ -13706,7 +13708,7 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
             not from an edit of a logged day or a plan */
         planning || draft.editing ? "" : pinStrip(28)}
       <div class="pb-num" style="font-size:19px;font-weight:700;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${planning ? (draft.planId ? T("plan.edit") : T("plan.new")) : draft.editing ? T("wo.edit") : T("wo.new")}</div>
-      ${wk ? chip(T("common.week", { n: wk }), planning ? "var(--steel)" : "var(--gold)") : ""}
+      ${wk ? chip(T("common.week", { n: wk }), planning ? "var(--steel)" : "var(--gold)", "flex-shrink:0;white-space:nowrap") : ""}
       ${draft.editing ? `<button data-action="delete-day" title="${T("wo.deleteDay")}" style="color:var(--red);padding:4px">${icon("trash-2", 19)}</button>` : ""}
       ${planning && draft.planId ? `<button data-action="plan-delete" data-id="${esc(draft.planId)}" title="${T("plan.deletePlan")}" style="color:var(--red);padding:4px">${icon("trash-2", 19)}</button>` : ""}
     </div>
@@ -17965,13 +17967,20 @@ function pinStore() {
   return { at: 0, pushed: 0, pins: {} };
 }
 function pinStoreWrite(s) { try { localStorage.setItem(pinKey(), JSON.stringify(s)); } catch { /* this session only */ } }
-const pinKeyOf = (localId) => { const r = syncLinked(localId); return r ? r.remoteId : "local:" + localId; };
+/* `all`: the sync records, read once by a caller going through the whole
+   list. They hold a hash per row of every profile, so reading them once per
+   profile on every frame was a cost a phone could feel. */
+const pinKeyOf = (localId, all) => {
+  const r = (all || syncAll())[localId];
+  return r && r.remoteId ? r.remoteId : "local:" + localId;
+};
 /* the pins of the profiles in the list, keyed by their local ids */
 function pinsRead() {
   const s = pinStore().pins;
+  const all = syncAll();
   const out = {};
   for (const p of profileList()) {
-    const v = s[pinKeyOf(p.id)] || s["local:" + p.id];
+    const v = s[pinKeyOf(p.id, all)] || s["local:" + p.id];
     if (v && typeof v === "object") out[p.id] = v;
   }
   return out;
@@ -18062,8 +18071,9 @@ function badgeLook(p, i, pin) {
     style: pi.style === "outline" ? "outline" : "solid",
   };
 }
-/* black or white on a filled badge, whichever reads on that colour */
-const badgeInk = (hex) => (picLum(hex) > 0.179 ? "#16171a" : "#ffffff");
+/* black or white on a filled badge, whichever reads on that colour; pure
+   black, because the app's near-black left the red at 4.49:1 */
+const badgeInk = (hex) => (picLum(hex) > 0.179 ? "#000000" : "#ffffff");
 function badgeHTML(look, size, on) {
   const n = graphemes(look.text).length;
   const fs = Math.round(size * (n > 2 ? 0.34 : n > 1 ? 0.4 : 0.48));
@@ -18076,7 +18086,9 @@ function pinStrip(size) {
   const rows = profileList().map((p, i) => ({ p, i })).filter((x) => pins[x.p.id]);
   if (!rows.length) return "";
   const active = activeProfileId();
-  return `<div style="display:flex;align-items:center;gap:8px;padding:4px;margin:-4px;overflow-x:auto;scrollbar-width:none;min-width:0;flex-shrink:1">${rows.map(({ p, i }) => {
+  /* at most half the header: past that it scrolls sideways (the badge cut
+     at its edge says there are more), and the title beside it keeps room */
+  return `<div style="display:flex;align-items:center;gap:8px;padding:4px;margin:-4px;overflow-x:auto;scrollbar-width:none;min-width:0;flex:0 1 auto;max-width:50%">${rows.map(({ p, i }) => {
     const on = p.id === active;
     const name = pins[p.id].who || profileLabel(p, i);
     return `<button data-action="pin-switch" data-id="${esc(p.id)}" aria-label="${esc(T(on ? "badge.onScreen" : "badge.switchTo", { name }))}"${on ? ' aria-current="true"' : ""} style="display:flex;padding:0;flex-shrink:0">${badgeHTML(badgeLook(p, i, pins[p.id]), size, on)}</button>`;

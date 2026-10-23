@@ -18065,7 +18065,8 @@ function badgeLook(p, i, pin) {
   const pi = pin || {};
   return {
     text: graphemes(String(pi.text || "").trim()).slice(0, 3).join("") || badgeInitials(pi.who || profileLabel(p, i)),
-    color: GROUP_SWATCHES.includes(pi.color) ? pi.color : badgeColorOf(p.id),
+    /* any colour: a swatch or one from the colour well */
+    color: /^#[0-9a-f]{6}$/i.test(pi.color || "") ? pi.color : badgeColorOf(p.id),
     icon: BADGE_ICONS.includes(pi.icon) ? pi.icon : "",
     shape: pi.shape === "square" ? "square" : "circle",
     style: pi.style === "outline" ? "outline" : "solid",
@@ -18124,7 +18125,13 @@ function badgeSection(id) {
     </div>
     ${field(T("badge.text"), `<input class="pb-input" data-bind="badgeText" value="${esc(pin.text || "")}" placeholder="${esc(badgeInitials(pin.who || profileLabel(list[i], i)))}" maxlength="12" autocomplete="off" autocorrect="off" spellcheck="false">`, T("badge.textHint"))}
     <div class="pb-label" style="margin-bottom:8px">${T("badge.color")}</div>
-    <div style="display:flex;flex-wrap:wrap;gap:9px;margin-bottom:16px">${GROUP_SWATCHES.map((c, n) => `<button data-action="badge-color" data-c="${c}" aria-label="${esc(T("badge.colorN", { n: n + 1 }))}" aria-pressed="${look.color === c}" style="width:32px;height:32px;border-radius:16px;background:${c};${look.color === c ? "box-shadow:0 0 0 2px var(--surface),0 0 0 4px var(--text)" : ""}"></button>`).join("")}</div>
+    <div style="display:flex;flex-wrap:wrap;gap:9px;margin-bottom:16px">${GROUP_SWATCHES.map((c, n) => `<button data-action="badge-color" data-c="${c}" aria-label="${esc(T("badge.colorN", { n: n + 1 }))}" aria-pressed="${look.color === c}" style="width:32px;height:32px;border-radius:16px;background:${c};${look.color === c ? "box-shadow:0 0 0 2px var(--surface),0 0 0 4px var(--text)" : ""}"></button>`).join("")}
+      ${/* any other colour, as a muscle group's: the well wears it once chosen */
+        GROUP_SWATCHES.includes(look.color) ? `<label title="${esc(T("groups.otherColour"))}" style="width:32px;height:32px;border-radius:16px;display:flex;align-items:center;justify-content:center;background:var(--surface2);border:1px solid var(--border);color:var(--muted);cursor:pointer">`
+          : `<label title="${esc(T("groups.otherColour"))}" style="width:32px;height:32px;border-radius:16px;display:flex;align-items:center;justify-content:center;background:${look.color};color:${badgeInk(look.color)};box-shadow:0 0 0 2px var(--surface),0 0 0 4px var(--text);cursor:pointer">`}
+        ${icon("pipette", 15)}
+        <input type="color" data-bind="badgeColor" value="${esc(look.color)}" aria-label="${esc(T("groups.otherColour"))}" style="width:0;height:0;opacity:0;border:0;padding:0">
+      </label></div>
     <div class="pb-label" style="margin-bottom:8px">${T("badge.icon")}</div>
     <div style="display:flex;flex-wrap:wrap;gap:7px;margin-bottom:16px">
       <button data-action="badge-icon" data-i="" aria-pressed="${!look.icon}" class="pb-btn" style="height:38px;padding:0 12px;border-radius:10px;font-size:13px;${opt(!look.icon)}">${T("badge.letters")}</button>
@@ -23057,6 +23064,8 @@ function handleBind(el) {
     const i = list.findIndex((p) => p.id === id);
     const prev = document.querySelector("[data-badge-preview]");
     if (prev && i >= 0) prev.innerHTML = badgeHTML(badgeLook(list[i], i, pinsRead()[id]), 52, false);
+  } else if (bind === "badgeColor") {
+    if (ui.profileForm && /^#[0-9a-f]{6}$/i.test(v)) { pinSet(ui.profileForm.id, { color: v.toLowerCase() }); render(); }
   } else if (bind === "profileName") {
     ui.profileForm.name = v;
     const btn = document.querySelector('[data-action="profile-form-save"]');

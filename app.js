@@ -2682,7 +2682,7 @@ function patch(p) { state = { ...state, ...p }; persist(); render(); }
    pointing at rows that no longer exist. */
 function closeEverything() {
   ui.workoutSheet = null; ui.entryForm = null; ui.setForm = null; ui.picking = false;
-  ui.targetForm = null; ui.swLog = null;
+  ui.targetForm = null; ui.swLog = null; ui.pinMenu = null;
   ui.pickerQ = ""; ui.pickerQuick = null;
   ui.exWin = null; ui.exWinEdit = false; ui.exWinDraft = null; ui.exWinAttach = null;
   ui.showProfile = false; ui.profileDraft = null; ui.profileLangWas = null;
@@ -7149,9 +7149,7 @@ function render() {
   /* header (non-home tabs) */
   if (tab !== "home") {
     html += `<div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px;position:sticky;top:0;z-index:20;background:var(--bg);border-bottom:1px solid var(--border-soft)">
-      ${pinStrip(30) || `<img src="logoC.png" alt="${T("a11y.logo")}" width="30" height="30" style="width:30px;height:30px;object-fit:contain;border-radius:8px;display:block;flex-shrink:0">`}
-      ${/* the title keeps room for a word however many profiles are pinned:
-            the badges beside it scroll instead */""}
+      ${pinBadge(30) || `<img src="logoC.png" alt="${T("a11y.logo")}" width="30" height="30" style="width:30px;height:30px;object-fit:contain;border-radius:8px;display:block;flex-shrink:0">`}
       <div class="pb-num" style="font-size:19px;font-weight:700;flex:1;min-width:72px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${titles[tab]}</div>
       ${rollingWeeks() ? "" : chip(T("common.wkShort", { n: currentWeek }), "var(--gold)", "flex-shrink:0;white-space:nowrap")}
       ${refreshBtn(20, 4)}
@@ -7297,6 +7295,7 @@ function render() {
   /* a picture of a day or a lift, opened from either: above both */
   if (ui.pic) html += renderPicStudio();
   if (ui.notifyWin) html += renderNotifyWindow();
+  if (ui.pinMenu) html += renderPinMenu();
   if (ui.appToast) html += renderAppToast();
 
   html += `</div></div>`;
@@ -7879,8 +7878,9 @@ function renderHome(settings, currentWeek, unit) {
   return `<div class="" style="padding:calc(18px + var(--pb-sat)) 16px 0">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
       <div style="display:flex;align-items:center;gap:11px;min-width:0">
-        ${/* pinned profiles take the logo's place, the same spot on every tab */
-          pinStrip(34) || `<img src="logoC.png" alt="${T("a11y.logo")}" width="46" height="46" style="width:46px;height:46px;object-fit:contain;border-radius:11px;display:block;flex-shrink:0">`}
+        ${/* once a profile is pinned, the one on screen's badge takes the
+             logo's place, the same spot on every tab */
+          pinBadge(34) || `<img src="logoC.png" alt="${T("a11y.logo")}" width="46" height="46" style="width:46px;height:46px;object-fit:contain;border-radius:11px;display:block;flex-shrink:0">`}
         <div class="pb-num" style="line-height:1.05;min-width:0">
           <div style="font-size:20px;font-weight:700;letter-spacing:.02em;color:var(--text)">ZENOFIT</div>
           <div style="font-size:12.5px;font-weight:600;letter-spacing:.32em;color:var(--gold)">${T("app.tagline")}</div>
@@ -13706,7 +13706,7 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
       <button data-action="close-worksheet" title="${planning ? T("plan.closeKeep") : draft.editing ? T("wo.close") : T("wo.closeKeep")}" style="color:var(--muted);padding:4px">${icon("x", 21)}</button>
       ${/* switching from here carries the workout over (switchProfile);
             not from an edit of a logged day or a plan */
-        planning || draft.editing ? "" : pinStrip(28)}
+        planning || draft.editing ? "" : pinBadge(28)}
       <div class="pb-num" style="font-size:19px;font-weight:700;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${planning ? (draft.planId ? T("plan.edit") : T("plan.new")) : draft.editing ? T("wo.edit") : T("wo.new")}</div>
       ${wk ? chip(T("common.week", { n: wk }), planning ? "var(--steel)" : "var(--gold)", "flex-shrink:0;white-space:nowrap") : ""}
       ${draft.editing ? `<button data-action="delete-day" title="${T("wo.deleteDay")}" style="color:var(--red);padding:4px">${icon("trash-2", 19)}</button>` : ""}
@@ -18075,25 +18075,54 @@ function badgeLook(p, i, pin) {
 /* black or white on a filled badge, whichever reads on that colour; pure
    black, because the app's near-black left the red at 4.49:1 */
 const badgeInk = (hex) => (picLum(hex) > 0.179 ? "#000000" : "#ffffff");
-function badgeHTML(look, size, on) {
+function badgeHTML(look, size) {
   const n = graphemes(look.text).length;
   const fs = Math.round(size * (n > 2 ? 0.34 : n > 1 ? 0.4 : 0.48));
   const solid = look.style === "solid";
-  return `<span aria-hidden="true" style="width:${size}px;height:${size}px;border-radius:${look.shape === "square" ? Math.round(size * 0.28) : size / 2}px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;font-weight:700;font-size:${fs}px;line-height:1;background:${solid ? look.color : "transparent"};color:${solid ? badgeInk(look.color) : inkFor(look.color)};border:2px solid ${look.color};${on ? "box-shadow:0 0 0 2px var(--bg),0 0 0 4px var(--gold);" : ""}">${look.icon ? icon(look.icon, Math.round(size * 0.54)) : esc(look.text)}</span>`;
+  return `<span aria-hidden="true" style="width:${size}px;height:${size}px;border-radius:${look.shape === "square" ? Math.round(size * 0.28) : size / 2}px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;box-sizing:border-box;font-weight:700;font-size:${fs}px;line-height:1;background:${solid ? look.color : "transparent"};color:${solid ? badgeInk(look.color) : inkFor(look.color)};border:2px solid ${look.color}">${look.icon ? icon(look.icon, Math.round(size * 0.54)) : esc(look.text)}</span>`;
 }
-/* The strip: every pinned profile, in the profile list's own order. */
-function pinStrip(size) {
+/* A profile's badge and name as the top bar draws them. The one on screen
+   has its person's name even when it is not pinned. */
+function pinView(p, i, pins) {
+  const who = (pins[p.id] && pins[p.id].who) || (p.id === activeProfileId() && String(state.settings.name || "").trim()) || "";
+  return { look: badgeLook(p, i, pins[p.id] || { who }), name: who || profileLabel(p, i) };
+}
+/* ONE badge at the top, the profile on screen's, once anything is pinned:
+   a row of them cut the second one off with only two. A tap drops the
+   menu down from it (renderPinMenu). */
+function pinBadge(size) {
   const pins = pinsRead();
-  const rows = profileList().map((p, i) => ({ p, i })).filter((x) => pins[x.p.id]);
-  if (!rows.length) return "";
-  const active = activeProfileId();
-  /* at most half the header: past that it scrolls sideways (the badge cut
-     at its edge says there are more), and the title beside it keeps room */
-  return `<div style="display:flex;align-items:center;gap:8px;padding:4px;margin:-4px;overflow-x:auto;scrollbar-width:none;min-width:0;flex:0 1 auto;max-width:50%">${rows.map(({ p, i }) => {
-    const on = p.id === active;
-    const name = pins[p.id].who || profileLabel(p, i);
-    return `<button data-action="pin-switch" data-id="${esc(p.id)}" aria-label="${esc(T(on ? "badge.onScreen" : "badge.switchTo", { name }))}"${on ? ' aria-current="true"' : ""} style="display:flex;padding:0;flex-shrink:0">${badgeHTML(badgeLook(p, i, pins[p.id]), size, on)}</button>`;
-  }).join("")}</div>`;
+  const list = profileList();
+  const i = list.findIndex((p) => p.id === activeProfileId());
+  if (i < 0 || !list.some((p) => pins[p.id])) return "";
+  const v = pinView(list[i], i, pins);
+  /* while the menu is open its own copy sits exactly here */
+  return `<button data-action="pin-menu" data-size="${size}" aria-label="${esc(T("badge.menu", { name: v.name }))}" aria-haspopup="menu" aria-expanded="${!!ui.pinMenu}" style="display:flex;padding:0;flex-shrink:0${ui.pinMenu ? ";visibility:hidden" : ""}">${badgeHTML(v.look, size)}</button>`;
+}
+/* The menu, dropped from the badge at the badge's own spot: the profile on
+   screen at the top (a second tap opens its look), every other pinned one
+   under it in the profile list's order, and ··· for the Profiles window,
+   where profiles are pinned, unpinned and made. A tap anywhere else only
+   closes it. */
+function renderPinMenu() {
+  const m = ui.pinMenu, s = m.size, pad = 6;
+  const pins = pinsRead();
+  const list = profileList();
+  const id = activeProfileId();
+  const i = list.findIndex((p) => p.id === id);
+  if (i < 0) return "";
+  const item = (action, p, k, key) => {
+    const v = pinView(p, k, pins);
+    return `<button data-action="${action}" data-id="${esc(p.id)}" role="menuitem" aria-label="${esc(T(key, { name: v.name }))}" style="display:flex;padding:0;flex-shrink:0">${badgeHTML(v.look, s)}</button>`;
+  };
+  const others = list.map((p, k) => ({ p, k })).filter((x) => x.p.id !== id && pins[x.p.id]);
+  return `<div data-overlay="pinMenu" data-layer="fs" data-action="pin-menu-close" aria-label="${esc(T("profiles.title"))}" style="position:absolute;inset:0;z-index:110">
+    <div data-stopprop role="menu" class="pb-scroll${_lastOverlayKeys.has("pinMenu") ? "" : " pb-drop"}" style="position:absolute;left:${m.x - pad - 1}px;top:${m.y - pad - 1}px;max-height:calc(100% - ${Math.round(m.y)}px - var(--pb-sab) - 12px);overflow-y:auto;scrollbar-width:none;display:flex;flex-direction:column;align-items:center;gap:8px;padding:${pad}px;border-radius:${s / 2 + pad}px;background:var(--surface2);border:1px solid var(--border);box-shadow:0 8px 24px rgba(0,0,0,.35)">
+      ${item("pin-menu-own", list[i], i, "badge.onScreen")}
+      ${others.map(({ p, k }) => item("pin-switch", p, k, "badge.switchTo")).join("")}
+      <button data-action="pin-menu-more" role="menuitem" aria-label="${esc(T("badge.more"))}" style="width:${s}px;height:${s}px;border-radius:${s / 2}px;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--muted)">${icon("dots", Math.round(s * 0.62))}</button>
+    </div>
+  </div>`;
 }
 /* The profile on screen keeps its own badge's initials up to date. Never
    with an empty name: a profile whose rows have not arrived on this phone
@@ -18120,7 +18149,7 @@ function badgeSection(id) {
   const opt = (on) => `border:1px solid ${on ? "var(--gold)" : "var(--border)"};background:${on ? "rgba(233,185,73,.14)" : "var(--surface2)"};color:${on ? "var(--gold)" : "var(--muted)"}`;
   return `${head}
     <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px">
-      <span data-badge-preview style="display:flex">${badgeHTML(look, 52, false)}</span>
+      <span data-badge-preview style="display:flex">${badgeHTML(look, 52)}</span>
       <div style="font-size:12px;color:var(--muted);line-height:1.5">${T("badge.pinHint")}</div>
     </div>
     ${field(T("badge.text"), `<input class="pb-input" data-bind="badgeText" value="${esc(pin.text || "")}" placeholder="${esc(badgeInitials(pin.who || profileLabel(list[i], i)))}" maxlength="12" autocomplete="off" autocorrect="off" spellcheck="false">`, T("badge.textHint"))}
@@ -18172,7 +18201,7 @@ function renderProfilesWindow() {
     const pinned = !!pins[p.id];
     return `<div style="display:flex;align-items:center;border-bottom:${last ? "none" : "1px solid var(--border-soft)"};background:${on ? "rgba(233,185,73,.06)" : "transparent"}">
       <button ${on ? "" : `data-action="profile-switch" data-id="${esc(p.id)}"`} style="flex:1;min-width:0;display:flex;align-items:center;gap:11px;padding:13px 4px 13px 14px;text-align:left;color:var(--text)">
-        ${pinned ? badgeHTML(badgeLook(p, i, pins[p.id]), 26, false)
+        ${pinned ? badgeHTML(badgeLook(p, i, pins[p.id]), 26)
           : `<span style="width:9px;height:9px;border-radius:5px;flex-shrink:0;background:${on ? "var(--gold)" : "var(--border)"}"></span>`}
         <span style="flex:1;min-width:0">
           <span style="display:block;min-width:0;font-weight:600;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(who || label)}</span>
@@ -18235,7 +18264,7 @@ function renderProfileForm() {
     ${shared ? `<div style="font-size:12px;color:var(--steel);line-height:1.5;margin:-4px 0 12px">${profileShareLine(f.id)}</div>` : ""}
     ${adding ? field(T("profiles.who"), `<input class="pb-input" data-bind="profileWho" value="${esc(f.who || "")}" placeholder="${esc(T("profiles.whoPh"))}" maxlength="60" data-autofocus>`,
       T("profiles.whoHint")) : ""}
-    ${field(T("profiles.name"), `<input class="pb-input" data-bind="profileName" value="${esc(f.name)}" placeholder="${esc((adding && (f.who || "").trim()) || T("profiles.namePlaceholder"))}"${adding ? "" : " data-autofocus"}>`,
+    ${field(T("profiles.name"), `<input class="pb-input" data-bind="profileName" value="${esc(f.name)}" placeholder="${esc((adding && (f.who || "").trim()) || T("profiles.namePlaceholder"))}"${adding || f.look ? "" : " data-autofocus"}>`,
       T("profiles.nameHint"))}
     <button data-action="profile-form-save" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
       ${icon("check", 16)} ${T(f.mode === "rename" ? "common.saveChanges" : "profiles." + f.mode + "Btn")}
@@ -19826,18 +19855,30 @@ const actions = {
     if (i < 0) return;
     switchProfile(id);
   },
-  /* a badge across the top: another profile is one tap; the one on screen
-     opens its own settings, badge included (not over a workout, which a
-     switch is for) */
-  "pin-switch": (el) => {
-    const id = el.dataset.id;
-    if (id !== profiles.active) { switchProfile(id); return; }
-    const list = profileList();
-    const i = list.findIndex((p) => p.id === id);
-    if (i < 0 || ui.workoutSheet) return;
-    ui.profileForm = { id, name: list[i].name || "", mode: "rename" };
+  /* the badge at the top opens its menu where it is (renderPinMenu) */
+  "pin-menu": (el) => {
+    /* inside the frame's border, which is where a layer's 0 is */
+    const root = app.querySelector(".pb-root"), r = el.getBoundingClientRect(), o = root.getBoundingClientRect();
+    ui.pinMenu = { x: (r.left - o.left) / vpScale - root.clientLeft, y: (r.top - o.top) / vpScale - root.clientTop, size: +el.dataset.size || 30 };
     render();
   },
+  "pin-menu-close": () => { ui.pinMenu = null; render(); },
+  /* another profile in the menu is one tap (from a workout it carries the
+     day over, switchProfile) */
+  "pin-switch": (el) => {
+    ui.pinMenu = null;
+    if (el.dataset.id === profiles.active) render(); else switchProfile(el.dataset.id);
+  },
+  /* the one on screen, tapped again: its sheet, for its look, with no
+     keyboard springing up over it */
+  "pin-menu-own": () => {
+    ui.pinMenu = null;
+    const list = profileList();
+    const i = list.findIndex((p) => p.id === profiles.active);
+    if (i >= 0) ui.profileForm = { id: list[i].id, name: list[i].name || "", mode: "rename", look: true };
+    render();
+  },
+  "pin-menu-more": () => { ui.pinMenu = null; actions["open-profiles"](); },
   "profile-pin": (el) => {
     const id = el.dataset.id;
     if (pinsRead()[id]) pinSet(id, null);
@@ -22615,7 +22656,7 @@ const READ_OK = new Set([
      training's on screen */
   "login-agree", "terms-agree", "terms-accept", "terms-signout", "health-agree", "health-withdraw",
   "legal-open", "legal-lang", "legal-close",
-  "pin-switch", "profile-pin", "badge-color", "badge-icon", "badge-shape", "badge-style",
+  "pin-menu", "pin-menu-close", "pin-switch", "pin-menu-own", "pin-menu-more", "profile-pin", "badge-color", "badge-icon", "badge-shape", "badge-style",
   /* the account is not the training on screen, and a read-only profile
      being open must not stand between somebody and deleting their account */
   "acct-delete-open", "acct-delete-go",
@@ -23063,7 +23104,7 @@ function handleBind(el) {
     const list = profileList();
     const i = list.findIndex((p) => p.id === id);
     const prev = document.querySelector("[data-badge-preview]");
-    if (prev && i >= 0) prev.innerHTML = badgeHTML(badgeLook(list[i], i, pinsRead()[id]), 52, false);
+    if (prev && i >= 0) prev.innerHTML = badgeHTML(badgeLook(list[i], i, pinsRead()[id]), 52);
   } else if (bind === "badgeColor") {
     if (ui.profileForm && /^#[0-9a-f]{6}$/i.test(v)) { pinSet(ui.profileForm.id, { color: v.toLowerCase() }); render(); }
   } else if (bind === "profileName") {

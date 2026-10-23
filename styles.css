@@ -478,8 +478,12 @@ input[type="date"].pb-input::-webkit-date-and-time-value{
 .pb-spin{ animation:pbSpin .9s linear infinite; transform-origin:50% 50%; }
 @keyframes pbSpin{ to{ transform:rotate(360deg); } }
 
+/* The profile menu unrolls downward from its badge (renderPinMenu). */
+.pb-drop{ animation:pbDrop .16s ease-out; }
+@keyframes pbDrop{ from{ clip-path:inset(0 0 100% 0); } to{ clip-path:inset(0); } }
+
 @media (prefers-reduced-motion: reduce){
-  .pb-sheet{ animation:none; }
+  .pb-sheet,.pb-drop{ animation:none; }
   .pb-acc-body,.pb-acc-inner,.pb-acc-chevron{ transition:none; }
   .pb-timer-done{ animation:none; box-shadow:0 0 0 3px rgba(233,185,73,.18); }
   /* the tap still has to show it landed, so the icon dims instead of turning */

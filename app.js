@@ -2692,7 +2692,7 @@ function closeEverything() {
      switch would point them at somebody else's */
   ui.syncSheet = null; ui.joinSheet = null; ui.syncError = null; ui.accountSheet = null; ui.deleteAcct = null;
   /* another account's codes must never be left on screen for the next one */
-  ui.recoveryShow = null; ui.recoveryForm = null; ui.recoveryLeft = null; ui.healthGate = null;
+  ui.recoveryShow = null; ui.recoveryForm = null; ui.recoveryLeft = null; ui.healthGate = null; ui.legal = null;
   /* a password given to Storage check opens that screen for that visit
      and not for whatever comes after it */
   ui.showStorage = false; ui.storUnlock = null; ui.storUnlocked = new Set();
@@ -6329,6 +6329,7 @@ const ui = {
   recoveryLeft: null,   // how many unused codes the account has, from GET /v1/me (null: not known yet)
   termsGate: null,      // {agree, busy, error} the Terms sheet an account that never accepted them gets
   healthGate: null,     // {then, sex, busy, error} consent to health data, asked before the Body window or the sex question
+  legal: null,          // {page, lang} the Privacy policy or the Terms, read inside the app (renderLegal)
   firstProfileName: "", // the name field on the no-profiles screen
   syncSheet: null,      // {localId, grants, code, copied} the share sheet
   joinSheet: null,      // {code, busy, error} redeeming somebody's code
@@ -6985,8 +6986,11 @@ function flashLogDay() {
 const BACK_CLOSE = /close|cancel|back|exit/;
 let backGuard = false, backIgnore = false;
 
+/* A window open over the login or no-profiles screen closes on back too
+   (the Privacy policy read from the signup form, Storage check, a sheet);
+   only those screens themselves have no tabs to go back through, so back
+   from them leaves, as from Home. */
 function backTarget() {
-  if (!accountOn() || !profiles.active) return null;
   const root = app.querySelector(".pb-root");
   if (!root) return null;
   let top = null, topZ = -Infinity;
@@ -7000,6 +7004,7 @@ function backTarget() {
     return top.querySelector('button[data-action="overlay-close"]')
       || [...top.querySelectorAll("button[data-action]")].find((b) => BACK_CLOSE.test(b.dataset.action)) || null;
   }
+  if (!accountOn() || !profiles.active) return null;
   return ui.tab !== "home" ? "home" : null;
 }
 
@@ -7233,6 +7238,7 @@ function render() {
   if (ui.recoveryShow) html += renderRecoveryCodes();
   if (ui.healthGate) html += renderHealthGate();
   if (ui.termsGate) html += renderTermsGate();
+  if (ui.legal) html += renderLegal();
   if (ui.syncSheet) html += renderSyncSheet();
   if (ui.joinSheet) html += renderJoinSheet();
   if (ui.showBody) html += renderBodyWindow(body, unit);
@@ -7465,6 +7471,8 @@ function renderGate(scrolls) {
     if (ui.recoveryShow) html += renderRecoveryCodes();
     if (ui.termsGate) html += renderTermsGate();
   }
+  /* read from the signup form as well as from inside an account */
+  if (ui.legal) html += renderLegal();
   html += `</div></div>`;
   app.innerHTML = html;
   app.querySelectorAll("[data-scrollkey]").forEach((el) => {
@@ -7474,6 +7482,7 @@ function renderGate(scrolls) {
   _lastOverlayKeys = new Set([...app.querySelectorAll("[data-overlay]")].map((e) => e.dataset.overlay));
   const af = app.querySelector("[data-autofocus]");
   if (af && document.activeElement !== af && !syncTyping()) af.focus();
+  backSync();      // a window over these screens closes on back too (backTarget)
 }
 
 const freshLogin = () => ({ username: "", password: "", busy: false, error: null, confirmCreate: false, recover: false, code: "" });
@@ -18288,8 +18297,64 @@ function consentCheck() {
    Somebody else's shared profile is theirs, consented on their account. */
 const healthGated = () => !healthOk && !profileShared(profiles.active);
 
+/* A link to one of the two documents, opened in a window of the app's own
+   (renderLegal), never a tab: an installed app has no browser around it,
+   so a tab left nobody a way back, and on an iPhone it opened Safari. A
+   button, because the click dispatcher never stops a link's own
+   navigation. */
 const legalLink = (page, key) =>
-  `<a href="${page}.html#${resolveLang(state.settings.lang)}" target="_blank" rel="noopener" style="color:var(--gold);text-decoration:underline">${T(key)}</a>`;
+  `<button type="button" data-action="legal-open" data-page="${page}" class="pb-linkbtn">${T(key)}</button>`;
+
+/* ── THE TWO DOCUMENTS, INSIDE THE APP ────────────────────────────────
+   The text is read out of privacy.html and terms.html themselves (in
+   SHELL, so this works with no signal), one <section> per language, so the
+   pages stay the one copy of it. Switching language here is a button, not
+   a #fragment: it adds nothing to the history, and every page and language
+   opens at its top (its own scroll key). A link from one document to the
+   other stays in this window; any other link (mail, IMY) opens outside. */
+const legalDocs = {};    // page -> { en, sv, uk } HTML, or "error"
+function legalLoad(page) {
+  if (legalDocs[page]) return;
+  fetch(page + ".html").then((r) => (r.ok ? r.text() : Promise.reject(r.status))).then((html) => {
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    const out = {};
+    for (const { code } of LANGS) {
+      const sec = doc.getElementById(code);
+      if (!sec) continue;
+      sec.querySelectorAll("h1, nav, script").forEach((n) => n.remove());
+      sec.querySelectorAll("a[href]").forEach((a) => {
+        const m = /^(privacy|terms)\.html/.exec(a.getAttribute("href"));
+        if (m) {
+          const b = doc.createElement("button");
+          b.type = "button"; b.className = "pb-linkbtn";
+          b.dataset.action = "legal-open"; b.dataset.page = m[1];
+          b.textContent = a.textContent;
+          a.replaceWith(b);
+        } else { a.target = "_blank"; a.rel = "noopener"; }
+      });
+      out[code] = sec.innerHTML;
+    }
+    legalDocs[page] = Object.keys(out).length ? out : "error";
+  }).catch(() => { legalDocs[page] = "error"; })
+    .then(() => { if (ui.legal && ui.legal.page === page) render(); });
+}
+function renderLegal() {
+  const { page, lang } = ui.legal;
+  const doc = legalDocs[page];
+  const body = doc === "error" ? `<div style="padding:30px 4px;text-align:center;color:var(--muted);font-size:13.5px;line-height:1.6">${T("legal.offline")}</div>`
+    : !doc ? `<div style="padding:30px;text-align:center;color:var(--faint)"><span class="pb-spin" style="display:inline-flex">${icon("refresh-cw", 20)}</span></div>`
+    : `<div class="pb-legal">${doc[lang] || doc.en || ""}</div>`;
+  return fullScreen(220, `
+    <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px;border-bottom:1px solid var(--border-soft)">
+      <button data-action="legal-close" aria-label="${T("a11y.close")}" style="color:var(--muted);padding:4px">${icon("x", 21)}</button>
+      <div class="pb-num" style="font-size:19px;font-weight:700;flex:1">${T(page === "terms" ? "terms.terms" : "terms.privacy")}</div>
+    </div>
+    <div class="pb-scroll" data-scrollkey="legal-${page}-${lang}" style="flex:1;overflow-y:auto;padding:14px 16px calc(30px + var(--pb-sab))">
+      ${segControl("legal-lang", lang, LANGS.map((l) => [l.code, l.label]))}
+      ${body}
+    </div>
+  `, "legal");
+}
 
 /* "I am 13 or older and accept…", as a checkbox the links can sit beside
    (a link inside the button would be a control inside a control) */
@@ -19714,6 +19779,15 @@ const actions = {
     ui.login = { ...ui.login, confirmCreate: false, error: null };
     render();
   },
+  "legal-open": (el) => {
+    const page = el.dataset.page === "terms" ? "terms" : "privacy";
+    ui.legal = { page, lang: ui.legal ? ui.legal.lang : resolveLang(state.settings.lang) };
+    legalLoad(page);
+    render();
+  },
+  "legal-lang": (el) => { if (ui.legal) { ui.legal = { ...ui.legal, lang: el.dataset.id }; render(); } },
+  "legal-close": () => { ui.legal = null; render(); },
+
   "login-agree": () => {
     ui.login = { ...ui.login, agree: !ui.login.agree, error: null };
     render();
@@ -22252,6 +22326,7 @@ const READ_OK = new Set([
   /* agreeing to the Terms, or to health data, is the account's, not the
      training's on screen */
   "login-agree", "terms-agree", "terms-accept", "terms-signout", "health-agree", "health-withdraw",
+  "legal-open", "legal-lang", "legal-close",
   /* the account is not the training on screen, and a read-only profile
      being open must not stand between somebody and deleting their account */
   "acct-delete-open", "acct-delete-go",

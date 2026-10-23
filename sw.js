@@ -8,7 +8,7 @@
    Scope note: this file must stay in the repo root. A service worker can only
    control pages at or below its own URL, and the app lives at /zenofit/.       */
 
-const VERSION = "zenofit-v66";
+const VERSION = "zenofit-v67";
 /* Fetched photos, keyed by id (see the PHOTOS block in app.js). Not part of
    the shell and not versioned with it: a photo's id IS its content, so a
    new build has nothing to invalidate, and clearing it on every deploy
@@ -25,6 +25,10 @@ const SHELL = [
   "./zenofit-cloud.js",
   "./app.js",
   "./icons.js",
+  /* the Privacy policy and the Terms, read inside the app (renderLegal) */
+  "./privacy.html",
+  "./terms.html",
+  "./legal.js",
   "./fonts/barlow-400-latin-ext.woff2",
   "./fonts/barlow-400-latin.woff2",
   "./fonts/barlow-500-latin-ext.woff2",

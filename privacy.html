@@ -3,17 +3,21 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<!-- No script at all: the language is picked by the address's #en, #sv or
-     #uk with CSS (:target), so this page needs nothing from the app. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'none'">
+<!-- The language is picked by the address's #en, #sv or #uk with CSS
+     (:target); legal.js only keeps switching out of the history. The app
+     reads the sections out of this file for its own window (renderLegal). -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
+<script src="legal.js" defer></script>
 <title>Zenofit: Privacy policy</title>
 <style>
   :root { color-scheme: light dark; --bg: #f4f4f4; --text: #1f2124; --muted: #4d5157; --gold: #855c14; --line: #d0d4da; }
   @media (prefers-color-scheme: dark) { :root { --bg: #1e1f22; --text: #f2f3f5; --muted: #b5bac1; --gold: #e9b949; --line: #3f4248; } }
   body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
   main { max-width: 720px; margin: 0 auto; padding: 24px 18px 60px; }
-  nav { display: flex; gap: 14px; font-size: 14px; margin-bottom: 8px; }
+  nav { display: flex; flex-wrap: wrap; gap: 14px; font-size: 14px; padding-top: 4px; }
+  nav .home { font-weight: 700; margin-right: auto; }
+  nav [aria-current] { font-weight: 700; text-decoration: none; }
   a { color: var(--gold); }
   h1 { font-size: 28px; line-height: 1.2; margin: 18px 0 4px; }
   h2 { font-size: 19px; margin: 28px 0 6px; padding-top: 14px; border-top: 1px solid var(--line); }
@@ -26,9 +30,8 @@
 </head>
 <body>
 <main>
-<nav><a href="#en" hreflang="en">English</a><a href="#sv" hreflang="sv">Svenska</a><a href="#uk" hreflang="uk">Українська</a></nav>
-
 <section id="en" lang="en">
+<nav><a href="./" class="home">Zenofit</a><a href="#en" hreflang="en" aria-current="true">English</a><a href="#sv" hreflang="sv">Svenska</a><a href="#uk" hreflang="uk">Українська</a></nav>
 <h1>Privacy policy</h1>
 <p class="ver">Zenofit · version of 23 October 2026</p>
 <p>Zenofit is a workout tracker. This page says what it stores about you, why, where, for how long, who else handles it, and what you can do about it.</p>
@@ -87,6 +90,7 @@
 </section>
 
 <section id="sv" lang="sv">
+<nav><a href="./" class="home">Zenofit</a><a href="#en" hreflang="en">English</a><a href="#sv" hreflang="sv" aria-current="true">Svenska</a><a href="#uk" hreflang="uk">Українська</a></nav>
 <h1>Integritetspolicy</h1>
 <p class="ver">Zenofit · version från 23 oktober 2026</p>
 <p>Zenofit är en träningsdagbok. Här står vad appen sparar om dig, varför, var, hur länge, vilka andra som hanterar det och vad du kan göra.</p>
@@ -145,6 +149,7 @@
 </section>
 
 <section id="uk" lang="uk">
+<nav><a href="./" class="home">Zenofit</a><a href="#en" hreflang="en">English</a><a href="#sv" hreflang="sv">Svenska</a><a href="#uk" hreflang="uk" aria-current="true">Українська</a></nav>
 <h1>Політика конфіденційності</h1>
 <p class="ver">Zenofit · версія від 23 жовтня 2026 року</p>
 <p>Zenofit є щоденником тренувань. Тут сказано, що застосунок зберігає про вас, навіщо, де, як довго, хто ще це обробляє і що ви можете з цим зробити.</p>

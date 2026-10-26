@@ -424,11 +424,6 @@ input[type="date"].pb-input::-webkit-date-and-time-value{
 .pb-placeholder{ border:1.5px dashed var(--border); border-radius:12px; color:var(--faint);
   display:flex; align-items:center; justify-content:center; text-align:center;
   font-size:11px; letter-spacing:.06em; text-transform:uppercase; font-weight:600; }
-/* The camera control beside a photo picker (capture="environment"). A
-   computer with a mouse has no camera to open that way and would only show
-   the file picker twice, so it is not drawn there. !important because the
-   chat tile carries its display inline. */
-@media (hover: hover) and (pointer: fine){ .pb-cam{ display:none !important; } }
 /* words only a screen reader hears, beside a glyph that says the same thing */
 .pb-sr{ position:absolute; width:1px; height:1px; margin:-1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0; padding:0; }
 /* A message is long-pressed for its menu (copy, unsend), so the browser's

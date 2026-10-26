@@ -718,8 +718,6 @@ const filledSets = (e) => (e.setList || []).filter((s) => setHasData(s, kindOf(e
    and a drop are never the same set (a drop continues an EFFORT). */
 const isWarm = (s) => !!(s && s.warm);
 const workSets = (e) => filledSets(e).filter((s) => !isWarm(s));
-/* how many warm-ups open the list, which is where a new one goes */
-const warmLead = (list) => { let n = 0; while (n < (list || []).length && isWarm(list[n])) n++; return n; };
 /* the number a row is called by: work sets count 1, 2, 3 past the warm-ups,
    which count among themselves */
 const setNumbers = (list) => { let w = 0, s = 0; return (list || []).map((x) => (isWarm(x) ? ++w : ++s)); };
@@ -6458,6 +6456,9 @@ const ui = {
      stops matching, so none of the twenty places that open an entry form
      has to remember to switch the mode off. */
   setOrder: null,
+  /* the open entry's id while the arrow beside Add set shows the special
+     kinds of set (a warm-up, a drop), keyed like setOrder */
+  setKinds: null,
   libOrder: false,      // …the exercise library is, inside each of its groups
   variationOrder: false, // …the open exercise's family of variations is
   progSeg: "progress",  // calc | progress | standards, Progress sub-tab
@@ -6552,6 +6553,7 @@ function resetTransient() {
   ui.timerOrder = false;
   ui.entryOrder = false;
   ui.setOrder = null;
+  ui.setKinds = null;
   ui.libOrder = false;
   ui.variationOrder = false;
   ui.volumeWeek = weekOf(todayStr(), state.settings.startDate);
@@ -11643,17 +11645,15 @@ function renderChatAttach() {
       <span style="font-size:12.5px;font-weight:600;color:var(--text)">${T("chat.kind." + k)}</span>
     </button>`;
     /* a <label> round the file input, so the picker opens from the tap
-       itself: a click forwarded from script is refused on iOS. The camera
-       is a tile of its own for the reason the exercise form has one (see
-       exWindowEditBody), hidden on a computer the same way. */
-    const photo = (cam) => `<label class="pb-card${cam ? " pb-cam" : ""}" style="display:flex;flex-direction:column;align-items:center;gap:8px;padding:14px 4px 12px;text-align:center;cursor:pointer">
-      <span style="width:44px;height:44px;border-radius:14px;display:flex;align-items:center;justify-content:center;background:${CHAT_THING_INK.image}22;color:${CHAT_THING_INK.image}">${icon(cam ? "camera" : "image", 21)}</span>
-      <span style="font-size:12.5px;font-weight:600;color:var(--text)">${T(cam ? "chat.kind.camera" : "chat.kind.image")}</span>
-      <input type="file" accept="image/*"${cam ? ' capture="environment"' : ""} data-filebind="chat.photo" style="display:none">
+       itself: a click forwarded from script is refused on iOS */
+    const photo = `<label class="pb-card" style="display:flex;flex-direction:column;align-items:center;gap:8px;padding:14px 4px 12px;text-align:center;cursor:pointer">
+      <span style="width:44px;height:44px;border-radius:14px;display:flex;align-items:center;justify-content:center;background:${CHAT_THING_INK.image}22;color:${CHAT_THING_INK.image}">${icon("image", 21)}</span>
+      <span style="font-size:12.5px;font-weight:600;color:var(--text)">${T("chat.kind.image")}</span>
+      <input type="file" accept="image/*" data-filebind="chat.photo" style="display:none">
     </label>`;
     return sheet(T("chat.attachTitle"), "chatAttach", `
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-bottom:12px">
-        ${photo(false)}${photo(true)}${tile("exercise")}${tile("preset")}${tile("workout")}${tile("plan")}${tile("record")}${tile("rank")}${tile("note")}
+        ${photo}${tile("exercise")}${tile("preset")}${tile("workout")}${tile("plan")}${tile("record")}${tile("rank")}${tile("note")}
       </div>
       <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:0 2px">${T("chat.attachHint")}</div>
     `, 78);
@@ -13654,46 +13654,25 @@ function exWindowEditBody(f, library) {
     <button data-action="group-new" data-then="exwin" title="${T("groups.newMuscleGroup")}" class="pb-btn" style="flex-shrink:0;width:42px;height:42px;color:var(--gold);background:rgba(233,185,73,.08);border:1px solid rgba(233,185,73,.4)">${icon("plus", 17, 'stroke-width="2.6"')}</button>
   </div>`;
 
-  /* Two ways in, because Chrome on Android 14 and later no longer offers
-     the camera beside the gallery for an image picker: one control for
-     the photos already on the phone, and one (`capture`) that opens the
-     camera itself. A computer has no camera to open that way, so the
-     second is hidden there (.pb-cam). Both are <label>s round their file
-     input, so the picker opens from the tap itself: a click forwarded from
-     script is refused on iOS. */
-  const pick = (cam) => `<input type="file" accept="image/*"${cam ? ' capture="environment"' : ""} data-filebind="exwin.image" style="display:none">`;
   const imageBlock = f.image
     ? `<div style="position:relative;margin-bottom:8px">
         ${photoOpen(`<img src="${esc(f.image)}" alt="" style="width:100%;max-height:260px;object-fit:cover;border-radius:12px;border:1px solid var(--border);display:block">`, "width:100%;border-radius:12px")}
         <button type="button" data-action="exwin-remove-image" class="pb-btn" style="position:absolute;top:8px;right:8px;width:34px;height:34px;border-radius:10px;background:rgba(0,0,0,.55);color:#fff">${icon("trash-2", 16)}</button>
       </div>
-      <div style="display:flex;gap:8px">
-        <label class="pb-btn pb-ghost" style="flex:1;padding:10px 0;font-size:13.5px;cursor:pointer">
-          ${icon("image", 15)} ${T("ex.replacePhoto")}
-          ${pick(false)}
-        </label>
-        <label class="pb-btn pb-ghost pb-cam" style="flex:1;padding:10px 0;font-size:13.5px;cursor:pointer">
-          ${icon("camera", 15)} ${T("ex.takePhoto")}
-          ${pick(true)}
-        </label>
-      </div>`
+      <label class="pb-btn pb-ghost" style="width:100%;padding:10px 0;font-size:13.5px;cursor:pointer">
+        ${icon("image", 15)} ${T("ex.replacePhoto")}
+        <input type="file" accept="image/*" data-filebind="exwin.image" style="display:none">
+      </label>`
     /* A row whose photo stayed on another phone offers the same control
        saying something different: there is nothing here to replace, and
        nothing this device can do to fetch it, so what is on offer is a
        picture of your OWN machine. Uploading one clears the flag, because
        the row now holds a photo and is not waiting for one. */
-    : `<div style="display:flex;gap:8px">
-        <label class="pb-placeholder" style="flex:1;min-width:0;height:120px;cursor:pointer;flex-direction:column;gap:8px;color:var(--faint);padding:0 8px;text-align:center">
-          ${icon(photoAway(f) ? "image-off" : "image-plus", 22)}
-          <span style="font-size:12px;letter-spacing:.04em;text-transform:none;font-weight:600">${T(photoAway(f) ? "ex.photoAwayAdd" : "ex.uploadPhoto")}</span>
-          ${pick(false)}
-        </label>
-        <label class="pb-placeholder pb-cam" style="flex:1;min-width:0;height:120px;cursor:pointer;flex-direction:column;gap:8px;color:var(--faint);padding:0 8px;text-align:center">
-          ${icon("camera", 22)}
-          <span style="font-size:12px;letter-spacing:.04em;text-transform:none;font-weight:600">${T("ex.takePhoto")}</span>
-          ${pick(true)}
-        </label>
-      </div>`;
+    : `<label class="pb-placeholder" style="height:120px;cursor:pointer;flex-direction:column;gap:8px;color:var(--faint)">
+        ${icon(photoAway(f) ? "image-off" : "image-plus", 22)}
+        <span style="font-size:12px;letter-spacing:.04em;text-transform:none;font-weight:600">${T(photoAway(f) ? "ex.photoAwayAdd" : "ex.uploadPhoto")}</span>
+        <input type="file" accept="image/*" data-filebind="exwin.image" style="display:none">
+      </label>`;
 
   /* A variation is named by what makes it one. Its stored name still has to
      be unique (everything in the app is keyed by it) so exwin-save composes
@@ -15724,6 +15703,8 @@ function renderSetList(f, unit, planning, isDraft) {
      number, and a grip handle living on one is a mis-tap from editing the
      wrong set. */
   const reordering = ui.setOrder === f.id && list.length > 1;
+  const kinds = ui.setKinds === f.id;
+  const canDrop = list.length > 0 && !isWarm(list[list.length - 1]);
   /* a drop continues the set above it with no rest, so it is drawn hanging
      off that set rather than as another equal row in the column */
   const drops = dropMarks(list);
@@ -15809,22 +15790,27 @@ function renderSetList(f, unit, planning, isDraft) {
 
   return `
     ${head}
-    ${reordering ? "" : `<div style="display:flex;gap:8px;margin-bottom:10px">
+    ${reordering ? "" : `<div style="display:flex;gap:8px;margin-bottom:${kinds ? 8 : 10}px">
       <button data-action="add-set" class="pb-btn pb-ghost" style="flex:1;padding:13px 0;border-style:dashed">
         ${icon("plus", 17)} ${T("sets.add")}
       </button>
-      ${/* Warm-ups come before the work, so that is when the button is there:
-            until the first work set, then Drop takes its place (a drop
-            continues a work set). A warm-up remembered later is any set's
-            editor, which can say what the set is. Not while writing a plan:
-            a plan names the work. */
-        !workCount && !planning ? `<button data-action="add-warm" class="pb-btn pb-ghost" title="${T("sets.addWarmHint")}" style="flex:0 0 auto;padding:13px 15px;border-style:dashed;color:var(--muted)">
-        ${icon("flame", 16)} ${T("sets.warm")}
-      </button>`
-        : list.length && !isWarm(list[list.length - 1]) ? `<button data-action="add-drop" class="pb-btn pb-ghost" title="${T("sets.addDropHint")}" style="flex:0 0 auto;padding:13px 15px;border-style:dashed;color:var(--steel)">
-        ${icon("chevrons-down", 16)} ${T("sets.addDrop")}
-      </button>` : ""}
-    </div>`}
+      <button data-action="set-kinds" class="pb-btn pb-ghost" aria-expanded="${kinds}" aria-label="${esc(T(planning ? "sets.addDrop" : "sets.moreKinds"))}" style="flex:0 0 auto;width:50px;padding:13px 0;border-style:dashed;color:var(--muted)">
+        ${icon(kinds ? "chevron-up" : "chevron-down", 18)}
+      </button>
+    </div>
+    ${/* One Add set, and the special kinds of set behind the arrow beside
+          it, so the row never grows a button for each. A drop continues a
+          work set, so it waits for one (disabled, still there to be
+          learnt); a warm-up can come at any point, and is not offered
+          while writing a plan, which names the work. */
+      kinds ? `<div style="display:flex;gap:8px;margin-bottom:10px">
+      ${planning ? "" : `<button data-action="add-warm" class="pb-btn pb-ghost" title="${T("sets.addWarmHint")}" style="flex:1;padding:11px 0;font-size:13.5px;border-style:dashed;color:var(--muted)">
+        ${icon("flame", 15)} ${T("sets.addWarm")}
+      </button>`}
+      <button data-action="add-drop" class="pb-btn pb-ghost" title="${T("sets.addDropHint")}" ${canDrop ? "" : "disabled"} style="flex:1;padding:11px 0;font-size:13.5px;border-style:dashed;color:var(--steel);opacity:${canDrop ? 1 : 0.45}">
+        ${icon("chevrons-down", 15)} ${T("sets.addDrop")}
+      </button>
+    </div>` : ""}`}
     ${reordering
       ? `<div class="pb-card" style="overflow:hidden;margin-bottom:8px">${dragRows}</div>
          <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 4px 10px">
@@ -16382,7 +16368,6 @@ function renderSetForm(form, unit) {
   const warm = isWarm(s);
   const above = (ui.entryForm && ui.entryForm.f.setList || []).slice(0, index);
   const n = above.filter((x) => isWarm(x) === warm).length + 1;
-  const planningNow = !!(ui.entryForm && ui.entryForm.isDraft && ui.workoutSheet && ui.workoutSheet.planning);
   /* two references, two different questions: the set that stood in this
      one's place last session, and the best this lift has ever been worth.
      Both are worked out ONCE, here, and parked in setRefs for the keystroke
@@ -16446,24 +16431,11 @@ function renderSetForm(form, unit) {
         <span style="width:18px;height:18px;border-radius:6px;flex-shrink:0;border:1px solid ${isDrop(s) ? "var(--steel)" : "var(--border)"};background:${isDrop(s) ? "var(--steel)" : "transparent"};display:flex;align-items:center;justify-content:center;color:var(--bg)">${isDrop(s) ? icon("check", 12) : ""}</span>
       </button>`
     : "";
-  /* What the set IS can be said here, for a set already logged or one
-     opened as a warm-up (switched off, it stays, so it can be switched
-     back): a new work set does not carry the row, because
-     the warm-ups have their own button, before the work. A plan names the
-     work only. */
-  const warmRow = !planningNow && (warm || !isNew || form.asWarm)
-    ? `<button data-action="set-warm-toggle" aria-pressed="${warm}" style="width:100%;display:flex;align-items:center;gap:10px;padding:11px 12px;margin-bottom:12px;border-radius:11px;border:1px ${warm ? "solid var(--muted)" : "dashed var(--border)"};background:${warm ? "var(--surface2)" : "transparent"};text-align:left">
-        ${icon("flame", 16, `style="color:${warm ? "var(--text)" : "var(--faint)"};flex-shrink:0"`)}
-        <span style="flex:1;min-width:0">
-          <span style="display:block;font-size:13.5px;font-weight:600;color:${warm ? "var(--text)" : "var(--muted)"}">${T("sets.warmToggle")}</span>
-          <span style="display:block;font-size:11px;color:var(--faint)">${T("sets.warmToggleHint")}</span>
-        </span>
-        <span style="width:18px;height:18px;border-radius:6px;flex-shrink:0;border:1px solid ${warm ? "var(--muted)" : "var(--border)"};background:${warm ? "var(--muted)" : "transparent"};display:flex;align-items:center;justify-content:center;color:var(--bg)">${warm ? icon("check", 12) : ""}</span>
-      </button>`
-    : "";
+  /* A warm-up is chosen on the way in (the arrow beside Add set) and says
+     so in its title; the editor carries no switch for it, which would be
+     a row on every set for a choice made once or twice a lift. */
   const title = warm ? T(isNew ? "setForm.addWarm" : "setForm.editWarm", { n }) : T(isNew ? "setForm.add" : "setForm.edit", { n });
   return sheet(title, "setForm", `
-    ${warmRow}
     ${dropRow}
     ${inputs}
     ${target}
@@ -22354,25 +22326,35 @@ const actions = {
     const f = ui.entryForm && ui.entryForm.f;
     if (!f || !isDetailed(f)) return;
     const i = f.setList.length;
+    ui.setKinds = null;
     ui.setForm = { s: openingSetFor(f, ui.entryForm.isDraft, i), isNew: true, index: i };
     render();
   },
   /* the same new set as any other, marked as continuing the one above, and
      it has to SAY so on the way in, or openingSetFor works out the key of a
      normal set and offers last week's normal set for a drop */
-  /* a warm-up goes after the warm-ups already there, before any work set,
-     and opens on last time's warm-up in that place (openingSetFor) */
+  /* the arrow beside Add set, keyed by the entry like set-reorder */
+  "set-kinds": () => {
+    const f = ui.entryForm && ui.entryForm.f;
+    if (!f) return;
+    ui.setKinds = ui.setKinds === f.id ? null : f.id;
+    render();
+  },
+  /* a warm-up goes at the end, where it was done, and opens on last time's
+     warm-up in the same place among the warm-ups (openingSetFor) */
   "add-warm": () => {
     const f = ui.entryForm && ui.entryForm.f;
     if (!f || !isDetailed(f)) return;
-    const i = warmLead(f.setList);
-    ui.setForm = { s: { ...openingSetFor(f, ui.entryForm.isDraft, i, false, true), warm: true }, isNew: true, index: i, asWarm: true };
+    const i = f.setList.length;
+    ui.setKinds = null;
+    ui.setForm = { s: { ...openingSetFor(f, ui.entryForm.isDraft, i, false, true), warm: true }, isNew: true, index: i };
     render();
   },
   "add-drop": () => {
     const f = ui.entryForm && ui.entryForm.f;
     if (!f || !isDetailed(f) || !f.setList.length || isWarm(f.setList[f.setList.length - 1])) return;
     const i = f.setList.length;
+    ui.setKinds = null;
     ui.setForm = { s: { ...openingSetFor(f, ui.entryForm.isDraft, i, true), drop: true }, isNew: true, index: i };
     render();
   },
@@ -22387,14 +22369,6 @@ const actions = {
     ui.setForm.s.drop = !ui.setForm.s.drop;
     render();
   },
-  /* a warm-up is never a drop: a drop continues an effort */
-  "set-warm-toggle": () => {
-    if (!ui.setForm) return;
-    const s = { ...ui.setForm.s };
-    if (isWarm(s)) delete s.warm; else { s.warm = true; delete s.drop; }
-    ui.setForm.s = s;
-    render();
-  },
   "edit-set": (el) => {
     const f = ui.entryForm && ui.entryForm.f;
     if (!f || !isDetailed(f)) return;
@@ -22406,10 +22380,8 @@ const actions = {
   "save-set": () => {
     const form = ui.setForm, f = ui.entryForm && ui.entryForm.f;
     if (!form || !f || !setReady(form.s, kindOf(f))) return;
-    /* a new set goes where it was opened: the end, or for a warm-up the
-       end of the warm-ups */
     const list = form.isNew
-      ? [...f.setList.slice(0, form.index), form.s, ...f.setList.slice(form.index)]
+      ? [...f.setList, form.s]
       : f.setList.map((x) => (x.id === form.s.id ? form.s : x));
     ui.entryForm.f = syncEntry({ ...f, setList: list });
     ui.setForm = null;

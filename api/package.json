@@ -10,7 +10,7 @@
     "tail": "wrangler tail"
   },
   "devDependencies": {
-    "wrangler": "^4.149.0"
+    "wrangler": "^4.152.0"
   },
   "dependencies": {
     "@block65/webcrypto-web-push": "^2.0.0"

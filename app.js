@@ -701,6 +701,32 @@ const setLine = (s, kind = DEFAULT_KIND, unit) =>
 
 const filledSets = (e) => (e.setList || []).filter((s) => setHasData(s, kindOf(e)));
 
+/* ── A WARM-UP IS LOGGED, NEVER MEASURED ──────────────────────────────
+   `set.warm` marks a set done to get ready for the work, not as part of
+   it: the empty bar, then 60 on the way to 100. It is a record of what you
+   did, so it stays on the entry, travels, exports, and is drawn wherever
+   a session is read back (the set list, Last time, the lift's history,
+   the graph's point detail), marked with the flame. But nothing MEASURES
+   it: it is not one of the entry's sets (`syncEntry` counts and ranks
+   `workSets` only, so weekly volume, the PR badge, the est. 1RM and the
+   graph never see it), it has no place in the chain a session is matched
+   on (`chainKeys` gives it null, so it is never graded against last time
+   and never the bar a set is graded against), and a plan's sets answer
+   only work sets. `filledSets` still holds every set with numbers in it,
+   warm-ups included, because it is what a save keeps: a progress figure
+   reads `workSets`, a save or a readback reads `filledSets`. A warm-up
+   and a drop are never the same set (a drop continues an EFFORT). */
+const isWarm = (s) => !!(s && s.warm);
+const workSets = (e) => filledSets(e).filter((s) => !isWarm(s));
+/* how many warm-ups open the list, which is where a new one goes */
+const warmLead = (list) => { let n = 0; while (n < (list || []).length && isWarm(list[n])) n++; return n; };
+/* the number a row is called by: work sets count 1, 2, 3 past the warm-ups,
+   which count among themselves */
+const setNumbers = (list) => { let w = 0, s = 0; return (list || []).map((x) => (isWarm(x) ? ++w : ++s)); };
+/* the flame a warm-up wears in place of its number, said in words to a
+   screen reader */
+const warmMark = (size = 11) => `<span style="color:var(--muted);display:inline-flex;vertical-align:-1px">${icon("flame", size)}</span><span class="pb-sr">${T("sets.warm")}</span>`;
+
 /* ── A PLANNED SET MAY NAME ONLY PART OF A SET ────────────────────────
    "80 kg, reps on the day", "ten at RPE 8", "something at RPE 8": any one
    number is a plan, because that is how people decide a set before doing
@@ -774,11 +800,12 @@ const isSuper = (e) => !!(e && e.superWith);
    more", which is the only place a run gets a label. */
 function linkMarks(list, linked) {
   const rows = list || [];
-  const cont = rows.map((x, i) => i > 0 && linked(x));
+  const cont = rows.map((x, i) => i > 0 && linked(x, i));
   return { cont, head: rows.map((x, i) => !cont[i] && !!cont[i + 1]) };
 }
 
-const dropMarks = (sets) => linkMarks(sets, isDrop);
+/* a drop under a warm-up continues nothing: it starts a set of its own */
+const dropMarks = (sets) => linkMarks(sets, (s, i) => isDrop(s) && !isWarm(sets[i - 1]));
 const superMarks = (entries) => linkMarks(entries, isSuper);
 
 /* ── WHERE A SET SITS, WHICH IS NOT THE SAME AS ITS NUMBER ────────────
@@ -809,7 +836,9 @@ function chainKeys(list) {
   const out = [];
   let chain = -1, pos = 0;
   (list || []).forEach((s, i) => {
-    if (i > 0 && isDrop(s)) pos += 1;
+    /* a warm-up has no place in the order of efforts (see isWarm) */
+    if (isWarm(s)) { out.push(null); return; }
+    if (i > 0 && isDrop(s) && !isWarm(list[i - 1])) pos += 1;
     else { chain += 1; pos = 0; }
     out.push(chain + "." + pos);
   });
@@ -828,9 +857,9 @@ const chainKeyAt = (list, index, asDrop) => {
 function syncEntry(e) {
   const k = kindOf(e);
   if (!isDetailed(e) || k === "cardio") return e;
-  const filled = filledSets(e);
-  const b = bestSet(filled, k);
-  return { ...e, sets: filled.length,
+  const work = workSets(e);
+  const b = bestSet(work, k);
+  return { ...e, sets: work.length,
     reps: b ? b.reps : "", weight: b ? b.weight : "", rpe: b ? b.rpe : "", secs: b ? b.secs : "" };
 }
 
@@ -917,9 +946,14 @@ function entrySummary(e, unit, withRpe = false) {
   const k = kindOf(e);
   if (k === "cardio") return T("sug.cardioSet", { min: esc(e.minutes), rpe: esc(e.intensity) });
   const label = T("sets.summaryBest");
+  /* the warm-ups are named beside the sets they are not part of, and a
+     lift that only got as far as its warm-ups says just that */
+  const warm = (e.setList || []).filter((s) => isWarm(s) && setHasData(s, k)).length;
+  const warmText = warm ? TN("warmup", warm) : "";
+  if (warm && !(+e.sets > 0)) return warmText;
   /* always in the unit the set was actually logged in, never converted:
      what you typed is what you read back */
-  return `${TN("set", +e.sets || 0)} · ${label} ${setLine(e, k, unitOf(e))}` +
+  return `${TN("set", +e.sets || 0)}${warm ? " + " + warmText : ""} · ${label} ${setLine(e, k, unitOf(e))}` +
     (withRpe && e.rpe ? ` · RPE ${esc(e.rpe)}` : "");
 }
 
@@ -1009,8 +1043,10 @@ function earlierOutings(f, isDraft) {
     kindOf(e) === k &&
     /* a row someone unticked back to not-done is not a session they had.
        Leaving it in would let it BE the "last day you trained this" and
-       come back with nothing in it, hiding the real last time behind it. */
-    entryHasData(e) &&
+       come back with nothing in it, hiding the real last time behind it.
+       Nor is a day of warm-ups only: it is on record, but there is no work
+       in it to be measured against. */
+    (kindOf(e) === "cardio" ? entryHasData(e) : workSets(e).length > 0) &&
     !(editingIds && editingIds.has(e.id)) &&
     (e.date < date || (e.date === date && e.createdAt < (f.createdAt || 0))));
 }
@@ -1021,7 +1057,7 @@ function entryBest(f) {
   if (!f) return null;
   const k = kindOf(f);
   if (k === "cardio") return cardioScore(+f.minutes, +f.intensity);
-  const b = bestSet(filledSets(f), k);
+  const b = bestSet(workSets(f), k);
   if (!b || !setHasData(b, k)) return null;
   /* strength alone has to be converted, since the bar it is measured
      against is in the default unit */
@@ -1133,9 +1169,10 @@ function outingRows(entries) {
        logged, and only one of those is true. Read upward from the order,
        exactly as renderSetList reads it, so a set that opened an entry
        cannot continue the last set of the entry before it. */
-    filledSets(e).forEach((st, i) => {
+    /* a warm-up is read back too, marked, and is never the session's best */
+    filledSets(e).forEach((st, i, all) => {
       rows.push({ kind: k, reps: st.reps, weight: st.weight, secs: st.secs, rpe: st.rpe, unit: u,
-        m: setScore(st, k), drop: i > 0 && isDrop(st) });
+        m: setScore(st, k), drop: i > 0 && isDrop(st) && !isWarm(all[i - 1]), warm: isWarm(st) });
     });
   }
   /* computed on the MERGED list, so two entries of the same lift on one day
@@ -1143,7 +1180,7 @@ function outingRows(entries) {
   const keys = chainKeys(rows);
   rows.forEach((r, i) => { r.key = keys[i]; });
   let best = null;
-  for (const r of rows) if (r.m != null && (best == null || r.m > best.m)) best = r;
+  for (const r of rows) if (!r.warm && r.m != null && (best == null || r.m > best.m)) best = r;
   return { rows, note, best };
 }
 
@@ -1193,15 +1230,19 @@ function lastOuting(f, isDraft) {
    typed into today's log, and it has to be in today's units to mean
    anything. Nothing is written until the set is saved: this is a starting
    point in an editor, not an entry in the log. */
-function openingSetFor(f, isDraft, index, asDrop) {
+function openingSetFor(f, isDraft, index, asDrop, asWarm) {
   const eUnit = unitOf(f), k = kindOf(f);
   const last = lastOuting(f, isDraft);
   /* by chain coordinate, not by row number: a third set opens on last
      week's third SET, never on the drop that happened to be third in the
-     list, and a drop opens on last week's drop off the same set */
-  const key = chainKeyAt(f.setList, index, asDrop);
+     list, and a drop opens on last week's drop off the same set. A warm-up
+     has no coordinate, so it opens on last time's warm-up in the same
+     place among the warm-ups: the second on last week's second. */
   const rows = last ? last.rows.filter((r) => r.kind === k && setHasData(r, k)) : [];
-  const r = rows.find((x) => x.key === key);
+  const key = asWarm ? null : chainKeyAt(f.setList, index, asDrop);
+  const r = asWarm
+    ? rows.filter((x) => x.warm)[(f.setList || []).slice(0, index).filter(isWarm).length]
+    : rows.find((x) => x.key === key);
   if (r) {
     if (k === "bodyweight") return newSet(String(r.reps), "", r.rpe || "");
     if (k === "hold") return newSet("", "", r.rpe || "", String(r.secs));
@@ -1545,7 +1586,7 @@ function entryPlanResult(e) {
     const v = cardioVerdict(e, t);
     return { total: 1, done: v ? 1 : 0, hit: v === "hit" || v === "beat" ? 1 : 0, beat: v === "beat" ? 1 : 0, under: v === "under" ? 1 : 0, bonus: 0, verdicts: [v] };
   }
-  const list = filledSets(e);
+  const list = workSets(e);
   const verdicts = t.sets.map((ts, i) => setVerdict(list[i], ts, kindOf(e)));
   const done = verdicts.filter(Boolean).length;
   return {
@@ -1594,7 +1635,7 @@ function lastTimeSets(f, isDraft) {
      rounding used to invent for a set that repeated last time exactly */
   const k = kindOf(f);
   const rows = last.rows
-    .filter((r) => r.kind === k && setHasData(r, k))
+    .filter((r) => r.kind === k && !r.warm && setHasData(r, k))
     /* reps and seconds are unitless and pass straight through; only a
        weight has to be brought into the unit being typed in today. `key`
        rides along because it, not the row number, is what today's sets are
@@ -1611,7 +1652,7 @@ function lastTimeSets(f, isDraft) {
    are two questions, and a planned set gets both answers. */
 function entryLastResult(f, isDraft) {
   if (!f || !isSetKind(kindOf(f))) return null;
-  if (!filledSets(f).length) return null;
+  if (!workSets(f).length) return null;
   const prev = lastTimeSets(f, isDraft);
   if (!prev) return null;
   const list = f.setList || [];
@@ -1633,7 +1674,7 @@ function entryLastResult(f, isDraft) {
        the session ran longer or because you dropped where you did not
        before. (This counted `list.length - prev.rows.length` and passed the
        INDEX to setHasData as a kind, which read every kind as strength.) */
-    extra: list.filter((x, i) => setHasData(x, k) && !pairs[i]).length,
+    extra: list.filter((x, i) => !isWarm(x) && setHasData(x, k) && !pairs[i]).length,
   };
 }
 
@@ -4626,7 +4667,7 @@ async function rosterSync(opts) {
 function chatReset(keep) {
   if (!keep) chatForget();
   ui.chatThread = null; ui.chatMenu = null; ui.chatBlocks = null; ui.chatFind = ""; ui.chatResults = null;
-  ui.chatMsgMenu = null; ui.chatAttach = null; ui.chatView = null; ui.chatImage = null; ui.shareTo = null;
+  ui.chatMsgMenu = null; ui.chatAttach = null; ui.chatView = null; ui.photoView = null; ui.shareTo = null;
 }
 
 /* Just logged in. The account's own list, from this device if it has held
@@ -6472,7 +6513,7 @@ const ui = {
   chatMsgMenu: null,    // {threadId, messageId} a long-pressed message's copy/unsend sheet
   chatAttach: null,     // {threadId, step, q} the composer's + sheet
   chatView: null,       // {threadId, messageId, done?} a shared thing, open in full
-  chatImage: null,      // {threadId, messageId} a photo, full screen
+  photoView: null,      // {src, id, alt} any photo, full screen (renderPhotoView)
   shareTo: null,        // {kinds, kind, ref, busy?, sent?, failed?} "send in a chat" from elsewhere
   pic: null,            // the share-a-picture window: what it is about and how it looks (see picOpen)
   /* Whether the open conversation is pinned to its newest message. True
@@ -7293,7 +7334,7 @@ function render() {
      a card in full, a photo, the + sheet, and the two menus */
   if (ui.chatThread) html += renderChatThread();
   if (ui.chatView) html += renderChatView();
-  if (ui.chatImage) html += renderChatImage();
+  if (ui.photoView) html += renderPhotoView();
   if (ui.chatAttach) html += renderChatAttach();
   if (ui.chatMenu) html += renderChatMenu();
   if (ui.chatBlocks) html += renderChatBlocks();
@@ -7397,7 +7438,7 @@ const A11Y_ACTION = {
   "overlay-close": "a11y.close", "exwin-close": "a11y.close", "close-profile": "a11y.close", "close-body": "a11y.close",
   "close-entry": "a11y.back", "close-profiles": "a11y.back", "close-picker": "a11y.back", "close-worksheet": "a11y.back",
   "chat-close": "a11y.back", "notify-close": "a11y.back", "close-storage": "a11y.back", "chat-view-close": "a11y.close",
-  "chat-image-close": "a11y.close", "chart-exit-full": "a11y.close", "toast-dismiss": "a11y.close",
+  "photo-close": "a11y.close", "chart-exit-full": "a11y.close", "toast-dismiss": "a11y.close",
 };
 /* A frame is a new DOM, so the control that had the keyboard is gone with
    the old one and focus falls to <body>: a screen reader starts again from
@@ -9425,7 +9466,7 @@ function stdBestSetFor(ex, sEx) {
   for (const e of state.log || []) {
     if (e.exercise !== ex.name || kindOf(e) !== want) continue;
     const u = unitOf(e);
-    for (const s of filledSets(e)) {
+    for (const s of workSets(e)) {
       const m = want === "strength" ? metricFor(+s.weight, +s.reps, u) : setScore(s, want);
       if (m == null || (best && m <= best.m)) continue;
       best = { m, reps: s.reps, weight: s.weight, unit: u, date: e.date };
@@ -9762,12 +9803,12 @@ function renderPointDetail(scope = "main") {
     <div style="font-size:12.5px;color:var(--muted);margin-top:3px">${entrySummary(e, eUnit, true)}</div>
     ${sets.length ? `<div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:9px">
       ${(() => {
-        const drops = dropMarks(sets);
+        const drops = dropMarks(sets), nums = setNumbers(sets);
         return sets.map((s, i) => {
           const cont = drops.cont[i];
-          const head = cont
-            ? `<span style="color:var(--steel)" title="${T("sets.dropset")}">${icon("corner-down-right", 10)}</span>`
-            : `${i + 1} ·`;
+          const head = isWarm(s) ? warmMark(10)
+            : cont ? `<span style="color:var(--steel)" title="${T("sets.dropset")}">${icon("corner-down-right", 10)}</span>`
+            : `${nums[i]} ·`;
           return chip(`${head} ${setLine(s, ek, eUnit)}${s.rpe ? ` @${esc(s.rpe)}` : ""}`, cont ? "var(--steel)" : "");
         }).join("");
       })()}
@@ -10433,7 +10474,7 @@ function chatThreadBodyHTML(f) {
         : `<div style="${box};display:flex;align-items:center;justify-content:center;background:var(--surface2);color:var(--faint)">${icon("image-off", 20)}</div>`;
       return `${sep}<div style="display:flex;justify-content:${side};margin-bottom:7px">
         <div ${press} class="pb-msg" style="max-width:78%;${m.pending ? "opacity:.72;" : ""}">
-          <button data-action="chat-image" data-id="${esc(f.threadId)}" data-m="${esc(m.messageId)}" style="display:block;padding:0;border-radius:14px;overflow:hidden;border:1px solid ${m.failed ? "var(--red)" : "var(--border-soft)"}">${img}</button>
+          <button data-action="photo-view" style="display:block;padding:0;border-radius:14px;overflow:hidden;border:1px solid ${m.failed ? "var(--red)" : "var(--border-soft)"}">${img}</button>
           ${under}
         </div>
       </div>`;
@@ -10764,7 +10805,7 @@ async function chatBuildThing(kind, ref) {
       const k = kindOf(e);
       const row = { exercise: e.exercise, muscle: groupOfEntry(e), kind: k, unit: unitOf(e) };
       if (k === "cardio") { row.minutes = e.minutes; row.intensity = e.intensity; }
-      else row.sets = filledSets(e).map((st) => ({ reps: st.reps, weight: st.weight, secs: st.secs, drop: isDrop(st) }));
+      else row.sets = filledSets(e).map((st) => ({ reps: st.reps, weight: st.weight, secs: st.secs, drop: isDrop(st), ...(isWarm(st) ? { warm: true } : {}) }));
       if (e.notes) row.notes = e.notes;
       return row;
     });
@@ -10780,7 +10821,7 @@ async function chatBuildThing(kind, ref) {
     if (!hist.best) return null;
     const ex = findEx(ref);
     const b = hist.best, k = hist.kind, units = state.settings.units;
-    const set = k === "cardio" ? { minutes: b.minutes, intensity: b.intensity } : (bestSet(filledSets(b), k) || {});
+    const set = k === "cardio" ? { minutes: b.minutes, intensity: b.intensity } : (bestSet(workSets(b), k) || {});
     const series = chatThin(hist.chart.map((pt) => [pt.e.date, Math.round(pt.y * 10) / 10]));
     const value = Math.round(b.m * 10) / 10;
     const snap = ex ? await chatSnapOf(ex, ups) : { name: ref };
@@ -10971,7 +11012,7 @@ function chatThingCard(m) {
 
   if (m.kind === "workout") {
     const rows = pList(p.entries, 60);
-    const sets = rows.reduce((n, r) => n + pList(r.sets, 60).length, 0);
+    const sets = rows.reduce((n, r) => n + pList(r.sets, 60).filter((st) => !(st && st.warm === true)).length, 0);
     const names = rows.map((r) => {
       const snap = snapOf(p, r.exercise);
       return { label: snap ? snapLabel(snap) : pStr(r.exercise, 120), color: snap ? snapColor(snap) : (groupColor(pStr(r.muscle, 60)) || "#8a8f97") };
@@ -11148,7 +11189,8 @@ function renderChatView() {
         ${k !== DEFAULT_KIND ? chip(T("kind." + k), "var(--muted)") : ""}
       </div>
       ${imp}
-      ${isPhotoId(snap.photo) ? photoSlot(snap.photo, "width:100%;height:240px;border-radius:14px;border:1px solid var(--border);margin:6px 0 18px", { alt: snapLabel(snap), iconSize: 22 }) : ""}
+      ${isPhotoId(snap.photo) ? photoOpen(photoSlot(snap.photo, "width:100%;height:240px;border-radius:14px;border:1px solid var(--border)", { alt: snapLabel(snap), iconSize: 22 }),
+          "width:100%;border-radius:14px;margin:6px 0 18px", snapLabel(snap)) : ""}
       ${vid ? `<div style="margin-bottom:18px">
           <div class="pb-label" style="margin-bottom:6px">${T("ex.tutorial")}</div>
           <div style="position:relative;width:100%;padding-bottom:56.25%;border-radius:14px;overflow:hidden;border:1px solid var(--border);background:#000">
@@ -11181,10 +11223,10 @@ function renderChatView() {
       const group = snap ? snapGroupLabel(snap) : pStr(r.muscle, 60);
       const sets = isPreset ? "" : k === "cardio"
         ? `<div style="font-size:12.5px;color:var(--text);margin-top:5px">${chatSetText("cardio", r, "")}</div>`
-        : `<div style="display:flex;flex-direction:column;gap:3px;margin-top:6px">${pList(r.sets, 40).map((st, n) => `<div style="display:flex;align-items:center;gap:8px;font-size:12.5px;${st.drop === true ? "padding-left:14px;" : ""}">
-            <span style="width:18px;flex-shrink:0;color:var(--faint);font-size:11px">${st.drop === true ? "↳" : n + 1}</span>
+        : `<div style="display:flex;flex-direction:column;gap:3px;margin-top:6px">${(() => { const sl = pList(r.sets, 40), nums = setNumbers(sl.map((st) => ({ warm: st && st.warm === true }))); return sl.map((st, n) => `<div style="display:flex;align-items:center;gap:8px;font-size:12.5px;${st.drop === true && st.warm !== true ? "padding-left:14px;" : ""}">
+            <span style="width:18px;flex-shrink:0;color:var(--faint);font-size:11px">${st.warm === true ? warmMark(11) : st.drop === true ? "↳" : nums[n]}</span>
             <span class="pb-num" style="font-weight:600">${chatSetText(k, st, pStr(r.unit, 4))}</span>
-          </div>`).join("")}</div>`;
+          </div>`).join(""); })()}</div>`;
       return `<div style="display:flex;gap:10px;padding:11px 14px;border-bottom:${i < rows.length - 1 ? "1px solid var(--border-soft)" : "none"}">
         <span style="width:8px;height:8px;border-radius:4px;background:${color};flex-shrink:0;margin-top:6px"></span>
         <div style="flex:1;min-width:0">
@@ -11375,25 +11417,39 @@ function renderChatView() {
   return shell(T("chat.viewTitle"), "");
 }
 
-/* A photo, as big as the screen allows. Tapping anywhere closes it. */
-function renderChatImage() {
-  const v = ui.chatImage;
-  const m = chatMsgs(v.threadId).find((x) => x.messageId === v.messageId);
-  const ph = m && m.payload && m.payload.photo;
-  const local = m && chatUploads.get(m.clientId);
-  const inner = isPhotoId(ph)
-    ? photoSlot(ph, "width:100%;height:100%;background:transparent", { fit: "contain", iconSize: 26 })
-    : local && isPhotoData(local.chatPhoto)
-    ? `<img src="${esc(local.chatPhoto)}" alt="" style="width:100%;height:100%;object-fit:contain;display:block">`
+/* ── ANY PHOTO, AS BIG AS THE SCREEN ALLOWS ───────────────────────────
+   A chat photo, a lift's photo in its window or its edit form, the thumb
+   in the entry window's header, a lift card in a message. Every one of
+   them is drawn cropped to its box, so the tap is the only way to see the
+   whole picture. `photo-view` takes whatever the tapped control is
+   showing: the picture itself, or the slot of one still on its way from
+   the store, which fills in here when it lands (photoPaint). Tapping
+   anywhere closes it. Pinch zoom is left out on purpose: a stored photo
+   is at most 1280px, about what a phone screen shows at full width. */
+function renderPhotoView() {
+  const v = ui.photoView;
+  const inner = isPhotoData(v.src)
+    ? `<img src="${esc(v.src)}" alt="${esc(v.alt || "")}" style="width:100%;height:100%;object-fit:contain;display:block">`
+    : isPhotoId(v.id)
+    ? photoSlot(v.id, "width:100%;height:100%;background:transparent", { fit: "contain", iconSize: 26, alt: v.alt })
     : `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--faint)">${icon("image-off", 26)}</div>`;
-  return `<div data-overlay="chatImage" data-layer="fs" data-action="chat-image-close" class="${_lastOverlayKeys.has("chatImage") ? "" : "pb-sheet"}"
-    style="position:absolute;inset:0;z-index:96;background:rgba(0,0,0,.94);display:flex;flex-direction:column;padding:calc(var(--pb-sat) + 8px) 0 calc(var(--pb-sab) + 8px)">
+  return `<div data-overlay="photoView" data-layer="fs" data-action="photo-close" aria-label="${esc(v.alt || T("ex.photo"))}" class="${_lastOverlayKeys.has("photoView") ? "" : "pb-sheet"}"
+    style="position:absolute;inset:0;z-index:130;background:rgba(0,0,0,.94);display:flex;flex-direction:column;padding:calc(var(--pb-sat) + 8px) 0 calc(var(--pb-sab) + 8px)">
     <div style="display:flex;justify-content:flex-end;padding:0 12px 6px">
-      <button data-action="chat-image-close" style="color:#fff;opacity:.85;padding:6px">${icon("x", 24)}</button>
+      <button data-action="photo-close" aria-label="${T("a11y.close")}" style="color:#fff;opacity:.85;padding:6px">${icon("x", 24)}</button>
     </div>
     <div style="flex:1;min-height:0">${inner}</div>
   </div>`;
 }
+
+/* The control that opens one: `body` is the picture as it is drawn where
+   it sits, and the button takes over that box's spacing (`style`). The
+   corner mark says the picture opens, since nothing else about a cropped
+   photo does. */
+const photoOpen = (body, style = "", alt = "", mark = true) =>
+  `<button type="button" data-action="photo-view" data-alt="${esc(alt)}" aria-label="${esc(T("photo.open"))}" style="position:relative;display:block;padding:0;${style}">${body}${mark
+    ? `<span aria-hidden="true" style="position:absolute;right:8px;bottom:8px;width:30px;height:30px;border-radius:9px;background:rgba(0,0,0,.55);color:#fff;display:flex;align-items:center;justify-content:center">${icon("maximize-2", 15)}</span>`
+    : ""}</button>`;
 
 /* ── choosing something to send ───────────────────────────────────────── */
 
@@ -11416,7 +11472,7 @@ function chatWorkoutDays() {
     if (!entryHasData(e)) continue;
     const d = by.get(e.date) || { date: e.date, lifts: new Set(), sets: 0 };
     d.lifts.add(e.exercise);
-    if (isSetKind(kindOf(e))) d.sets += filledSets(e).length;
+    if (isSetKind(kindOf(e))) d.sets += workSets(e).length;
     by.set(e.date, d);
   }
   return [...by.values()].sort((a, b) => (a.date < b.date ? 1 : -1));
@@ -11549,15 +11605,17 @@ function renderChatAttach() {
       <span style="font-size:12.5px;font-weight:600;color:var(--text)">${T("chat.kind." + k)}</span>
     </button>`;
     /* a <label> round the file input, so the picker opens from the tap
-       itself: a click forwarded from script is refused on iOS */
-    const photo = `<label class="pb-card" style="display:flex;flex-direction:column;align-items:center;gap:8px;padding:14px 4px 12px;text-align:center;cursor:pointer">
-      <span style="width:44px;height:44px;border-radius:14px;display:flex;align-items:center;justify-content:center;background:${CHAT_THING_INK.image}22;color:${CHAT_THING_INK.image}">${icon("image", 21)}</span>
-      <span style="font-size:12.5px;font-weight:600;color:var(--text)">${T("chat.kind.image")}</span>
-      <input type="file" accept="image/*" data-filebind="chat.photo" style="display:none">
+       itself: a click forwarded from script is refused on iOS. The camera
+       is a tile of its own for the reason the exercise form has one (see
+       exWindowEditBody), hidden on a computer the same way. */
+    const photo = (cam) => `<label class="pb-card${cam ? " pb-cam" : ""}" style="display:flex;flex-direction:column;align-items:center;gap:8px;padding:14px 4px 12px;text-align:center;cursor:pointer">
+      <span style="width:44px;height:44px;border-radius:14px;display:flex;align-items:center;justify-content:center;background:${CHAT_THING_INK.image}22;color:${CHAT_THING_INK.image}">${icon(cam ? "camera" : "image", 21)}</span>
+      <span style="font-size:12.5px;font-weight:600;color:var(--text)">${T(cam ? "chat.kind.camera" : "chat.kind.image")}</span>
+      <input type="file" accept="image/*"${cam ? ' capture="environment"' : ""} data-filebind="chat.photo" style="display:none">
     </label>`;
     return sheet(T("chat.attachTitle"), "chatAttach", `
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-bottom:12px">
-        ${photo}${tile("exercise")}${tile("preset")}${tile("workout")}${tile("plan")}${tile("record")}${tile("rank")}${tile("note")}
+        ${photo(false)}${photo(true)}${tile("exercise")}${tile("preset")}${tile("workout")}${tile("plan")}${tile("record")}${tile("rank")}${tile("note")}
       </div>
       <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:0 2px">${T("chat.attachHint")}</div>
     `, 78);
@@ -12155,7 +12213,7 @@ function csvText() {
      and Sheets the moment the file opens. The apostrophe is the standard
      way to say "this is text". Numbers never pass through here. */
   const text = (v) => { const s = String(v ?? ""); return /^[=+\-@\t\r]/.test(s) ? "'" + s : s; };
-  const head = ["date", "week", "exercise", "group", "kind", "set", "drop", "reps", "weight", "unit", "seconds", "rpe", "minutes", "effort", "est_1rm", "notes"];
+  const head = ["date", "week", "exercise", "group", "kind", "set", "drop", "warmup", "reps", "weight", "unit", "seconds", "rpe", "minutes", "effort", "est_1rm", "notes"];
   const rows = [head.join(sep)];
   for (const e of chronoSort(state.log || [])) {
     if (!entryHasData(e)) continue;
@@ -12164,12 +12222,12 @@ function csvText() {
     /* in rolling mode there is no program week to name, here as everywhere */
     const wk = rollingWeeks() ? "" : weekOf(e.date, state.settings.startDate);
     if (k === "cardio") {
-      rows.push([e.date, wk, text(e.exercise), text(group), k, "", "", "", "", "", "", "", num(e.minutes), num(e.intensity), "", text(e.notes || "")].map(cell).join(sep));
+      rows.push([e.date, wk, text(e.exercise), text(group), k, "", "", "", "", "", "", "", "", num(e.minutes), num(e.intensity), "", text(e.notes || "")].map(cell).join(sep));
       continue;
     }
     filledSets(e).forEach((s, i) => {
       const rm = k === "strength" && +s.weight > 0 && +s.reps > 0 ? Math.round(est1RM(+s.weight, +s.reps) * 10) / 10 : "";
-      rows.push([e.date, wk, text(e.exercise), text(group), k, i + 1, s.drop ? "1" : "", num(s.reps), num(s.weight), k === "strength" ? unitOf(e) : "",
+      rows.push([e.date, wk, text(e.exercise), text(group), k, i + 1, s.drop ? "1" : "", isWarm(s) ? "1" : "", num(s.reps), num(s.weight), k === "strength" ? unitOf(e) : "",
         num(s.secs), num(s.rpe), "", "", num(rm), i === 0 ? text(e.notes || "") : ""].map(cell).join(sep));
     });
   }
@@ -13116,12 +13174,14 @@ function exWindowViewBody(ex, hist) {
     </div>`}
 
     ${ex.image
-      ? `<img src="${esc(ex.image)}" alt="${esc(exLabelOf(ex))}" style="width:100%;max-height:300px;object-fit:cover;border-radius:14px;border:1px solid var(--border);margin-bottom:18px;display:block">`
+      ? photoOpen(`<img src="${esc(ex.image)}" alt="${esc(exLabelOf(ex))}" style="width:100%;max-height:300px;object-fit:cover;border-radius:14px;border:1px solid var(--border);display:block">`,
+          "width:100%;border-radius:14px;margin-bottom:18px", exLabelOf(ex))
       : photoComing(ex)
       /* In the photo store and on its way: drawn the moment it lands, in
          place, with no line of explanation, because a picture arriving a
          second late needs none. */
-      ? photoSlot(ex.photoId, "width:100%;height:220px;border-radius:14px;border:1px solid var(--border);margin-bottom:18px", { alt: exLabelOf(ex), iconSize: 22 })
+      ? photoOpen(photoSlot(ex.photoId, "width:100%;height:220px;border-radius:14px;border:1px solid var(--border)", { alt: exLabelOf(ex), iconSize: 22 }),
+          "width:100%;border-radius:14px;margin-bottom:18px", exLabelOf(ex))
       : photoAway(ex)
       /* Where the machine should be, saying what is actually the case: the
          picture exists, on a device still running a build from before
@@ -13493,7 +13553,7 @@ function exWindowHistory(hist) {
        list and Last time draw it. It gets the chain's arrow in place of its
        number and the chain's colour, which is the same sentence in the
        space a chip has: this one continued the one before it. */
-    const drops = dropMarks(ses.rows);
+    const drops = dropMarks(ses.rows), nums = setNumbers(ses.rows);
     const sets = ses.rows.map((r, n) => {
       const rk = r.kind || DEFAULT_KIND;
       const line = rk === "cardio"
@@ -13501,9 +13561,9 @@ function exWindowHistory(hist) {
         : setLine(r, rk, r.unit);
       const tail = r.rpe ? `@${esc(r.rpe)}` : "";
       const cont = drops.cont[n];
-      const head = cont
-        ? `<span style="color:var(--steel)" title="${T("sets.dropset")}">${icon("corner-down-right", 10)}</span>`
-        : `<span style="color:var(--faint)">${n + 1} ·</span>`;
+      const head = r.warm ? warmMark(10)
+        : cont ? `<span style="color:var(--steel)" title="${T("sets.dropset")}">${icon("corner-down-right", 10)}</span>`
+        : `<span style="color:var(--faint)">${nums[n]} ·</span>`;
       return chip(`${head} ${line}${tail ? ` · ${tail}` : ""}`, cont ? "var(--steel)" : "");
     }).join("");
 
@@ -13556,25 +13616,46 @@ function exWindowEditBody(f, library) {
     <button data-action="group-new" data-then="exwin" title="${T("groups.newMuscleGroup")}" class="pb-btn" style="flex-shrink:0;width:42px;height:42px;color:var(--gold);background:rgba(233,185,73,.08);border:1px solid rgba(233,185,73,.4)">${icon("plus", 17, 'stroke-width="2.6"')}</button>
   </div>`;
 
+  /* Two ways in, because Chrome on Android 14 and later no longer offers
+     the camera beside the gallery for an image picker: one control for
+     the photos already on the phone, and one (`capture`) that opens the
+     camera itself. A computer has no camera to open that way, so the
+     second is hidden there (.pb-cam). Both are <label>s round their file
+     input, so the picker opens from the tap itself: a click forwarded from
+     script is refused on iOS. */
+  const pick = (cam) => `<input type="file" accept="image/*"${cam ? ' capture="environment"' : ""} data-filebind="exwin.image" style="display:none">`;
   const imageBlock = f.image
     ? `<div style="position:relative;margin-bottom:8px">
-        <img src="${esc(f.image)}" alt="" style="width:100%;max-height:260px;object-fit:cover;border-radius:12px;border:1px solid var(--border);display:block">
+        ${photoOpen(`<img src="${esc(f.image)}" alt="" style="width:100%;max-height:260px;object-fit:cover;border-radius:12px;border:1px solid var(--border);display:block">`, "width:100%;border-radius:12px")}
         <button type="button" data-action="exwin-remove-image" class="pb-btn" style="position:absolute;top:8px;right:8px;width:34px;height:34px;border-radius:10px;background:rgba(0,0,0,.55);color:#fff">${icon("trash-2", 16)}</button>
       </div>
-      <label class="pb-btn pb-ghost" style="width:100%;padding:10px 0;font-size:13.5px;cursor:pointer">
-        ${icon("image", 15)} ${T("ex.replacePhoto")}
-        <input type="file" accept="image/*" data-filebind="exwin.image" style="display:none">
-      </label>`
+      <div style="display:flex;gap:8px">
+        <label class="pb-btn pb-ghost" style="flex:1;padding:10px 0;font-size:13.5px;cursor:pointer">
+          ${icon("image", 15)} ${T("ex.replacePhoto")}
+          ${pick(false)}
+        </label>
+        <label class="pb-btn pb-ghost pb-cam" style="flex:1;padding:10px 0;font-size:13.5px;cursor:pointer">
+          ${icon("camera", 15)} ${T("ex.takePhoto")}
+          ${pick(true)}
+        </label>
+      </div>`
     /* A row whose photo stayed on another phone offers the same control
        saying something different: there is nothing here to replace, and
        nothing this device can do to fetch it, so what is on offer is a
        picture of your OWN machine. Uploading one clears the flag, because
        the row now holds a photo and is not waiting for one. */
-    : `<label class="pb-placeholder" style="height:120px;cursor:pointer;flex-direction:column;gap:8px;color:var(--faint)">
-        ${icon(photoAway(f) ? "image-off" : "image-plus", 22)}
-        <span style="font-size:12px;letter-spacing:.04em;text-transform:none;font-weight:600">${T(photoAway(f) ? "ex.photoAwayAdd" : "ex.uploadPhoto")}</span>
-        <input type="file" accept="image/*" data-filebind="exwin.image" style="display:none">
-      </label>`;
+    : `<div style="display:flex;gap:8px">
+        <label class="pb-placeholder" style="flex:1;min-width:0;height:120px;cursor:pointer;flex-direction:column;gap:8px;color:var(--faint);padding:0 8px;text-align:center">
+          ${icon(photoAway(f) ? "image-off" : "image-plus", 22)}
+          <span style="font-size:12px;letter-spacing:.04em;text-transform:none;font-weight:600">${T(photoAway(f) ? "ex.photoAwayAdd" : "ex.uploadPhoto")}</span>
+          ${pick(false)}
+        </label>
+        <label class="pb-placeholder pb-cam" style="flex:1;min-width:0;height:120px;cursor:pointer;flex-direction:column;gap:8px;color:var(--faint);padding:0 8px;text-align:center">
+          ${icon("camera", 22)}
+          <span style="font-size:12px;letter-spacing:.04em;text-transform:none;font-weight:600">${T("ex.takePhoto")}</span>
+          ${pick(true)}
+        </label>
+      </div>`;
 
   /* A variation is named by what makes it one. Its stored name still has to
      be unique (everything in the app is keyed by it) so exwin-save composes
@@ -13933,7 +14014,8 @@ function picDayData(date, s) {
       minutes += +e.minutes || 0;
       return { name: exLabel(e.exercise), color, pr, lines: [TP("sug.cardioSet", { min: picNum(e.minutes), rpe: picNum(e.intensity) })] };
     }
-    const list = filledSets(e);
+    /* what you did as WORK: a picture of a day does not brag about the bar */
+    const list = workSets(e);
     sets += list.length;
     if (k === "strength") for (const st of list) moved += (+st.reps || 0) * weightAs(st.weight, unitOf(e), unit);
     const showNums = s.weights || k !== "strength";
@@ -13978,7 +14060,7 @@ function picMaxData(name) {
   const hist = exerciseHistory(name, state.log || []);
   if (!hist || !hist.best) return null;
   const e = hist.best, k = hist.kind;
-  const b = k === "cardio" ? null : bestSet(filledSets(e), k);
+  const b = k === "cardio" ? null : bestSet(workSets(e), k);
   const single = k === "strength" && b && +b.reps === 1;
   return {
     kind: "max", lift: exLabel(name), liftKind: k, unit: hist.unit, value: e.m, date: e.date,
@@ -14002,7 +14084,7 @@ function picSetChoices(name) {
   let run = null;
   for (const e of hist.series) {
     const u = unitOf(e);
-    filledSets(e).forEach((st, i) => {
+    workSets(e).forEach((st, i) => {
       const score = k === "strength" ? metricFor(+st.weight, +st.reps, u) : setScore(st, k);
       if (score == null) return;
       const pr = run != null && score > run;
@@ -14038,7 +14120,7 @@ function picRecordsData(names) {
     const hist = exerciseHistory(n, state.log || []);
     if (!hist || !hist.best) continue;
     const e = hist.best, k = hist.kind;
-    const b = k === "cardio" ? null : bestSet(filledSets(e), k);
+    const b = k === "cardio" ? null : bestSet(workSets(e), k);
     rows.push({ lift: exLabel(n), liftKind: k, m: e.m, unit: hist.unit, date: e.date,
                 set: b ? picSetText(b, k, unitOf(e)) : "", color: colorFor(muscleOf(n, state.library || [])) });
   }
@@ -14061,7 +14143,7 @@ function picMonthData(month) {
     const d = (byDay[e.date] = byDay[e.date] || {});
     if ((badges[e.id] || {}).badge === "pr") prs++;
     if (k === "cardio") { minutes += +e.minutes || 0; d[g] = (d[g] || 0) + 1; continue; }
-    const list = filledSets(e);
+    const list = workSets(e);
     sets += list.length;
     d[g] = (d[g] || 0) + list.length;
     if (k === "strength") for (const st of list) moved += (+st.reps || 0) * weightAs(st.weight, unitOf(e), unit);
@@ -15579,8 +15661,15 @@ const VERDICT_COLOR = { beat: "var(--gold)", hit: "var(--green)", under: "var(--
 function renderSetList(f, unit, planning, isDraft) {
   const list = f.setList || [];
   const k = kindOf(f);
-  const filled = filledSets(f);
+  /* the sets that are measured: a warm-up is drawn, never the best, never
+     graded, never counted in the title (see isWarm) */
+  const filled = workSets(f);
   const top = bestSet(filled, k);
+  const nums = setNumbers(list);
+  /* a plan's sets answer the WORK sets by their place among them */
+  let w = 0;
+  const workAt = list.map((s) => (isWarm(s) ? -1 : w++));
+  const workCount = w;
   const targets = (f.plan && f.plan.sets) || [];
   const res = entryPlanResult(f);
   /* Your own last session, set for set, planned or not. Never while WRITING
@@ -15604,13 +15693,14 @@ function renderSetList(f, unit, planning, isDraft) {
   const dragRows = list.map((s, i) => reorderRow("set", i, list.length,
     has(s) ? line(s) : T("sets.fillIn"),
     has(s)
-      ? [scoreWorthShowing(k) && setScore(s, k) != null ? T("sets.score", { n: setScore(s, k), unit: metricUnit(k, unit) }) : "",
+      ? [isWarm(s) ? T("sets.warm") : scoreWorthShowing(k) && setScore(s, k) != null ? T("sets.score", { n: setScore(s, k), unit: metricUnit(k, unit) }) : "",
          s.rpe ? `RPE ${esc(s.rpe)}` : ""].filter(Boolean).join(" · ")
       : T("sets.blank"),
-    `<span class="pb-num" style="font-size:12.5px;font-weight:700;color:var(--faint);flex-shrink:0;margin-right:14px">${i + 1}</span>`)).join("");
+    `<span class="pb-num" style="font-size:12.5px;font-weight:700;color:var(--faint);flex-shrink:0;margin-right:14px;display:inline-flex">${isWarm(s) ? icon("flame", 13) : nums[i]}</span>`)).join("");
 
   const rows = list.map((s, i) => {
     const m = setScore(s, k);
+    const warm = isWarm(s);
     const isBest = top && s.id === top.id && filled.length > 1;
     const blank = !has(s);
     /* Two questions, two places. The word on the right is always last time,
@@ -15619,8 +15709,8 @@ function renderSetList(f, unit, planning, isDraft) {
        judged by different rules because they are different questions:
        setVerdict keeps the axes a plan named, setProgress asks the score
        whether this slot went better than it did last time. */
-    const t = targets[i];
-    const prev = lastRes ? lastRes.prev[i] : null;
+    const t = warm ? null : targets[workAt[i]];
+    const prev = lastRes && !warm ? lastRes.prev[i] : null;
     const v = prev ? setProgress(s, prev, k) : null;
     const pv = t ? setVerdict(s, t, k) : null;
     const refShort = (r) => k === "bodyweight" ? T("unit.nReps", { n: esc(r.reps) })
@@ -15637,14 +15727,16 @@ function renderSetList(f, unit, planning, isDraft) {
     return `${drops.head[i] ? `<div style="display:flex;align-items:center;gap:6px;margin:2px 2px 4px;font-size:10.5px;font-weight:700;letter-spacing:.07em;color:var(--steel)">${icon("chevrons-down", 12)} ${T("sets.dropset")}</div>` : ""}
     <div class="pb-card" data-setrow="${s.id}" style="display:flex;align-items:center;margin-bottom:${cont || drops.cont[i + 1] ? 4 : 8}px;margin-left:${cont ? 16 : 0}px;overflow:hidden${blank ? ";border:1px dashed rgba(233,185,73,.55)" : ""}${cont ? ";border-left:2px solid var(--steel)" : ""}">
       <button data-action="edit-set" data-id="${s.id}" style="flex:1;min-width:0;display:flex;align-items:center;gap:11px;padding:11px 4px 11px 12px;text-align:left;color:var(--text)">
-        <div class="pb-num" style="width:24px;height:24px;border-radius:7px;background:${cont ? "transparent" : "var(--surface2)"};border:1px ${cont ? "dashed var(--steel)" : "solid var(--border)"};display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:700;color:var(--muted);flex-shrink:0">${cont ? icon("corner-down-right", 12) : i + 1}</div>
+        <div class="pb-num" style="width:24px;height:24px;border-radius:7px;background:${cont || warm ? "transparent" : "var(--surface2)"};border:1px ${cont ? "dashed var(--steel)" : warm ? "dashed var(--border)" : "solid var(--border)"};display:flex;align-items:center;justify-content:center;font-size:12.5px;font-weight:700;color:var(--muted);flex-shrink:0">${warm ? icon("flame", 13) : cont ? icon("corner-down-right", 12) : nums[i]}</div>
         <div style="flex:1;min-width:0">
-          <div style="font-weight:600;font-size:14.5px;color:${blank ? "var(--gold)" : "var(--text)"}">
+          <div style="font-weight:600;font-size:14.5px;color:${blank ? "var(--gold)" : warm ? "var(--muted)" : "var(--text)"}">
             ${blank ? T("sets.fillIn") : line(s)}
           </div>
           ${!blank ? `<div style="font-size:11.5px;color:var(--faint)">${
-            [scoreWorthShowing(k) && m != null ? T("sets.score", { n: m, unit: metricUnit(k, unit) }) : "",
-             s.rpe ? `RPE ${esc(s.rpe)}` : "", refLine].filter(Boolean).join(" · ")
+            /* a warm-up says what it is in words, and nothing it is not measured on */
+            (warm ? [T("sets.warm"), s.rpe ? `RPE ${esc(s.rpe)}` : ""]
+              : [scoreWorthShowing(k) && m != null ? T("sets.score", { n: m, unit: metricUnit(k, unit) }) : "",
+                 s.rpe ? `RPE ${esc(s.rpe)}` : "", refLine]).filter(Boolean).join(" · ")
           }</div>` : ""}
         </div>
         ${v ? `<span style="font-size:10px;font-weight:700;letter-spacing:.05em;color:${VERDICT_COLOR[v]};flex-shrink:0;white-space:nowrap">${T("last.v." + v)}</span>` : ""}
@@ -15656,8 +15748,8 @@ function renderSetList(f, unit, planning, isDraft) {
   }).join("");
 
   /* everything the plan still wants, in position, waiting to be ticked off */
-  const ghosts = targets.slice(list.length)
-    .map((t, i) => ghostSetRow(t, list.length + i + 1, (f.plan && f.plan.unit) || unit, k)).join("");
+  const ghosts = targets.slice(workCount)
+    .map((t, i) => ghostSetRow(t, workCount + i + 1, (f.plan && f.plan.unit) || unit, k)).join("");
 
   /* What last time cost you is never counted up at you: under is not scolded
      here any more than it is under a plan, so the tally only ever names what
@@ -15683,7 +15775,15 @@ function renderSetList(f, unit, planning, isDraft) {
       <button data-action="add-set" class="pb-btn pb-ghost" style="flex:1;padding:13px 0;border-style:dashed">
         ${icon("plus", 17)} ${T("sets.add")}
       </button>
-      ${list.length ? `<button data-action="add-drop" class="pb-btn pb-ghost" title="${T("sets.addDropHint")}" style="flex:0 0 auto;padding:13px 15px;border-style:dashed;color:var(--steel)">
+      ${/* Warm-ups come before the work, so that is when the button is there:
+            until the first work set, then Drop takes its place (a drop
+            continues a work set). A warm-up remembered later is any set's
+            editor, which can say what the set is. Not while writing a plan:
+            a plan names the work. */
+        !workCount && !planning ? `<button data-action="add-warm" class="pb-btn pb-ghost" title="${T("sets.addWarmHint")}" style="flex:0 0 auto;padding:13px 15px;border-style:dashed;color:var(--muted)">
+        ${icon("flame", 16)} ${T("sets.warm")}
+      </button>`
+        : list.length && !isWarm(list[list.length - 1]) ? `<button data-action="add-drop" class="pb-btn pb-ghost" title="${T("sets.addDropHint")}" style="flex:0 0 auto;padding:13px 15px;border-style:dashed;color:var(--steel)">
         ${icon("chevrons-down", 16)} ${T("sets.addDrop")}
       </button>` : ""}
     </div>`}
@@ -15800,7 +15900,7 @@ function renderLastTime(form) {
 
   /* the same chain the set list draws, read back: a drop hangs off the set
      above it rather than standing in the column as another equal set */
-  const drops = dropMarks(last.rows);
+  const drops = dropMarks(last.rows), nums = setNumbers(last.rows);
 
   const rows = last.rows.map((r, i) => {
     const rk = r.kind || DEFAULT_KIND;
@@ -15809,13 +15909,13 @@ function renderLastTime(form) {
       : setLine(r, rk, r.unit);
     const side = [
       r.rpe ? `RPE ${esc(r.rpe)}` : "",
-      r.m != null && scoreWorthShowing(rk) ? T("sets.score", { n: r.m, unit: metricUnit(rk, r.unit) }) : "",
+      r.warm ? T("sets.warm") : r.m != null && scoreWorthShowing(rk) ? T("sets.score", { n: r.m, unit: metricUnit(rk, r.unit) }) : "",
     ].filter(Boolean).join(" · ");
     const cont = drops.cont[i];
     return `${drops.head[i] ? `<div style="display:flex;align-items:center;gap:5px;font-size:10px;font-weight:700;letter-spacing:.07em;color:var(--steel);margin-left:22px">${icon("chevrons-down", 11)} ${T("sets.dropset")}</div>` : ""}
     <div style="display:flex;align-items:baseline;gap:9px;min-width:0${cont ? ";margin-left:14px;padding-left:8px;border-left:2px solid var(--steel)" : ""}">
-      <span class="pb-num" style="width:13px;flex-shrink:0;text-align:right;font-size:11.5px;color:var(--faint)">${cont ? icon("corner-down-right", 11, 'style="color:var(--steel)"') : i + 1}</span>
-      <span class="pb-num" style="font-size:13.5px;font-weight:600;color:var(--text);white-space:nowrap">${line}</span>
+      <span class="pb-num" style="width:13px;flex-shrink:0;text-align:right;font-size:11.5px;color:var(--faint)">${r.warm ? icon("flame", 11, 'style="color:var(--muted)"') : cont ? icon("corner-down-right", 11, 'style="color:var(--steel)"') : nums[i]}</span>
+      <span class="pb-num" style="font-size:13.5px;font-weight:600;color:${r.warm ? "var(--muted)" : "var(--text)"};white-space:nowrap">${line}</span>
       ${last.rows.length > 1 && r === last.best ? chip(T("sets.best"), "var(--gold)") : ""}
       <span style="flex:1"></span>
       ${side ? `<span class="pb-num" style="font-size:11px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${side}</span>` : ""}
@@ -15956,7 +16056,7 @@ function renderTargetForm() {
 function targetMoment(f, setId) {
   const t = f.plan, k = kindOf(f);
   if (!t || !t.sets) return;
-  const filled = filledSets(f);
+  const filled = workSets(f);
   const i = filled.findIndex((s) => s.id === setId);
   if (i < 0 || !t.sets[i]) return;
   const v = setVerdict(filled[i], t.sets[i], k);
@@ -16036,7 +16136,9 @@ function renderEntryFields(form, unit) {
   return fullScreen(70, `
     <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 6px">
       <button data-action="close-entry" style="color:var(--muted);padding:4px">${icon("arrow-left", 21)}</button>
-      ${nameThumb(f.exercise, 38)}
+      ${/* the lift's photo, a tap from full size: the machine you are stood
+            at, without leaving the set you are logging */
+        (() => { const th = nameThumb(f.exercise, 38); return th ? photoOpen(th, "flex-shrink:0;border-radius:8px", exLabel(f.exercise), false) : ""; })()}
       <div style="flex:1">
         <div class="pb-num" style="font-size:18px;font-weight:700;line-height:1.15">${esc(exLabel(f.exercise))}</div>
         <div style="font-size:11.5px;color:var(--faint)">${planning ? T("plan.entrySub")
@@ -16141,11 +16243,14 @@ function lastSetMetric(f, isDraft, index, set) {
      behind it can never disagree about what today's set is answering to */
   const key = chainKeyAt(f.setList, index, set && set.drop);
   const r = prev.rows.find((x) => x.key === key);
+  /* the set's place among the WORK sets, which is the number it is called
+     by (setNumbers): the first after two warm-ups is "set 1" */
+  const at = (f.setList || []).slice(0, index).filter((x) => !isWarm(x)).length;
   /* the position existed but the session ended before it: `m` null says
      "nothing to compare with", `ran` says which of the two reasons it is */
-  if (!r) return { m: null, date: prev.date, index, ran: false };
+  if (!r) return { m: null, date: prev.date, index: at, ran: false };
   const m = setScore(r, kindOf(f));
-  return m == null ? null : { m, date: prev.date, index, ran: true };
+  return m == null ? null : { m, date: prev.date, index: at, ran: true };
 }
 
 /* The ceiling: the best single set this lift has ever been worth, in the
@@ -16158,7 +16263,7 @@ function bestEverMetric(f, isDraft) {
   let m = null, date = null;
   for (const e of earlierOutings(f, isDraft))
     for (const r of outingRows([e]).rows) {
-      if (r.kind !== k) continue;
+      if (r.kind !== k || r.warm) continue;
       /* recomputed rather than read off r.m, which is scored in the unit
          that session was LOGGED in and would put an lbs number next to a
          kg one with no sign that anything had changed */
@@ -16233,6 +16338,13 @@ function renderSetForm(form, unit) {
   const k = ui.entryForm ? kindOf(ui.entryForm.f) : DEFAULT_KIND;
   const m = setScore(s, k);
   const ok = setReady(s, k);
+  /* A warm-up is numbered among the warm-ups and a work set among the work
+     sets (setNumbers), and a warm-up is measured against nothing: no last
+     time, no best ever, no suggestion. */
+  const warm = isWarm(s);
+  const above = (ui.entryForm && ui.entryForm.f.setList || []).slice(0, index);
+  const n = above.filter((x) => isWarm(x) === warm).length + 1;
+  const planningNow = !!(ui.entryForm && ui.entryForm.isDraft && ui.workoutSheet && ui.workoutSheet.planning);
   /* two references, two different questions: the set that stood in this
      one's place last session, and the best this lift has ever been worth.
      Both are worked out ONCE, here, and parked in setRefs for the keystroke
@@ -16240,18 +16352,21 @@ function renderSetForm(form, unit) {
      write to the log, and the one control that could change them, the unit
      select, does a full render), and each one otherwise costs a sort of the
      whole log on every character typed into the weight box. */
-  const vsRef = ui.entryForm ? lastSetMetric(ui.entryForm.f, ui.entryForm.isDraft, index, s) : null;
-  const bestRef = ui.entryForm ? bestEverMetric(ui.entryForm.f, ui.entryForm.isDraft) : null;
+  const vsRef = ui.entryForm && !warm ? lastSetMetric(ui.entryForm.f, ui.entryForm.isDraft, index, s) : null;
+  const bestRef = ui.entryForm && !warm ? bestEverMetric(ui.entryForm.f, ui.entryForm.isDraft) : null;
   setRefs = { vs: vsRef, best: bestRef, unit };
   /* One box or two, and never a box for a number this kind does not have.
      A hold asked for reps and a weight was the old model showing through. */
+  /* Return on the phone's keyboard goes reps, weight, RPE and then closes
+     it (enterkeyhint, see the keydown listener). The unit select sits in
+     the weight's label, so the phone's own Next stopped on it in between. */
   const numField = (label, bind, val, first) =>
-    field(labelWith(label), `<input class="pb-input" ${NUM} data-bind="${bind}" value="${esc(val)}" placeholder="—"${first ? " data-autofocus" : ""}>`);
+    field(labelWith(label), `<input class="pb-input" ${NUM} enterkeyhint="next" data-bind="${bind}" value="${esc(val)}" placeholder="—"${first ? " data-autofocus" : ""}>`);
   const inputs = k === "bodyweight" ? numField(T("setForm.reps"), "set.reps", s.reps, true)
-    : k === "hold" ? field(labelWith(T("setForm.time")), `<input class="pb-input" ${DUR} data-bind="set.secs" value="${durValue(s.secs)}" placeholder="0:00" data-autofocus>`)
+    : k === "hold" ? field(labelWith(T("setForm.time")), `<input class="pb-input" ${DUR} enterkeyhint="next" data-bind="set.secs" value="${durValue(s.secs)}" placeholder="0:00" data-autofocus>`)
     : `<div style="display:flex;gap:10px">
         <div style="flex:1">${numField(T("setForm.reps"), "set.reps", s.reps, true)}</div>
-        <div style="flex:1">${field(labelWith(T("setForm.weight"), unitSelect(unit)), `<input class="pb-input" ${NUM} data-bind="set.weight" value="${esc(s.weight)}" placeholder="—">`)}</div>
+        <div style="flex:1">${field(labelWith(T("setForm.weight"), unitSelect(unit)), `<input class="pb-input" ${NUM} enterkeyhint="next" data-bind="set.weight" value="${esc(s.weight)}" placeholder="—">`)}</div>
       </div>`;
   /* the same target as the card behind this sheet, one line, one tap,
      only on a NEW set, because correcting an old one is not a decision
@@ -16261,8 +16376,8 @@ function renderSetForm(form, unit) {
      tapped to get here. Past the end of the plan the card comes back,
      because a bonus set is a decision again. */
   const planned = ui.entryForm && ui.entryForm.f.plan && ui.entryForm.f.plan.sets;
-  const stillPlanned = planned && index < planned.length;
-  const sug = isNew && ui.entryForm && !stillPlanned ? setSuggestion(ui.entryForm.f, ui.entryForm.isDraft) : null;
+  const stillPlanned = planned && above.filter((x) => !isWarm(x)).length < planned.length;
+  const sug = isNew && ui.entryForm && !stillPlanned && !warm ? setSuggestion(ui.entryForm.f, ui.entryForm.isDraft) : null;
   /* both of them, same as the card behind this sheet, minus whichever one
      the open set already IS, which is what you get by tapping it there */
   /* both of them minus whichever the open set already IS, or the single
@@ -16283,23 +16398,40 @@ function renderSetForm(form, unit) {
     : "";
   /* Only offered where it can mean anything: the first set of a lift has
      nothing above it to have dropped from. */
-  const dropRow = index > 0
+  const dropRow = index > 0 && !warm && !isWarm(above[index - 1])
     ? `<button data-action="set-drop-toggle" style="width:100%;display:flex;align-items:center;gap:10px;padding:11px 12px;margin-bottom:12px;border-radius:11px;border:1px ${isDrop(s) ? "solid var(--steel)" : "dashed var(--border)"};background:${isDrop(s) ? "var(--surface2)" : "transparent"};text-align:left">
         ${icon("chevrons-down", 16, `style="color:${isDrop(s) ? "var(--steel)" : "var(--faint)"};flex-shrink:0"`)}
         <span style="flex:1;min-width:0">
-          <span style="display:block;font-size:13.5px;font-weight:600;color:${isDrop(s) ? "var(--text)" : "var(--muted)"}">${T("sets.dropFrom", { n: index })}</span>
+          <span style="display:block;font-size:13.5px;font-weight:600;color:${isDrop(s) ? "var(--text)" : "var(--muted)"}">${T("sets.dropFrom", { n: setNumbers(above)[index - 1] })}</span>
           <span style="display:block;font-size:11px;color:var(--faint)">${T("sets.dropFromHint")}</span>
         </span>
         <span style="width:18px;height:18px;border-radius:6px;flex-shrink:0;border:1px solid ${isDrop(s) ? "var(--steel)" : "var(--border)"};background:${isDrop(s) ? "var(--steel)" : "transparent"};display:flex;align-items:center;justify-content:center;color:var(--bg)">${isDrop(s) ? icon("check", 12) : ""}</span>
       </button>`
     : "";
-  return sheet(isNew ? T("setForm.add", { n: index + 1 }) : T("setForm.edit", { n: index + 1 }), "setForm", `
+  /* What the set IS can be said here, for a set already logged or one
+     opened as a warm-up (switched off, it stays, so it can be switched
+     back): a new work set does not carry the row, because
+     the warm-ups have their own button, before the work. A plan names the
+     work only. */
+  const warmRow = !planningNow && (warm || !isNew || form.asWarm)
+    ? `<button data-action="set-warm-toggle" aria-pressed="${warm}" style="width:100%;display:flex;align-items:center;gap:10px;padding:11px 12px;margin-bottom:12px;border-radius:11px;border:1px ${warm ? "solid var(--muted)" : "dashed var(--border)"};background:${warm ? "var(--surface2)" : "transparent"};text-align:left">
+        ${icon("flame", 16, `style="color:${warm ? "var(--text)" : "var(--faint)"};flex-shrink:0"`)}
+        <span style="flex:1;min-width:0">
+          <span style="display:block;font-size:13.5px;font-weight:600;color:${warm ? "var(--text)" : "var(--muted)"}">${T("sets.warmToggle")}</span>
+          <span style="display:block;font-size:11px;color:var(--faint)">${T("sets.warmToggleHint")}</span>
+        </span>
+        <span style="width:18px;height:18px;border-radius:6px;flex-shrink:0;border:1px solid ${warm ? "var(--muted)" : "var(--border)"};background:${warm ? "var(--muted)" : "transparent"};display:flex;align-items:center;justify-content:center;color:var(--bg)">${warm ? icon("check", 12) : ""}</span>
+      </button>`
+    : "";
+  const title = warm ? T(isNew ? "setForm.addWarm" : "setForm.editWarm", { n }) : T(isNew ? "setForm.add" : "setForm.edit", { n });
+  return sheet(title, "setForm", `
+    ${warmRow}
     ${dropRow}
     ${inputs}
     ${target}
-    ${field(T("entry.rpe"), `<input class="pb-input" ${NUM} data-bind="set.rpe" value="${esc(s.rpe)}" placeholder="—">`, T("setForm.rpeHint"))}
+    ${field(T("entry.rpe"), `<input class="pb-input" ${NUM} enterkeyhint="done" data-bind="set.rpe" value="${esc(s.rpe)}" placeholder="—">`, T("setForm.rpeHint"))}
 
-    <div class="pb-card2" style="padding:11px 14px;margin-bottom:14px">
+    ${warm ? "" : `<div class="pb-card2" style="padding:11px 14px;margin-bottom:14px">
       <div style="display:flex;align-items:flex-start;gap:12px">
         <div style="flex:1;min-width:0">
           <div class="pb-label">${metricLabel(k, unit)}</div>
@@ -16308,7 +16440,7 @@ function renderSetForm(form, unit) {
         ${bestRef ? `<div id="setBest" style="flex:0 0 auto;text-align:right;padding-left:12px;border-left:1px solid var(--border-soft)">${bestEverBlock(m, bestRef, unit)}</div>` : ""}
       </div>
       <div id="setVsLast" style="font-size:11.5px;line-height:1.45;margin-top:${vsRef ? 6 : 0}px">${vsLastLine(m, vsRef)}</div>
-    </div>
+    </div>`}
 
     <button id="setSaveBtn" data-action="save-set" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:14px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
       ${icon("check", 17)} ${isNew ? T("setForm.addBtn") : T("setForm.saveBtn")}
@@ -21699,7 +21831,7 @@ const actions = {
      complaint the day-draft store exists to answer. */
   "chat-close": () => {
     ui.chatThread = null; ui.chatMenu = null;
-    ui.chatMsgMenu = null; ui.chatAttach = null; ui.chatView = null; ui.chatImage = null;
+    ui.chatMsgMenu = null; ui.chatAttach = null; ui.chatView = null; ui.photoView = null;
     render();
   },
 
@@ -21752,8 +21884,16 @@ const actions = {
     render();
   },
   "chat-view-close": () => { ui.chatView = null; render(); },
-  "chat-image": (el) => { ui.chatImage = { threadId: el.dataset.id, messageId: el.dataset.m }; render(); },
-  "chat-image-close": () => { ui.chatImage = null; render(); },
+  /* whatever picture the tapped control is drawing: see renderPhotoView */
+  "photo-view": (el) => {
+    const img = el.querySelector("img"), slot = el.querySelector("[data-photo-slot]");
+    const src = img && isPhotoData(img.getAttribute("src")) ? img.getAttribute("src") : "";
+    const id = slot ? slot.dataset.photoSlot : "";
+    if (!src && !isPhotoId(id)) return;
+    ui.photoView = { src, id, alt: el.dataset.alt || (img && img.alt) || "" };
+    render();
+  },
+  "photo-close": () => { ui.photoView = null; render(); },
   /* the ONE chat action that writes `state`, and deliberately not on
      READ_OK: see the THINGS IN A MESSAGE block */
   "chat-import": (el) => {
@@ -22182,9 +22322,18 @@ const actions = {
   /* the same new set as any other, marked as continuing the one above, and
      it has to SAY so on the way in, or openingSetFor works out the key of a
      normal set and offers last week's normal set for a drop */
+  /* a warm-up goes after the warm-ups already there, before any work set,
+     and opens on last time's warm-up in that place (openingSetFor) */
+  "add-warm": () => {
+    const f = ui.entryForm && ui.entryForm.f;
+    if (!f || !isDetailed(f)) return;
+    const i = warmLead(f.setList);
+    ui.setForm = { s: { ...openingSetFor(f, ui.entryForm.isDraft, i, false, true), warm: true }, isNew: true, index: i, asWarm: true };
+    render();
+  },
   "add-drop": () => {
     const f = ui.entryForm && ui.entryForm.f;
-    if (!f || !isDetailed(f) || !f.setList.length) return;
+    if (!f || !isDetailed(f) || !f.setList.length || isWarm(f.setList[f.setList.length - 1])) return;
     const i = f.setList.length;
     ui.setForm = { s: { ...openingSetFor(f, ui.entryForm.isDraft, i, true), drop: true }, isNew: true, index: i };
     render();
@@ -22196,8 +22345,16 @@ const actions = {
     render();
   },
   "set-drop-toggle": () => {
-    if (!ui.setForm || !ui.setForm.index) return;   // index 0 has nothing above it
+    if (!ui.setForm || !ui.setForm.index || isWarm(ui.setForm.s)) return;   // index 0 has nothing above it
     ui.setForm.s.drop = !ui.setForm.s.drop;
+    render();
+  },
+  /* a warm-up is never a drop: a drop continues an effort */
+  "set-warm-toggle": () => {
+    if (!ui.setForm) return;
+    const s = { ...ui.setForm.s };
+    if (isWarm(s)) delete s.warm; else { s.warm = true; delete s.drop; }
+    ui.setForm.s = s;
     render();
   },
   "edit-set": (el) => {
@@ -22211,8 +22368,10 @@ const actions = {
   "save-set": () => {
     const form = ui.setForm, f = ui.entryForm && ui.entryForm.f;
     if (!form || !f || !setReady(form.s, kindOf(f))) return;
+    /* a new set goes where it was opened: the end, or for a warm-up the
+       end of the warm-ups */
     const list = form.isNew
-      ? [...f.setList, form.s]
+      ? [...f.setList.slice(0, form.index), form.s, ...f.setList.slice(form.index)]
       : f.setList.map((x) => (x.id === form.s.id ? form.s : x));
     ui.entryForm.f = syncEntry({ ...f, setList: list });
     ui.setForm = null;
@@ -22661,7 +22820,7 @@ const READ_OK = new Set([
   /* looking at and sending things is chat; ADDING one to your library is a
      write, and chat-import is deliberately not here */
   "chat-attach", "chat-attach-step", "chat-attach-send", "chat-view", "chat-view-close",
-  "chat-image", "chat-image-close", "chat-open-ex", "chat-open-presets", "chat-open-day", "chat-open-notes",
+  "photo-view", "photo-close", "chat-open-ex", "chat-open-presets", "chat-open-day", "chat-open-notes",
   "chat-copy", "chat-unsend", "chat-discard",
   "share-open", "share-kind", "share-send", "share-open-chat",
   /* notifications belong to the phone, like the timers: nothing in them is
@@ -23204,6 +23363,21 @@ document.addEventListener("focusin", (e) => {
 document.addEventListener("keydown", (e) => {
   const el = e.target;
   if (!el || !el.dataset || e.isComposing) return;
+  /* Return in a number box that names its key (the set editor's) goes to
+     the next number box of the same window, selected so typing replaces
+     what it opened on, and from the last one closes the keyboard. Chrome on
+     Android hands the page Return instead of moving focus itself once a
+     field has an enterkeyhint, which is the point: its own Next stopped on
+     the unit select between reps and weight. */
+  if (e.key === "Enter" && el.matches("input[data-num][enterkeyhint], input[data-dur][enterkeyhint]")) {
+    e.preventDefault();
+    const scope = el.closest("[data-layer]") || document;
+    const boxes = [...scope.querySelectorAll("input[data-num], input[data-dur]")];
+    const next = el.getAttribute("enterkeyhint") === "next" ? boxes[boxes.indexOf(el) + 1] : null;
+    if (next) { next.focus(); try { next.select(); } catch { /* not a text field */ } }
+    else el.blur();
+    return;
+  }
   if (el.dataset.bind === "noteLabelQ" && e.key === "Enter") {
     e.preventDefault();
     if (ui.noteLabels) noteLabelAdd(ui.noteLabels.id);

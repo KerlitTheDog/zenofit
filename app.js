@@ -7050,65 +7050,103 @@ function flashLogDay() {
    button (and a back swipe) had nothing to go back to and closed the whole
    app from inside any window: a half-typed set, the picker, a sheet.
 
-   So while there is something to go back FROM (a window open, or a tab
-   other than Home) the page keeps ONE extra history entry, and a back
-   press spends it: the top window is closed by pressing its own close
+   So the page keeps ONE HISTORY ENTRY FOR EVERY BACK PRESS IT WILL TAKE
+   (`backDepth`, `backWant`): one per open window and one more on a tab
+   other than Home, added when the window opens or the tab changes. A back
+   press spends one: the top window is closed by pressing its own close
    control, so every window keeps its own rules about closing (a filled-in
    exercise still asks, the workout window still parks the day), and with
    no window open the press goes Home. Only from Home does back leave the
    app, as it does in every other app. Every window has a close control by
    the same convention: a sheet's X, and the first header button of a full
    screen (close, cancel, back or exit in its action). A window closed by
-   hand gives the entry back, so the next back press is not a dud. */
+   hand gives its entry back, so the next back press is not a dud.
+
+   NEVER AN ENTRY ADDED BY A BACK PRESS. It used to be one entry in all,
+   put back after every press that left something open. Chrome on Android
+   skips the entries of a page that adds one without a tap since the last
+   back or forward (its history manipulation intervention, aimed at sites
+   that trap the back button), and when there is nothing left it will go
+   back to, back closes the app. A back press is not a tap, so the entry
+   put back after it was always skippable: the first press closed a lift's
+   window, and the next, in the workout window under it, left the app.
+   Now each entry is added by the tap that opened its window, and a back
+   press only ever takes one away. A window that opens without a tap (put
+   back after a relaunch, say) still adds its entry without one; Chrome
+   counts the page's entries again the moment anything is tapped. */
 const BACK_CLOSE = /close|cancel|back|exit/;
-let backGuard = false, backIgnore = false;
+/* Each entry carries its depth and this page load's id, so an entry left
+   by the page before a reload counts as none of ours. `backPending` is our
+   own history.go() still on its way: it lands later, and nothing is added
+   until it has (a handler that closes a window and opens another in the
+   same tick would otherwise add an entry the late go() then takes away). */
+const BACK_PAGE = uid();
+let backDepth = 0, backPending = false;
+const backDepthOf = (s) => (s && s.zfPage === BACK_PAGE && +s.zfBack) || 0;
+
+/* the open windows, top first (the higher z, then the later in the frame) */
+function backLayers() {
+  const root = app.querySelector(".pb-root");
+  if (!root) return null;
+  return [...root.children]
+    .filter((el) => el.hasAttribute("data-layer") && !el.classList.contains("pb-trans"))
+    .map((el, i) => ({ el, i, z: parseInt(el.style.zIndex, 10) || 0 }))
+    .sort((a, b) => b.z - a.z || b.i - a.i)
+    .map((x) => x.el);
+}
+
+/* a window's close control, or null for one that back cannot close */
+function backCloseOf(layer) {
+  if (layer.dataset.layer === "fs" && BACK_CLOSE.test(layer.dataset.action || "")) return layer;
+  return layer.querySelector('button[data-action="overlay-close"]')
+    || [...layer.querySelectorAll("button[data-action]")].find((b) => BACK_CLOSE.test(b.dataset.action)) || null;
+}
 
 /* A window open over the login or no-profiles screen closes on back too
    (the Privacy policy read from the signup form, Storage check, a sheet);
    only those screens themselves have no tabs to go back through, so back
    from them leaves, as from Home. */
 function backTarget() {
-  const root = app.querySelector(".pb-root");
-  if (!root) return null;
-  let top = null, topZ = -Infinity;
-  for (const el of root.children) {
-    if (!el.hasAttribute("data-layer") || el.classList.contains("pb-trans")) continue;
-    const z = parseInt(el.style.zIndex, 10) || 0;
-    if (z >= topZ) { topZ = z; top = el; }
-  }
-  if (top) {
-    if (top.dataset.layer === "fs" && BACK_CLOSE.test(top.dataset.action || "")) return top;
-    return top.querySelector('button[data-action="overlay-close"]')
-      || [...top.querySelectorAll("button[data-action]")].find((b) => BACK_CLOSE.test(b.dataset.action)) || null;
-  }
+  const layers = backLayers();
+  if (!layers) return null;
+  if (layers.length) return backCloseOf(layers[0]);
   if (!accountOn() || !profiles.active) return null;
   return ui.tab !== "home" ? "home" : null;
 }
 
-/* Never pushes while its own back() is still on the way (`backIgnore`):
-   history.back() lands later, so a handler that renders an empty screen
-   and then opens a window in the same tick used to push a new guard
-   before the old one was left, the late back() then took the new one
-   away, and `backGuard` went on claiming an entry that was not there.
-   The next close stepped out of the app. The popstate that answers the
-   back() calls this again, and the guard goes in then. */
+/* how many presses the app takes from here: each window from the top down
+   that back can close, then Home from another tab */
+function backWant() {
+  const layers = backLayers();
+  if (!layers) return 0;
+  let n = 0;
+  for (const l of layers) { if (!backCloseOf(l)) return n; n++; }
+  return n + (accountOn() && profiles.active && ui.tab !== "home" ? 1 : 0);
+}
+
 function backSync() {
-  const want = !!backTarget();
+  if (backPending) return;
+  const want = backWant();
   try {
-    if (want && !backGuard && !backIgnore) { history.pushState({ zfBack: 1 }, ""); backGuard = true; }
-    else if (!want && backGuard) { backGuard = false; backIgnore = true; history.back(); }
-  } catch { backIgnore = false; /* no history to work with: back stays the browser's */ }
+    while (backDepth < want) { history.pushState({ zfBack: backDepth + 1, zfPage: BACK_PAGE }, ""); backDepth++; }
+    if (backDepth > want) { backPending = true; history.go(want - backDepth); }
+  } catch { backPending = false; /* no history to work with: back stays the browser's */ }
 }
 
 /* a guard left from before a reload belongs to the page that pushed it */
 try { if (history.state && history.state.zfBack) history.replaceState(null, ""); } catch { /* fine */ }
 window.addEventListener("popstate", () => {
-  if (backIgnore) { backIgnore = false; backSync(); return; }
-  backGuard = false;                 // the entry just left was the guard
-  const t = backTarget();
-  if (t === "home") { ui.tab = "home"; resetTransient(); render(); }
-  else if (t) t.click();
-  backSync();                        // a window still open, or one that said no
+  const was = backDepth;
+  backDepth = backDepthOf(history.state);
+  if (backPending) { backPending = false; backSync(); return; }
+  /* a back press: one entry down, or onto an entry the page before a
+     reload left, which counts as none */
+  if (backDepth < was || !backDepth) {
+    const t = backTarget();
+    if (t === "home") { ui.tab = "home"; resetTransient(); render(); }
+    else if (t) t.click();
+  }
+  backSync();                        // a window that said no keeps its entry
 });
 
 /* ── A FOOTER THAT GROWS HAS TO BE MEASURED, NOT GUESSED ──────────────

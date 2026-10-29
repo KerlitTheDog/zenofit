@@ -854,12 +854,44 @@ const chainKeyAt = (list, index, asDrop) => {
 
 function syncEntry(e) {
   const k = kindOf(e);
-  if (!isDetailed(e) || k === "cardio") return e;
+  if (k === "cardio") return boutsSettle(e);
+  if (!isDetailed(e)) return e;
   const work = workSets(e);
   const b = bestSet(work, k);
   return { ...e, sets: work.length,
     reps: b ? b.reps : "", weight: b ? b.weight : "", rpe: b ? b.rpe : "", secs: b ? b.secs : "" };
 }
+
+/* ── CARDIO IN BOUTS ──────────────────────────────────────────────────
+   A cardio session can be done in bouts (ten minutes on the bike, a rest,
+   fifteen more), each with its own time and intensity, listed like sets.
+   The entry's own `minutes` and `intensity` stay what everything else
+   reads (suggestions, plans, weekly minutes, the pictures, a phone still
+   on an older build): the time added up and the intensity weighted by
+   it, so the cardio score, minutes × intensity, is the bouts' own scores
+   added up (to within the intensity's one decimal: 10 min at 6 and 20 at
+   7 is 30 at 6.7, 201 against 200). `bouts` is there only with two or more: one bout is the entry
+   exactly as it always was. Function declarations, because cleanEntry
+   reaches them while this file is still being evaluated. */
+function boutsTotals(bouts) {
+  const done = bouts.filter((b) => +b.minutes > 0 && +b.intensity > 0);
+  const min = done.reduce((a, b) => a + +b.minutes, 0);
+  const load = done.reduce((a, b) => a + +b.minutes * +b.intensity, 0);
+  return min ? { minutes: String(Math.round(min * 100) / 100), intensity: String(Math.round((load / min) * 10) / 10) }
+    : { minutes: "", intensity: "" };
+}
+/* the form's bouts, settled for keeping: the filled ones, the totals from
+   them, and no `bouts` at all once one is left */
+function boutsSettle(e) {
+  if (!Array.isArray(e.bouts)) return e;
+  const { bouts, ...rest } = e;
+  const done = bouts.filter((b) => +b.minutes > 0 && +b.intensity > 0);
+  if (done.length >= 2) return { ...rest, bouts: done, ...boutsTotals(done) };
+  return done.length ? { ...rest, minutes: done[0].minutes, intensity: done[0].intensity } : rest;
+}
+/* a bout with one of its two numbers: not a bout yet, and not to be
+   dropped quietly either */
+const boutHalf = (e) => Array.isArray(e.bouts) && e.bouts.some((b) => (+b.minutes > 0) !== (+b.intensity > 0));
 
 /* Does a draft entry carry logged numbers yet? Entries dropped in from a preset
    start blank, they need sets/reps/weight (or minutes/intensity) filled in. */
@@ -942,7 +974,8 @@ function logPut(log, rows) {
    cards: how many sets, and the best of them. */
 function entrySummary(e, unit, withRpe = false) {
   const k = kindOf(e);
-  if (k === "cardio") return T("sug.cardioSet", { min: esc(e.minutes), rpe: esc(e.intensity) });
+  if (k === "cardio") return T("sug.cardioSet", { min: esc(e.minutes), rpe: esc(e.intensity) })
+    + (Array.isArray(e.bouts) && e.bouts.length > 1 ? " · " + TN("bout", e.bouts.length) : "");
   const label = T("sets.summaryBest");
   /* the warm-ups are named beside the sets they are not part of, and a
      lift that only got as far as its warm-ups says just that */
@@ -2197,6 +2230,16 @@ function cleanEntry(e) {
   if ("planFrom" in out) out.planFrom = cleanToken(out.planFrom);
   for (const k of ENTRY_NUMS) if (k in out) out[k] = cleanNum(out[k]);
   if (Array.isArray(out.setList)) out.setList = out.setList.map(cleanSet);
+  /* a cardio session's bouts, kept only while they still add up to its
+     totals: a phone on an older build edits the totals and carries the
+     bouts along untouched */
+  if ("bouts" in out) {
+    const b = Array.isArray(out.bouts) ? out.bouts.filter((x) => x && typeof x === "object").slice(0, 40)
+      .map((x) => ({ id: cleanToken(x.id), minutes: cleanNum(x.minutes), intensity: cleanNum(x.intensity) })) : [];
+    const t = boutsTotals(b);
+    if (b.length >= 2 && t.minutes === String(out.minutes) && t.intensity === String(out.intensity)) out.bouts = b;
+    else delete out.bouts;
+  }
   if (out.plan && typeof out.plan === "object") {
     const p = { ...out.plan };
     if ("unit" in p) p.unit = cleanUnit(p.unit);
@@ -12275,7 +12318,11 @@ function csvText() {
     /* in rolling mode there is no program week to name, here as everywhere */
     const wk = rollingWeeks() ? "" : weekOf(e.date, state.settings.startDate);
     if (k === "cardio") {
-      rows.push([e.date, wk, text(e.exercise), text(group), k, "", "", "", "", "", "", "", "", num(e.minutes), num(e.intensity), "", text(e.notes || "")].map(cell).join(sep));
+      /* a session in bouts is a row per bout, numbered like sets, so its
+         minutes still add up down the column */
+      const bouts = Array.isArray(e.bouts) && e.bouts.length > 1 ? e.bouts : null;
+      (bouts || [e]).forEach((b, i) => rows.push([e.date, wk, text(e.exercise), text(group), k, bouts ? i + 1 : "", "", "", "", "", "", "", "",
+        num(b.minutes), num(b.intensity), "", i === 0 ? text(e.notes || "") : ""].map(cell).join(sep)));
       continue;
     }
     filledSets(e).forEach((s, i) => {
@@ -15615,7 +15662,8 @@ function entryComputed() {
   const planning = isDraft && !!(ui.workoutSheet && ui.workoutSheet.planning);
   const onRecord = entryOnRecord(f, isDraft);
   const lineUp = isDraft && !planning && !onRecord && !entryHasData(f);
-  const valid = planning || onRecord || isDraft || entryHasData(f);
+  /* a bout with only one of its numbers holds Save until it has both */
+  const valid = !(cardio && boutHalf(f)) && (planning || onRecord || isDraft || entryHasData(f));
   return { cardio, metric, lastMetric, bestMetric, lastDate, valid, onRecord, lineUp, planning };
 }
 
@@ -15872,7 +15920,9 @@ function sugOption(o, smaller, unit, fill) {
     : `data-reps="${o.reps}" data-weight="${sugWeight(o.weight)}"`;
   /* identical framing on both, and the only difference allowed is the quiet
      tag saying which one moves the estimate less */
-  return `<button data-action="${fill}" ${data} style="flex:1;min-width:0;text-align:left;padding:9px 10px;border-radius:11px;color:var(--text);background:var(--surface);border:1px solid var(--border)">
+  /* no `fill`: read, not tapped (a cardio session already in bouts) */
+  const tag = fill ? "button" : "div";
+  return `<${tag} ${fill ? `data-action="${fill}" ${data}` : ""} style="flex:1;min-width:0;text-align:left;padding:9px 10px;border-radius:11px;color:var(--text);background:var(--surface);border:1px solid var(--border)">
     <div style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)">${label}</div>
     <div class="pb-num" style="font-size:14px;font-weight:700;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${line}</div>
     ${(() => {
@@ -15884,7 +15934,7 @@ function sugOption(o, smaller, unit, fill) {
         ${gives}${smaller ? `<span style="font-size:9.5px;color:var(--steel);white-space:nowrap">${T("sug.smaller")}</span>` : ""}
       </div>` : "";
     })()}
-  </button>`;
+  </${tag}>`;
 }
 
 function renderSuggestion(form, unit) {
@@ -15921,7 +15971,7 @@ function renderSuggestion(form, unit) {
     </div>`);
 
   return wrap(head + `<div style="display:flex;gap:8px">
-      ${s.options.map((o) => sugOption(o, o.kind === s.smaller, eUnit, "sug-use")).join("")}
+      ${s.options.map((o) => sugOption(o, o.kind === s.smaller, eUnit, cardio && Array.isArray(f.bouts) && f.bouts.length >= 2 ? "" : "sug-use")).join("")}
     </div>
     <div style="font-size:11px;color:var(--faint);margin-top:9px;line-height:1.45">
       ${T(s.options.length > 1 ? (s.smaller ? "sug.hint" : "sug.hintTied") : "sug.hintOne",
@@ -16008,7 +16058,7 @@ function renderPlanTarget(f, unit) {
     ? `<div style="font-size:12px;color:var(--faint);line-height:1.5;margin-top:8px">${T(cardio ? "plan.cardioHint" : "plan.setsHint")}</div>`
     : "";
 
-  const load = cardio && (!res || !res.done)
+  const load = cardio && (!res || !res.done) && !(Array.isArray(f.bouts) && f.bouts.length >= 2)
     ? `<button data-action="plan-fill-cardio" class="pb-btn pb-ghost" style="width:100%;padding:10px 0;font-size:13px;margin-top:10px">
         ${icon("download", 14)} ${T("plan.loadTarget")}
       </button>`
@@ -16135,6 +16185,32 @@ function flashSetRows() {
   }
 }
 
+/* A cardio session's time and intensity: one pair, as it always was, and
+   a bout after a rest is another pair under it (CARDIO IN BOUTS). A plan
+   is for the session as a whole, so writing one offers no bouts. A new
+   bout's boxes start empty: a number reaches the log from a finger. */
+function renderBouts(f, planning) {
+  const add = planning ? "" : `<button data-action="bout-add" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;margin:2px 0 16px;font-size:13.5px;border-style:dashed">${icon("plus", 15)} ${T("entry.boutAdd")}</button>`;
+  if (!Array.isArray(f.bouts) || f.bouts.length < 2) return `<div style="display:flex;gap:10px">
+      <div style="flex:1">${field(T("entry.minutes"), `<input class="pb-input" ${NUM} data-bind="entry.minutes" value="${esc(f.minutes)}" placeholder="—">`)}</div>
+      <div style="flex:1">${field(T("entry.intensity"), `<input class="pb-input" ${NUM} data-bind="entry.intensity" value="${esc(f.intensity)}" placeholder="—">`)}</div>
+    </div>${add}`;
+  const fresh = ui.entryForm && ui.entryForm.boutNew;
+  return `<div style="display:flex;gap:10px;margin-bottom:6px;padding-left:26px;padding-right:38px">
+      <div class="pb-label" style="flex:1;margin:0">${T("entry.minutes")}</div>
+      <div class="pb-label" style="flex:1;margin:0">${T("entry.intensity")}</div>
+    </div>
+    ${f.bouts.map((b, i) => `<div style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
+      <span class="pb-num" aria-hidden="true" style="width:16px;flex-shrink:0;text-align:center;font-weight:700;color:var(--faint)">${i + 1}</span>
+      <input class="pb-input" ${NUM} data-bind="bout.${i}.minutes" value="${esc(b.minutes)}" placeholder="—" aria-label="${esc(T("entry.boutN", { n: i + 1 }) + ", " + T("entry.minutes"))}" style="flex:1;min-width:0"${fresh === b.id ? " data-autofocus" : ""}>
+      <input class="pb-input" ${NUM} data-bind="bout.${i}.intensity" value="${esc(b.intensity)}" placeholder="—" aria-label="${esc(T("entry.boutN", { n: i + 1 }) + ", " + T("entry.intensity"))}" style="flex:1;min-width:0">
+      <button data-action="bout-remove" data-i="${i}" aria-label="${esc(T("entry.boutRemove", { n: i + 1 }))}" style="width:28px;flex-shrink:0;display:flex;justify-content:center;padding:8px 0;color:var(--faint)">${icon("x", 17)}</button>
+    </div>`).join("")}
+    <div id="boutTotal" style="font-size:12.5px;color:var(--muted);margin:2px 0 10px 26px;min-height:1em">${boutTotalText(f)}</div>
+    ${add}`;
+}
+const boutTotalText = (f) => (+f.minutes > 0 ? esc(T("entry.boutTotal", { min: f.minutes, rpe: f.intensity })) : "");
+
 function renderEntryFields(form, unit) {
   const { f, isDraft } = form;
   const { cardio, metric, lastMetric, bestMetric, valid, onRecord, lineUp } = entryComputed();
@@ -16165,12 +16241,7 @@ function renderEntryFields(form, unit) {
       </button>`
     : "";
 
-  const inputs = cardio
-    ? `<div style="display:flex;gap:10px">
-        <div style="flex:1">${field(T("entry.minutes"), `<input class="pb-input" ${NUM} data-bind="entry.minutes" value="${esc(f.minutes)}" placeholder="—">`)}</div>
-        <div style="flex:1">${field(T("entry.intensity"), `<input class="pb-input" ${NUM} data-bind="entry.intensity" value="${esc(f.intensity)}" placeholder="—">`)}</div>
-      </div>`
-    : renderSetList(f, eUnit, planning, isDraft);
+  const inputs = cardio ? renderBouts(f, planning) : renderSetList(f, eUnit, planning, isDraft);
 
   return fullScreen(70, `
     <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 6px">
@@ -20981,7 +21052,7 @@ const actions = {
   },
   "plan-fill-cardio": () => {
     const f = ui.entryForm && ui.entryForm.f;
-    if (!f || !f.plan || f.plan.sets) return;
+    if (!f || !f.plan || f.plan.sets || (Array.isArray(f.bouts) && f.bouts.length >= 2)) return;
     /* only what the plan named; a box it left open keeps whatever is in it */
     ui.entryForm.f = { ...f, minutes: f.plan.minutes || f.minutes, intensity: f.plan.intensity || f.intensity };
     render();
@@ -22320,6 +22391,9 @@ const actions = {
     if (!f) return;
     const d = el.dataset;
     if (kindOf(f) === "cardio") {
+      /* a suggestion is for the whole session: in bouts it would land on
+         top of numbers already typed, so it stays something to read */
+      if (Array.isArray(f.bouts) && f.bouts.length >= 2) return;
       ui.entryForm.f = { ...f, minutes: d.min, intensity: d.rpe };
       render(); return;
     }
@@ -22723,6 +22797,28 @@ const actions = {
       ui.entryForm = null; ui.setForm = null;
       patch({ log: state.log.filter((e) => e.id !== f.id) });
     }
+  },
+  /* another bout after a rest: the first time, the pair already typed
+     becomes bout 1 (CARDIO IN BOUTS) */
+  "bout-add": () => {
+    const f = ui.entryForm && ui.entryForm.f;
+    if (!f) return;
+    const bouts = Array.isArray(f.bouts) && f.bouts.length >= 2 ? f.bouts
+      : [{ id: uid(), minutes: f.minutes || "", intensity: f.intensity || "" }];
+    const b = { id: uid(), minutes: "", intensity: "" };
+    f.bouts = [...bouts, b];
+    ui.entryForm.boutNew = b.id;
+    render();
+    ui.entryForm.boutNew = null;
+  },
+  /* down to one bout, the entry is a plain pair again */
+  "bout-remove": (el) => {
+    const f = ui.entryForm && ui.entryForm.f;
+    if (!f || !Array.isArray(f.bouts)) return;
+    const left = f.bouts.filter((_, n) => n !== +el.dataset.i);
+    if (left.length >= 2) Object.assign(f, { bouts: left }, boutsTotals(left));
+    else { delete f.bouts; Object.assign(f, { minutes: left[0] ? left[0].minutes : "", intensity: left[0] ? left[0].intensity : "" }); }
+    render();
   },
   "save-entry-form": () => {
     const { isDraft } = ui.entryForm;
@@ -23350,6 +23446,18 @@ function handleBind(el) {
     if (ui.entryForm) { ui.entryForm.f.unit = v; render(); }
   } else if (bind.startsWith("entry.")) {
     ui.entryForm.f[bind.slice(6)] = v; updateEntryPreview();
+  } else if (bind.startsWith("bout.")) {
+    /* bout.<i>.<minutes|intensity>, and the session's totals with it,
+       patched in place: a render would take the caret. A copy, because
+       the form's bouts may still be the logged entry's own. */
+    const [, i, key] = bind.split(".");
+    const f = ui.entryForm && ui.entryForm.f;
+    if (!f || !Array.isArray(f.bouts) || !f.bouts[+i] || (key !== "minutes" && key !== "intensity")) return;
+    f.bouts = f.bouts.map((b, n) => (n === +i ? { ...b, [key]: v } : b));
+    Object.assign(f, boutsTotals(f.bouts));
+    const tot = document.getElementById("boutTotal");
+    if (tot) tot.innerHTML = boutTotalText(f);
+    updateEntryPreview();
   } else if (bind === "swLog.date") {
     if (ui.swLog) ui.swLog.date = v || todayStr();
   } else if (bind.startsWith("target.")) {

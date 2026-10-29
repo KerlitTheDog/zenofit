@@ -6918,7 +6918,7 @@ const dvhSupported = !!(window.CSS && CSS.supports && CSS.supports("height", "10
    never affected by a keyboard, so it needs no such care. */
 let vpBaseH = 0;
 /* the keyboard inset last written, so a no-op update stays a no-op */
-let vpKb = 0;
+let vpKb = 0, vpVvh = 0;
 const vpTyping = () => {
   const el = document.activeElement;
   return !!el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable);
@@ -6953,11 +6953,15 @@ function applyViewport() {
      divides by 1; on a tablet it is the difference between a composer
      that clears the keyboard and one that clears twice too much.
 
-     TWO LAYERS SPEND IT, the chat composer and the note editor's tool bar,
-     each as padding on the whole layer so the list above shrinks with it.
-     Nothing else in the app has a control the keyboard can bury: every
-     other bottom sheet scrolls, and `fitScrollFooters` is about content
-     rather than chrome.
+     EVERY WINDOW SPENDS IT, each as padding on the whole layer so what is
+     in it ends at the keyboard: the chat composer and the note editor's
+     tool bar first, then (2026-10-29) every bottom sheet and full-screen
+     window, and the tabs' own scroll. Sheets used to be left to scroll,
+     and on a phone that meant two different sheets: opened with its field
+     already focused, Chrome panned the screen to show the field and most
+     of the sheet came up with it; a field tapped afterwards was already in
+     view, nothing moved, and the rest of the sheet, Save included, stayed
+     under the keyboard.
 
      It is written ABOVE the early return below, on purpose. That return
      fires precisely when neither the scale nor the width has changed,
@@ -6969,6 +6973,15 @@ function applyViewport() {
   if (kb !== vpKb) {
     vpKb = kb;
     root.style.setProperty("--pb-kb", kb + "px");
+  }
+  /* and how much can be seen above it, which caps a sheet resting on the
+     keyboard: when Chrome has already panned the screen up to show a field,
+     the frame's top is out of sight and a sheet as tall as the frame
+     allows would start up there, its title with it */
+  const vvh = kb && vv ? Math.round(vv.height / (next || 1)) : 0;
+  if (vvh !== vpVvh) {
+    vpVvh = vvh;
+    root.style.setProperty("--pb-vvh", vvh ? vvh + "px" : "100%");
   }
 
   /* nothing changed is the common case (a scroll that moved the browser
@@ -7269,7 +7282,9 @@ function render() {
   }
 
   /* content */
-  html += `<main class="pb-scroll" data-scrollkey="main-${tab}" style="flex:1;min-height:0;overflow-y:auto;padding-bottom:var(--pb-content-pb)">`;
+  /* the nav stays under the keyboard; what the tab lists can still be
+     scrolled up clear of it */
+  html += `<main class="pb-scroll" data-scrollkey="main-${tab}" style="flex:1;min-height:0;overflow-y:auto;padding-bottom:max(var(--pb-content-pb), calc(var(--pb-kb) + 16px))">`;
   if (tab === "home") html += renderHome(settings, currentWeek, unit);
   if (tab === "log") html += renderLog(log, library, badges, settings, unit, currentWeek);
   if (tab === "progress") html += renderProgress(log, library, goals, badges, settings, unit);
@@ -18879,13 +18894,17 @@ function renderJoinSheet() {
    while it's already open never re-slides it. */
 function fullScreen(z, children, key) {
   const enter = key && !_lastOverlayKeys.has(key) ? " pb-sheet" : "";
-  return `<div class="${enter}" data-overlay="${key || ""}" data-layer="fs" style="position:absolute;inset:0;z-index:${z};background:var(--bg);display:flex;flex-direction:column">${children}</div>`;
+  /* a window ends at the keyboard (`--pb-kb`): its list and its footer
+     shrink above it instead of running on underneath */
+  return `<div class="${enter}" data-overlay="${key || ""}" data-layer="fs" style="position:absolute;inset:0;z-index:${z};background:var(--bg);display:flex;flex-direction:column;padding-bottom:var(--pb-kb)">${children}</div>`;
 }
 
 function sheet(title, target, children, z = 60) {
   const enter = !_lastOverlayKeys.has(target) ? " pb-sheet" : "";
-  return `<div data-overlay="${target}" data-layer="sheet" data-action="overlay-close" data-target="${target}" style="position:absolute;inset:0;z-index:${z};display:flex;flex-direction:column;justify-content:flex-end;background:rgba(0,0,0,.55)">
-    <div class="pb-sheet-card pb-scroll${enter}" data-stopprop style="background:var(--surface);border-top:1px solid var(--border);border-radius:18px 18px 0 0;padding:16px 18px calc(26px + var(--pb-sab));max-height:calc(88% - var(--pb-sat));overflow-y:auto">
+  /* a sheet rests on the keyboard, the same however its field got the
+     caret, and is never taller than what can be seen above it (`--pb-vvh`) */
+  return `<div data-overlay="${target}" data-layer="sheet" data-action="overlay-close" data-target="${target}" style="position:absolute;inset:0;z-index:${z};display:flex;flex-direction:column;justify-content:flex-end;background:rgba(0,0,0,.55);padding-bottom:var(--pb-kb)">
+    <div class="pb-sheet-card pb-scroll${enter}" data-stopprop style="background:var(--surface);border-top:1px solid var(--border);border-radius:18px 18px 0 0;padding:16px 18px calc(26px + var(--pb-sab));max-height:min(calc(88% - var(--pb-sat)), calc(var(--pb-vvh) - 16px));overflow-y:auto">
       <div style="display:flex;align-items:center;margin-bottom:14px">
         <div class="pb-num" style="font-size:18.5px;font-weight:700;flex:1">${title}</div>
         <button data-action="overlay-close" data-target="${target}" aria-label="${T("a11y.close")}" style="color:var(--muted);padding:4px">${icon("x", 20)}</button>
@@ -23364,7 +23383,22 @@ document.addEventListener("focusin", (e) => {
   const el = e.target;
   if (el && el.dataset && el.dataset.dur != null && el.value)
     setTimeout(() => { try { if (document.activeElement === el) el.select(); } catch { /* not a text field */ } }, 0);
+  /* again once the keyboard is up: that is when the tab has the room to
+     scroll that far (main's padding grows by --pb-kb) */
+  if (el && el.dataset && SEARCH_BINDS.has(el.dataset.bind)) { searchToTop(el); setTimeout(() => searchToTop(el), 450); }
 });
+/* A search field in a tab's own scroll (the Library, Your lifts, chat,
+   the notepad) goes to the top of what can be seen when it takes the
+   caret, so the results fill the space down to the keyboard. Left where it
+   was, Chrome only nudged it up to just above the keyboard, and the list
+   it was searching stayed underneath. A picker's field heads its window
+   already, and the window ends at the keyboard (fullScreen). */
+const SEARCH_BINDS = new Set(["libq", "progq", "chatFind", "notesQ"]);
+function searchToTop(el) {
+  const main = el.closest("main");
+  if (!main || document.activeElement !== el) return;
+  main.scrollTop += (el.getBoundingClientRect().top - main.getBoundingClientRect().top) / vpScale - 8;
+}
 
 /* Two keys the notepad answers itself. Return in the label field adds the
    label. Backspace at the very start of a checklist row joins it onto the

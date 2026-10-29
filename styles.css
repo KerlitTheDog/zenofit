@@ -291,14 +291,16 @@ body { background: var(--outer); }
      the app rather than resize it, and names the price: a bar parked at
      the bottom of the frame ends up underneath it.
 
-     EXACTLY ONE THING SPENDS THIS, deliberately: the chat composer,
-     which is the only control in the app the keyboard can bury (every
-     other bottom sheet scrolls). It is spent as padding on the whole
-     conversation layer, so the message list shrinks by the same amount
-     instead of the composer being lifted on top of the newest message.
-     Anything else reaching for it should first ask whether it really
-     cannot scroll. */
+     It is spent as PADDING on a whole layer, so what is in it ends at
+     the keyboard rather than a bar being lifted on top of it: the chat
+     conversation and the note editor, every bottom sheet (which then
+     rests on the keyboard) and every full-screen window, and the tabs'
+     own scroll. A window's footer stays where it is, under the keyboard;
+     what scrolls above it ends at the keyboard instead. */
   --pb-kb:0px;
+  /* what can be seen above the keyboard while it is up (100% otherwise):
+     the most a sheet resting on it may be */
+  --pb-vvh:100%;
 
   --pb-vh:100vh;
 }

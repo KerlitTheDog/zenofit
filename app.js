@@ -889,6 +889,12 @@ function boutsSettle(e) {
   if (done.length >= 2) return { ...rest, bouts: done, ...boutsTotals(done) };
   return done.length ? { ...rest, minutes: done[0].minutes, intensity: done[0].intensity } : rest;
 }
+/* the most bouts one session holds: cleanEntry keeps no more, and a 41st
+   would have made the cleaned list stop adding up and lose them all */
+const BOUTS_MAX = 40;
+const inBouts = (e) => Array.isArray(e.bouts) && e.bouts.length >= 2;
+/* a session's bouts on one line: 10 min × RPE 6 + 15 min × RPE 7 */
+const boutsLine = (bouts) => bouts.map((b) => T("sug.cardioSet", { min: esc(b.minutes), rpe: esc(b.intensity) })).join(" + ");
 /* a bout with one of its two numbers: not a bout yet, and not to be
    dropped quietly either */
 const boutHalf = (e) => Array.isArray(e.bouts) && e.bouts.some((b) => (+b.minutes > 0) !== (+b.intensity > 0));
@@ -975,7 +981,7 @@ function logPut(log, rows) {
 function entrySummary(e, unit, withRpe = false) {
   const k = kindOf(e);
   if (k === "cardio") return T("sug.cardioSet", { min: esc(e.minutes), rpe: esc(e.intensity) })
-    + (Array.isArray(e.bouts) && e.bouts.length > 1 ? " · " + TN("bout", e.bouts.length) : "");
+    + (inBouts(e) ? " · " + TN("bout", e.bouts.length) : "");
   const label = T("sets.summaryBest");
   /* the warm-ups are named beside the sets they are not part of, and a
      lift that only got as far as its warm-ups says just that */
@@ -1146,7 +1152,10 @@ function setSuggestion(f, isDraft) {
     ].map((o) => ({ ...o, m: cardioScore(o.minutes, o.intensity) }))
      .filter((o) => o.m > prevM);
     if (!options.length) return { kind: "first" };
-    return { kind: "cardio", prev: { minutes: mins, intensity: rpe, m: prevM, date: lastDate },
+    /* the targets are whole numbers, something to aim at; last time is
+       said as it was logged, so the card's "last time" and the Last time
+       card under it agree (a session in bouts is rarely a whole intensity) */
+    return { kind: "cardio", prev: { minutes: +prev.minutes, intensity: +prev.intensity, m: prevM, date: lastDate },
              ...bySmallestStep(options), now, done };
   }
 
@@ -1190,7 +1199,7 @@ function outingRows(entries) {
     if (!note && e.notes) note = e.notes;
     if (kindOf(e) === "cardio") {
       if (+e.minutes > 0 && +e.intensity > 0)
-        rows.push({ kind: "cardio", minutes: e.minutes, intensity: e.intensity, m: cardioScore(+e.minutes, +e.intensity) });
+        rows.push({ kind: "cardio", minutes: e.minutes, intensity: e.intensity, m: cardioScore(+e.minutes, +e.intensity), bouts: inBouts(e) ? e.bouts : null });
       continue;
     }
     const u = unitOf(e), k = kindOf(e);
@@ -2234,7 +2243,7 @@ function cleanEntry(e) {
      totals: a phone on an older build edits the totals and carries the
      bouts along untouched */
   if ("bouts" in out) {
-    const b = Array.isArray(out.bouts) ? out.bouts.filter((x) => x && typeof x === "object").slice(0, 40)
+    const b = Array.isArray(out.bouts) ? out.bouts.filter((x) => x && typeof x === "object").slice(0, BOUTS_MAX)
       .map((x) => ({ id: cleanToken(x.id), minutes: cleanNum(x.minutes), intensity: cleanNum(x.intensity) })) : [];
     const t = boutsTotals(b);
     if (b.length >= 2 && t.minutes === String(out.minutes) && t.intensity === String(out.intensity)) out.bouts = b;
@@ -12320,7 +12329,7 @@ function csvText() {
     if (k === "cardio") {
       /* a session in bouts is a row per bout, numbered like sets, so its
          minutes still add up down the column */
-      const bouts = Array.isArray(e.bouts) && e.bouts.length > 1 ? e.bouts : null;
+      const bouts = inBouts(e) ? e.bouts : null;
       (bouts || [e]).forEach((b, i) => rows.push([e.date, wk, text(e.exercise), text(group), k, bouts ? i + 1 : "", "", "", "", "", "", "", "",
         num(b.minutes), num(b.intensity), "", i === 0 ? text(e.notes || "") : ""].map(cell).join(sep)));
       continue;
@@ -13657,7 +13666,7 @@ function exWindowHistory(hist) {
     const sets = ses.rows.map((r, n) => {
       const rk = r.kind || DEFAULT_KIND;
       const line = rk === "cardio"
-        ? T("sug.cardioSet", { min: esc(r.minutes), rpe: esc(r.intensity) })
+        ? T("sug.cardioSet", { min: esc(r.minutes), rpe: esc(r.intensity) }) + (r.bouts ? " · " + TN("bout", r.bouts.length) : "")
         : setLine(r, rk, r.unit);
       const tail = r.rpe ? `@${esc(r.rpe)}` : "";
       const cont = drops.cont[n];
@@ -15978,7 +15987,7 @@ function renderSuggestion(form, unit) {
      ridden at a 9 to lift the average) and no use for the other: at bout 2
      the question is how far off last time you are, which the session load
      card below answers live. */
-  const bouts = cardio && Array.isArray(f.bouts) && f.bouts.length >= 2;
+  const bouts = cardio && inBouts(f);
   return wrap(head + `<div style="display:flex;gap:8px">
       ${s.options.map((o) => sugOption(o, o.kind === s.smaller, eUnit, bouts ? "" : "sug-use")).join("")}
     </div>
@@ -16017,7 +16026,7 @@ function renderLastTime(form) {
       ${last.rows.length > 1 && r === last.best ? chip(T("sets.best"), "var(--gold)") : ""}
       <span style="flex:1"></span>
       ${side ? `<span class="pb-num" style="font-size:11px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${side}</span>` : ""}
-    </div>`;
+    </div>${r.bouts ? `<div class="pb-num" style="margin:2px 0 0 22px;font-size:11.5px;color:var(--muted);line-height:1.4">${boutsLine(r.bouts)}</div>` : ""}`;
   }).join("");
 
   return `<div class="pb-card2" style="padding:12px 13px;margin-bottom:14px">
@@ -16067,7 +16076,7 @@ function renderPlanTarget(f, unit) {
     ? `<div style="font-size:12px;color:var(--faint);line-height:1.5;margin-top:8px">${T(cardio ? "plan.cardioHint" : "plan.setsHint")}</div>`
     : "";
 
-  const load = cardio && (!res || !res.done) && !(Array.isArray(f.bouts) && f.bouts.length >= 2)
+  const load = cardio && (!res || !res.done) && !inBouts(f)
     ? `<button data-action="plan-fill-cardio" class="pb-btn pb-ghost" style="width:100%;padding:10px 0;font-size:13px;margin-top:10px">
         ${icon("download", 14)} ${T("plan.loadTarget")}
       </button>`
@@ -16199,10 +16208,12 @@ function flashSetRows() {
    is for the session as a whole, so writing one offers no bouts. A new
    bout's boxes start empty: a number reaches the log from a finger. */
 function renderBouts(f, planning) {
-  const add = planning ? "" : `<button data-action="bout-add" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;margin:2px 0 16px;font-size:13.5px;border-style:dashed">${icon("plus", 15)} ${T("entry.boutAdd")}</button>`;
-  if (!Array.isArray(f.bouts) || f.bouts.length < 2) return `<div style="display:flex;gap:10px">
-      <div style="flex:1">${field(T("entry.minutes"), `<input class="pb-input" ${NUM} data-bind="entry.minutes" value="${esc(f.minutes)}" placeholder="—">`)}</div>
-      <div style="flex:1">${field(T("entry.intensity"), `<input class="pb-input" ${NUM} data-bind="entry.intensity" value="${esc(f.intensity)}" placeholder="—">`)}</div>
+  const add = planning || (inBouts(f) && f.bouts.length >= BOUTS_MAX) ? "" : `<button data-action="bout-add" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;margin:2px 0 16px;font-size:13.5px;border-style:dashed">${icon("plus", 15)} ${T("entry.boutAdd")}</button>`;
+  /* Return walks time, intensity, the next bout's time, as it walks the
+     set editor, and closes the keyboard from the last box */
+  if (!inBouts(f)) return `<div style="display:flex;gap:10px">
+      <div style="flex:1">${field(T("entry.minutes"), `<input class="pb-input" ${NUM} enterkeyhint="next" data-bind="entry.minutes" value="${esc(f.minutes)}" placeholder="—">`)}</div>
+      <div style="flex:1">${field(T("entry.intensity"), `<input class="pb-input" ${NUM} enterkeyhint="done" data-bind="entry.intensity" value="${esc(f.intensity)}" placeholder="—">`)}</div>
     </div>${add}`;
   const fresh = ui.entryForm && ui.entryForm.boutNew;
   return `<div style="display:flex;gap:10px;margin-bottom:6px;padding-left:26px;padding-right:38px">
@@ -16211,8 +16222,8 @@ function renderBouts(f, planning) {
     </div>
     ${f.bouts.map((b, i) => `<div style="display:flex;gap:10px;align-items:center;margin-bottom:8px">
       <span class="pb-num" aria-hidden="true" style="width:16px;flex-shrink:0;text-align:center;font-weight:700;color:var(--faint)">${i + 1}</span>
-      <input class="pb-input" ${NUM} data-bind="bout.${i}.minutes" value="${esc(b.minutes)}" placeholder="—" aria-label="${esc(T("entry.boutN", { n: i + 1 }) + ", " + T("entry.minutes"))}" style="flex:1;min-width:0"${fresh === b.id ? " data-autofocus" : ""}>
-      <input class="pb-input" ${NUM} data-bind="bout.${i}.intensity" value="${esc(b.intensity)}" placeholder="—" aria-label="${esc(T("entry.boutN", { n: i + 1 }) + ", " + T("entry.intensity"))}" style="flex:1;min-width:0">
+      <input class="pb-input" ${NUM} enterkeyhint="next" data-bind="bout.${i}.minutes" value="${esc(b.minutes)}" placeholder="—" aria-label="${esc(T("entry.boutN", { n: i + 1 }) + ", " + T("entry.minutes"))}" style="flex:1;min-width:0"${fresh === b.id ? " data-autofocus" : ""}>
+      <input class="pb-input" ${NUM} enterkeyhint="${i < f.bouts.length - 1 ? "next" : "done"}" data-bind="bout.${i}.intensity" value="${esc(b.intensity)}" placeholder="—" aria-label="${esc(T("entry.boutN", { n: i + 1 }) + ", " + T("entry.intensity"))}" style="flex:1;min-width:0">
       <button data-action="bout-remove" data-i="${i}" aria-label="${esc(T("entry.boutRemove", { n: i + 1 }))}" style="width:28px;flex-shrink:0;display:flex;justify-content:center;padding:8px 0;color:var(--faint)">${icon("x", 17)}</button>
     </div>`).join("")}
     <div id="boutTotal" style="font-size:12.5px;color:var(--muted);margin:2px 0 10px 26px;min-height:1em">${boutTotalText(f)}</div>
@@ -21061,7 +21072,7 @@ const actions = {
   },
   "plan-fill-cardio": () => {
     const f = ui.entryForm && ui.entryForm.f;
-    if (!f || !f.plan || f.plan.sets || (Array.isArray(f.bouts) && f.bouts.length >= 2)) return;
+    if (!f || !f.plan || f.plan.sets || inBouts(f)) return;
     /* only what the plan named; a box it left open keeps whatever is in it */
     ui.entryForm.f = { ...f, minutes: f.plan.minutes || f.minutes, intensity: f.plan.intensity || f.intensity };
     render();
@@ -22402,7 +22413,7 @@ const actions = {
     if (kindOf(f) === "cardio") {
       /* a suggestion is for the whole session: in bouts it would land on
          top of numbers already typed, so it stays something to read */
-      if (Array.isArray(f.bouts) && f.bouts.length >= 2) return;
+      if (inBouts(f)) return;
       ui.entryForm.f = { ...f, minutes: d.min, intensity: d.rpe };
       render(); return;
     }
@@ -22811,8 +22822,8 @@ const actions = {
      becomes bout 1 (CARDIO IN BOUTS) */
   "bout-add": () => {
     const f = ui.entryForm && ui.entryForm.f;
-    if (!f) return;
-    const bouts = Array.isArray(f.bouts) && f.bouts.length >= 2 ? f.bouts
+    if (!f || (inBouts(f) && f.bouts.length >= BOUTS_MAX)) return;
+    const bouts = inBouts(f) ? f.bouts
       : [{ id: uid(), minutes: f.minutes || "", intensity: f.intensity || "" }];
     const b = { id: uid(), minutes: "", intensity: "" };
     f.bouts = [...bouts, b];
@@ -23500,9 +23511,7 @@ document.addEventListener("focusin", (e) => {
   const el = e.target;
   if (el && el.dataset && el.dataset.dur != null && el.value)
     setTimeout(() => { try { if (document.activeElement === el) el.select(); } catch { /* not a text field */ } }, 0);
-  /* again once the keyboard is up: that is when the tab has the room to
-     scroll that far (main's padding grows by --pb-kb) */
-  if (el && el.dataset && SEARCH_BINDS.has(el.dataset.bind)) { searchToTop(el); setTimeout(() => searchToTop(el), 450); }
+  if (el && el.dataset && SEARCH_BINDS.has(el.dataset.bind)) searchToTop(el);
 });
 /* A search field in a tab's own scroll (the Library, Your lifts, chat,
    the notepad) goes to the top of what can be seen when it takes the
@@ -23516,6 +23525,18 @@ function searchToTop(el) {
   if (!main || document.activeElement !== el) return;
   main.scrollTop += (el.getBoundingClientRect().top - main.getBoundingClientRect().top) / vpScale - 8;
 }
+/* and again the moment the keyboard is up, which is when the tab has the
+   room to scroll that far (main's padding grows by --pb-kb): after
+   applyViewport's own resize listener, which wrote it */
+if (window.visualViewport) window.visualViewport.addEventListener("resize", () => {
+  const a = document.activeElement;
+  if (!vpKb || !a || !a.dataset) return;
+  if (SEARCH_BINDS.has(a.dataset.bind)) searchToTop(a);
+  /* a box in a window the keyboard has just made shorter stays in view
+     inside it: Chrome showed it before the window moved. One line only,
+     never a note, whose caret could be anywhere in a long one */
+  else if (a.tagName === "INPUT" && a.closest("[data-layer]")) a.scrollIntoView({ block: "nearest" });
+});
 
 /* Two keys the notepad answers itself. Return in the label field adds the
    label. Backspace at the very start of a checklist row joins it onto the

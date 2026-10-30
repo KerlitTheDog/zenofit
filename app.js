@@ -15920,9 +15920,10 @@ function sugOption(o, smaller, unit, fill) {
     : `data-reps="${o.reps}" data-weight="${sugWeight(o.weight)}"`;
   /* identical framing on both, and the only difference allowed is the quiet
      tag saying which one moves the estimate less */
-  /* no `fill`: read, not tapped (a cardio session already in bouts) */
+  /* no `fill`: a target to read, not a tap (a cardio session already in
+     bouts), so it does not wear a button's card either */
   const tag = fill ? "button" : "div";
-  return `<${tag} ${fill ? `data-action="${fill}" ${data}` : ""} style="flex:1;min-width:0;text-align:left;padding:9px 10px;border-radius:11px;color:var(--text);background:var(--surface);border:1px solid var(--border)">
+  return `<${tag} ${fill ? `data-action="${fill}" ${data}` : ""} style="flex:1;min-width:0;text-align:left;padding:9px 10px;border-radius:11px;color:var(--text);${fill ? "background:var(--surface);border:1px solid var(--border)" : "background:transparent;border:1px solid transparent;padding-left:2px"}">
     <div style="font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:var(--faint)">${label}</div>
     <div class="pb-num" style="font-size:14px;font-weight:700;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${line}</div>
     ${(() => {
@@ -15970,11 +15971,19 @@ function renderSuggestion(form, unit) {
       <div style="flex:1;font-size:12.5px;color:var(--muted);line-height:1.5">${T("sug.ahead", { n: metricWithUnit(mk, s.prev.m, unit), now: metricShow(mk, s.now) })}</div>
     </div>`);
 
+  /* A session in bouts: the options are what all the bouts together are
+     aiming at, and nothing to load into one bout. Asked as somebody who
+     does cardio every week would use it, "fill the next bout" had no
+     honest answer for the +1 intensity option (the rest would have to be
+     ridden at a 9 to lift the average) and no use for the other: at bout 2
+     the question is how far off last time you are, which the session load
+     card below answers live. */
+  const bouts = cardio && Array.isArray(f.bouts) && f.bouts.length >= 2;
   return wrap(head + `<div style="display:flex;gap:8px">
-      ${s.options.map((o) => sugOption(o, o.kind === s.smaller, eUnit, cardio && Array.isArray(f.bouts) && f.bouts.length >= 2 ? "" : "sug-use")).join("")}
+      ${s.options.map((o) => sugOption(o, o.kind === s.smaller, eUnit, bouts ? "" : "sug-use")).join("")}
     </div>
     <div style="font-size:11px;color:var(--faint);margin-top:9px;line-height:1.45">
-      ${T(s.options.length > 1 ? (s.smaller ? "sug.hint" : "sug.hintTied") : "sug.hintOne",
+      ${T(bouts ? "sug.hintBouts" : s.options.length > 1 ? (s.smaller ? "sug.hint" : "sug.hintTied") : "sug.hintOne",
           { n: metricWithUnit(mk, s.prev.m, unit) })}
     </div>`);
 }

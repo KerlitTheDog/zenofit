@@ -55,7 +55,7 @@ Each one's reasons, and the bugs that taught it, are in the doc named beside it.
 - **Stored names are identity; translations are display only.** A rename is a cascade (`renameExerciseIn`, `group-save`), and a `data-*` attribute carries the stored English name, never a label (docs/languages.md, docs/exercises.md).
 - **Local first.** Nothing waits on a network to be counted, and sync is a copy, never the store (docs/sync.md).
 - **Encouragement is not information, and nothing is graded against a target the user did not set.** No default targets, no verdict nobody asked for, and *under* is never scolded (docs/sets.md, docs/planning.md).
-- **The formula is a code detail, not a caption; Home's *How this works* is a reference, not a tour; there are no "coming soon" boxes** (docs/writing.md).
+- **The app does not explain itself.** No tutorial text on its screens: no hints, no explainer footers, no *How this works*; explanations live only in the opt-in Guide (the ? in Home's header, and a card on Home for a profile with nothing logged); an empty state is one fact; the formula is a code detail; there are no "coming soon" boxes (docs/writing.md).
 - **Data from anywhere else is data, never markup.** What people typed goes through `esc()`, and a new field that a template prints raw belongs in `cleanRow` (docs/sync.md).
 
 # Code map
@@ -84,7 +84,7 @@ The detail of every area lives in `docs/`, one file per area, each small enough 
 | Working on | Read |
 |---|---|
 | How `app.js` is built: `state` and `ui`, `render`, `patch`, delegation, sheets, drag to reorder, the viewport engine, accessibility, migrations, theming, Refresh and the update banner, the vendored files | docs/architecture.md |
-| Copy the app shows: Home's *How this works*, captions, placeholder boxes | docs/writing.md |
+| Copy the app shows: no tutorial text, the Guide, empty states, captions, placeholder boxes | docs/writing.md |
 | Translating stored names: `exLabelOf`, `groupLabel`, `data-*` attributes, dates | docs/languages.md |
 | The exercise library, kinds (`KIND`), renames, search, variations, muscle groups | docs/exercises.md |
 | A day before and after it is saved: drafts, parked days, unlogged lifts, unfinished days, day notes | docs/logging.md |

@@ -531,8 +531,19 @@ const cardioScore = (minutes, intensity) =>
 
 /* Dates follow the app's language, not the device's: someone reading the app
    in Svenska on an English phone should get "24 aug", not "Aug 24". */
-const fmtDate = (s, opts = { weekday: "short", day: "numeric", month: "short" }) =>
+const fmtDateFresh = (s, opts) =>
   s ? parseDay(s).toLocaleDateString(localeTag(), opts) : "—";
+/* toLocaleDateString builds a new formatter on every call, which made dates
+   the dearest thing on a long list (half of a Body window redraw). What a
+   day reads as in one language never changes, so each answer is kept. */
+const fmtDateKept = new Map();
+const fmtDate = (s, opts = { weekday: "short", day: "numeric", month: "short" }) => {
+  if (!s) return fmtDateFresh(s, opts);
+  const key = localeTag() + "\n" + s + "\n" + JSON.stringify(opts);
+  let out = fmtDateKept.get(key);
+  if (out === undefined) fmtDateKept.set(key, out = fmtDateFresh(s, opts));
+  return out;
+};
 const fmtShort = (s) => fmtDate(s, { day: "numeric", month: "short" });
 
 const chronoSort = (log) =>
@@ -1066,14 +1077,18 @@ const metricFor = (weight, reps, unit) =>
 /* Every earlier outing of this lift, oldest first, over the same "strictly
    before" window the vs-your-best preview uses, so the two never disagree
    about what counts as earlier. Rows being edited are excluded: a session
-   cannot be its own benchmark. */
-function earlierOutings(f, isDraft) {
+   cannot be its own benchmark, and so is a session from another deload
+   (fromOtherDeload) unless `allDays` asks for every one, which only the
+   all-time best does. */
+function earlierOutings(f, isDraft, allDays) {
   const draft = ui.workoutSheet;
   const editingIds = draft && draft.editing ? new Set(draft.originalIds || []) : null;
-  const date = f.date || (isDraft && draft ? draft.date : null) || todayStr();
+  const date = entryDate(f, isDraft);
   const k = kindOf(f);
+  const other = allDays ? null : fromOtherDeload(date);
   return chronoSort(state.log).filter((e) =>
     e.exercise === f.exercise && e.id !== f.id &&
+    !(other && other(e)) &&
     /* a session logged in another kind is not a session you can be asked to
        beat: see readKind. This one filter is what keeps the suggestion
        card, "last time", the opening set and the set verdicts agreeing. */
@@ -1114,8 +1129,12 @@ function bySmallestStep(options) {
    `null` only when there is nothing useful to say at all. */
 function setSuggestion(f, isDraft) {
   if (!f) return null;
-  const earlier = earlierOutings(f, isDraft);
-  if (!earlier.length) return { kind: "first" };
+  /* On a deload day the card offers no way past anything. It names the
+     weights a deload is run at, off the last NORMAL session: an earlier
+     day of the same deload would make it a deload of a deload. */
+  const dl = deloadFor(f, isDraft);
+  const earlier = earlierOutings(f, isDraft).filter((e) => !dl || !deloadOn(state.deloads, e.date));
+  if (!earlier.length) return { kind: dl ? "deload" : "first" };
 
   /* the last DAY you trained it, and the best entry within that day */
   const lastDate = earlier[earlier.length - 1].date;
@@ -1125,7 +1144,16 @@ function setSuggestion(f, isDraft) {
     const m = metricOf(e);
     if (m != null && m > prevM) { prevM = m; prev = e; }
   }
-  if (!prev) return { kind: "first" };
+  if (!prev) return { kind: dl ? "deload" : "first" };
+
+  /* the 60-70% the deload card on Home describes, of the set that carried
+     last time, rounded onto real plates; only strength has a weight to cut */
+  if (dl) {
+    const fu = unitOf(f), w = weightAs(prev.weight, unitOf(prev), fu);
+    if (kindOf(f) !== "strength" || !(w > 0)) return { kind: "deload" };
+    const at = (p) => { const st = weightStep(fu, w * p); return Math.round(Math.round((w * p) / st) * st * 100) / 100; };
+    return { kind: "deload", lo: at(0.6), hi: at(0.7), unit: fu, prev: { reps: Math.round(+prev.reps), weight: w, date: lastDate } };
+  }
 
   const now = entryBest(f);
   const done = now != null && now > prevM;
@@ -1460,6 +1488,30 @@ const inDeload = (d, dayStr) => !!d && dayStr >= d.start && dayStr <= d.end;
 const deloadOn = (list, dayStr) => (list || []).find((d) => inDeload(d, dayStr)) || null;
 const deloadLength = (d) => (d ? daysBetween(d.start, d.end) + 1 : 0);
 
+/* ── WHAT A DELOAD DOES TO THE COMPARISONS ────────────────────────────
+   A deload is light on purpose, so nothing lifted in one measures how
+   strong you are. Two rules, both read off the dates in the calendar:
+
+   1. A session on a deload day is never "last time" for a day outside
+      that deload (fromOtherDeload). The week after, you answer to the
+      week before it, the training you are coming back to. It used to be
+      the deload itself, so every set read "beat" off weights you had cut
+      on purpose and the suggestion card offered one more rep on them.
+      Days inside the same deload still answer to each other.
+   2. On a deload day nothing is graded against last time (deloadFor): no
+      beat or same on the sets, no verdict in the set editor, and the
+      suggestion card gives the deload's weights instead of a way past.
+
+   The graphs keep a deload session as a faded dot off the line. Best
+   ever, PRs and the badges are untouched: a deload cannot lower a max. */
+const entryDate = (f, isDraft) => f.date || (isDraft && ui.workoutSheet ? ui.workoutSheet.date : null) || todayStr();
+const deloadFor = (f, isDraft) => deloadOn(state.deloads, entryDate(f, isDraft));
+/* a test for sessions on a deload day OTHER than the one `date` is in */
+const fromOtherDeload = (date) => {
+  const own = deloadOn(state.deloads, date);
+  return (e) => { const d = deloadOn(state.deloads, e.date); return !!d && d !== own; };
+};
+
 /* What, if anything, the home screen should be saying about a deload today. */
 function deloadStatus(list, today = todayStr()) {
   const all = deloadsSorted(list);
@@ -1704,7 +1756,10 @@ function entryLastResult(f, isDraft) {
   const byKey = new Map(prev.rows.map((r) => [r.key, r]));
   const keys = chainKeys(list);
   const pairs = list.map((s, i) => byKey.get(keys[i]) || null);
-  const verdicts = list.map((s, i) => (pairs[i] ? setProgress(s, pairs[i], k) : null));
+  /* on a deload day last time is still named beside each set, but nothing
+     is graded against it: the weights are down on purpose */
+  const dl = deloadFor(f, isDraft);
+  const verdicts = list.map((s, i) => (pairs[i] && !dl ? setProgress(s, pairs[i], k) : null));
   return {
     date: prev.date, rows: prev.rows, prev: pairs, verdicts,
     beat: verdicts.filter((v) => v === "beat").length,
@@ -2792,6 +2847,7 @@ function closeEverything() {
   ui.syncSheet = null; ui.joinSheet = null; ui.syncError = null; ui.accountSheet = null; ui.deleteAcct = null;
   /* another account's codes must never be left on screen for the next one */
   ui.recoveryShow = null; ui.recoveryForm = null; ui.recoveryLeft = null; ui.healthGate = null; ui.legal = null;
+  ui.guide = false; ui.guideTopic = null;
   /* a password given to Storage check opens that screen for that visit
      and not for whatever comes after it */
   ui.showStorage = false; ui.storUnlock = null; ui.storUnlocked = new Set();
@@ -6490,13 +6546,11 @@ const ui = {
   exHistAll: false,     // its history list is showing every session, not just the recent ones
   bodyForm: null,
   bodyFormWasNew: false,
-  deloadOpen: false,
   calMonth: null,       // "YYYY-MM" the calendar is showing
   calDay: null,         // the day the calendar has selected, what the day card is about
   planResult: null,     // {date, name, sum}, "here is how the plan went", after saving one
   deloadPick: null,     // {start} while tapping out a new deload's two ends
   deloadForm: null,     // {id, start, end, isNew}, the deload editor
-  accordions: {},   // all accordions start collapsed
   volumeWeek: null,     // program-week mode: which week the Volume tab is reading
   volAnchor: null,      // rolling mode: the LAST of the seven days it is reading
   presetOrder: false,   // Library → Presets is in drag-to-reorder mode
@@ -6581,11 +6635,9 @@ const ui = {
 };
 
 function resetTransient() {
-  ui.deloadOpen = false;
   ui.deloadPick = null;
   ui.calMonth = monthOf(todayStr());
   ui.calDay = todayStr();
-  ui.accordions = {};
   ui.progSeg = "progress";
   ui.progressSelected = null;
   ui.progressQ = "";
@@ -6794,41 +6846,6 @@ const noteBlock = (text, { size = 11.5, color = "var(--faint)", top = 7 } = {}) 
 
 const dayNoteBlock = (date, opts) => noteBlock(dayNoteOn(date), opts);
 
-function accordion(id, title, iconHtml, content) {
-  const open = !!ui.accordions[id];
-  /* content stays mounted in both states so the CSS grid-row transition can
-     animate the height; `is-open` on the card drives the whole animation. */
-  return `<div class="pb-card pb-acc${open ? " is-open" : ""}" style="margin-bottom:8px;overflow:hidden">
-    <button data-action="toggle-accordion" data-id="${id}" style="width:100%;display:flex;align-items:center;gap:10px;padding:13px 14px;color:var(--text);font-weight:600;font-size:14.5px;text-align:left">
-      ${iconHtml}<span style="flex:1">${title}</span>
-      <span class="pb-acc-chevron" style="color:var(--muted)">${icon("chevron-down", 16)}</span>
-    </button>
-    <div class="pb-acc-body"><div class="pb-acc-inner" style="padding:0 14px 14px;font-size:13.5px;line-height:1.55;color:var(--muted)">${content}</div></div>
-  </div>`;
-}
-
-/* Animate an accordion open/closed by transitioning its measured height, in
-   place, with no full re-render, so no flicker. Height is released to auto when the
-   transition ends so the panel can still reflow if its content ever changes. */
-function setAccordion(card, open) {
-  const body = card.querySelector(".pb-acc-body");
-  if (!body) return;
-  if (body._accDone) { body.removeEventListener("transitionend", body._accDone); body._accDone = null; }
-  const start = body.offsetHeight;               // current rendered height
-  const end = open ? body.scrollHeight : 0;      // full content height, or collapsed
-  body.style.height = start + "px";
-  void body.offsetHeight;                          // lock the start so the change animates
-  card.classList.toggle("is-open", open);          // chevron rotate + content fade
-  body.style.height = end + "px";
-  const done = (e) => {
-    if (e.propertyName !== "height") return;
-    body.style.height = open ? "auto" : "";
-    body.removeEventListener("transitionend", done);
-    body._accDone = null;
-  };
-  body._accDone = done;
-  body.addEventListener("transitionend", done);
-}
 
 
 /* Chart data captured during render, drawn after mount. `line` is the
@@ -6851,6 +6868,10 @@ const lineOf = (scope) => (scope === "ex" ? chartState.exLine : scope === "body"
    out and then removes itself. */
 let _lastTab = null;
 let _lastOverlayKeys = new Set();
+/* the tab's content as the last frame built it, and whether the frame being
+   built holds a full-screen window that was already open (fullScreen): what
+   render() needs to leave a tab that window covers where it is */
+let _mainNode = null, _mainHTML = "", _fsHeld = false;
 
 const reduceMotion = () =>
   window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -7259,7 +7280,6 @@ function render() {
 
   /* snapshot the outgoing frame so transitions can animate against it */
   const oldMain = app.querySelector('[data-scrollkey^="main-"]');
-  const oldMainHTML = oldMain ? oldMain.innerHTML : null;
   const oldMainScroll = oldMain ? oldMain.scrollTop : 0;
   const oldMainRect = oldMain
     ? { top: oldMain.offsetTop, left: oldMain.offsetLeft, width: oldMain.offsetWidth, height: oldMain.offsetHeight }
@@ -7336,6 +7356,7 @@ function render() {
   /* content */
   /* the nav stays under the keyboard; what the tab lists can still be
      scrolled up clear of it */
+  const mainFrom = html.length;
   html += `<main class="pb-scroll" data-scrollkey="main-${tab}" style="flex:1;min-height:0;overflow-y:auto;padding-bottom:max(var(--pb-content-pb), calc(var(--pb-kb) + 16px))">`;
   if (tab === "home") html += renderHome(settings, currentWeek, unit);
   if (tab === "log") html += renderLog(log, library, badges, settings, unit, currentWeek);
@@ -7344,6 +7365,7 @@ function render() {
   if (tab === "timer") html += renderTimers();
   if (tab === "chat") html += renderChat();
   html += `</main>`;
+  const mainTo = html.length;
 
   /* "time's up" banner, floating above the nav on whatever tab you're on, so a
      rest timer finishing while you're logging a set still gets your attention */
@@ -7396,6 +7418,7 @@ function render() {
   html += `</nav>`;
 
   /* overlays */
+  _fsHeld = false;
   if (ui.workoutSheet) html += renderWorkoutSheet(ui.workoutSheet, library, log, settings, unit);
   if (ui.picking) html += renderExercisePicker(library);
   if (ui.entryForm) html += renderEntryFields(ui.entryForm, unit);
@@ -7424,6 +7447,8 @@ function render() {
   if (ui.recoveryShow) html += renderRecoveryCodes();
   if (ui.healthGate) html += renderHealthGate();
   if (ui.termsGate) html += renderTermsGate();
+  if (ui.guide) html += renderGuide();
+  if (ui.guideTopic) html += renderGuideTopic();
   if (ui.legal) html += renderLegal();
   if (ui.syncSheet) html += renderSyncSheet();
   if (ui.joinSheet) html += renderJoinSheet();
@@ -7456,7 +7481,24 @@ function render() {
   if (ui.appToast) html += renderAppToast();
 
   html += `</div></div>`;
-  app.innerHTML = html;
+  /* A tab under a full-screen window that was already open is covered edge
+     to edge and inert. While its markup is what the last frame built and
+     nothing in it asks for the caret, it stays the node it is, layout and
+     scroll and all, and only what is around it is rebuilt: rebuilding it was
+     most of every frame in the workout window over a long history. Any other
+     frame, or one with a toast put straight into #app, is built whole. */
+  const mainHTML = html.slice(mainFrom, mainTo);
+  if (_fsHeld && oldMain && oldMain === _mainNode && oldMain.inert && mainHTML === _mainHTML
+      && !mainHTML.includes("data-autofocus") && app.childNodes.length === 1) {
+    const fresh = document.createElement("div");
+    fresh.innerHTML = html.slice(0, mainFrom) + "<main></main>" + html.slice(mainTo);
+    const kids = [...fresh.querySelector(".pb-root").childNodes];
+    const at = kids.findIndex((n) => n.nodeName === "MAIN");
+    for (const n of [...oldMain.parentNode.childNodes]) if (n !== oldMain) n.remove();
+    oldMain.before(...kids.slice(0, at));
+    oldMain.after(...kids.slice(at + 1));
+    app.firstChild.scrollTop = app.firstChild.scrollLeft = 0;   // where a new .pb-viewport starts
+  } else app.innerHTML = html;
 
   /* a note's fields grow to what is in them BEFORE the scroll is put back,
      or a long note is one line tall for a moment and the scroll is clamped */
@@ -7491,11 +7533,13 @@ function render() {
     prevOverlayKeys.forEach((key) => {
       if (!curOverlayKeys.has(key) && oldOverlayEls[key]) playLayerExit(root, oldOverlayEls[key]);
     });
-    /* crossfade the page body, but not while an overlay is opening/closing,
-       since that overlay's own slide is the movement the eye should follow. */
-    if (newMain && oldMain && oldMainRect && !overlaysChanged) {
+    /* crossfade the page body only with nothing over it: an overlay opening
+       or closing has its own slide for the eye to follow, and one that stays
+       open is where the eye already is. A badge restyled from its sheet used
+       to fade the whole Home page behind that sheet, a flash on every tap. */
+    if (newMain && oldMain && newMain !== oldMain && oldMainRect && !overlaysChanged && !curOverlayKeys.size) {
       const tabChanged = prevTab != null && prevTab !== ui.tab;
-      if (tabChanged || oldMainHTML !== newMain.innerHTML) {
+      if (tabChanged || oldMain.innerHTML !== newMain.innerHTML) {
         playMainCrossfade(root, oldMain, oldMainRect, oldMainScroll, tabChanged ? 210 : 150);
       }
     }
@@ -7503,6 +7547,8 @@ function render() {
 
   _lastTab = ui.tab;
   _lastOverlayKeys = curOverlayKeys;
+  _mainNode = newMain;
+  _mainHTML = mainHTML;
 
   /* focus the live content, never an element inside a fading transition layer */
   const af = [...app.querySelectorAll("[data-autofocus]")].find((e) => !e.closest(".pb-trans"));
@@ -7753,8 +7799,6 @@ function renderLoginGate() {
       <div style="font-size:11.5px;color:var(--faint);margin-top:10px;line-height:1.55">${T("acct.passwordHint")}</div>
     </div>
     </form>`}
-    ${f.recover ? "" : `<div style="font-size:11.5px;color:var(--faint);margin-top:16px;line-height:1.6">${T("login.hint")}</div>`}
-    <div style="font-size:11.5px;color:var(--faint);margin-top:8px;line-height:1.6">${T("acct.warning")}</div>
   </div>`;
 }
 
@@ -7795,7 +7839,7 @@ function renderNoProfiles() {
       : `<div class="pb-card" style="padding:16px;margin-bottom:14px">
           <div style="font-size:16px;font-weight:700;margin-bottom:6px">${T("noprof.title")}</div>
           <div style="font-size:12.5px;color:var(--muted);line-height:1.55;margin-bottom:14px">${T("noprof.body")}</div>
-          ${field(T("profiles.who"), `<input class="pb-input" data-bind="firstProfileWho" value="${esc(ui.firstProfileWho || "")}" placeholder="${esc(T("profiles.whoPh"))}" maxlength="60">`, T("profiles.whoHint"))}
+          ${field(T("profiles.who"), `<input class="pb-input" data-bind="firstProfileWho" value="${esc(ui.firstProfileWho || "")}" placeholder="${esc(T("profiles.whoPh"))}" maxlength="60">`)}
           ${field(T("profiles.name"), `<input class="pb-input" data-bind="firstProfileName" value="${esc(ui.firstProfileName || "")}" placeholder="${esc((ui.firstProfileWho || "").trim() || T("profiles.namePlaceholder"))}">`)}
           <button data-action="first-profile-create" class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px">
             ${icon("plus", 16)} ${T("noprof.create")}
@@ -7820,8 +7864,8 @@ function renderNoProfiles() {
 /* ───────────────────────────── HOME ───────────────────────────────── */
 
 /* ── the pinned module ────────────────────────────────────────────────
-   The strip of home screen between "Start New Workout" and the how-it-works
-   accordions is the app's launchpad: the presets you actually repeat, and
+   The strip of home screen under "Start New Workout" is the app's
+   launchpad: the presets you actually repeat, and
    the timers you actually reach for, both one tap away. Pin a preset from
    Library → Presets, a timer from the Timer tab. */
 
@@ -7838,9 +7882,6 @@ function renderPinnedPresets() {
     return `<div class="pb-card2" style="overflow:hidden">
       ${pinned.map((p, i) => reorderRow("pinnedPreset", i, pinned.length,
         esc(p.name), TN("move", (p.exercises || []).length))).join("")}
-    </div>
-    <div style="font-size:11.5px;color:var(--faint);line-height:1.5;padding:9px 2px 0">
-      ${T("home.pinnedReorderHint", { icon: icon("grip-vertical", 11) })}
     </div>`;
 
   return `<div class="pb-card2" style="overflow:hidden">
@@ -7911,9 +7952,6 @@ function renderPinnedTimerOrder(timers) {
   return `<div class="pb-card2" style="overflow:hidden">
     ${timers.map((t, i) => reorderRow("pinnedTimer", i, timers.length,
       esc(timerLabel(t)), fmtClock(t.duration))).join("")}
-  </div>
-  <div style="font-size:11.5px;color:var(--faint);line-height:1.5;padding:9px 2px 0">
-    ${T("timers.reorderHint", { icon: icon("grip-vertical", 11) })}
   </div>`;
 }
 
@@ -7944,8 +7982,7 @@ function renderPinnedModule() {
 }
 
 /* The deload banner: only ever about a period the user planned themselves,
-   counting down to it and then through it. Tap to unfold what a deload is
-   and how to run one. */
+   counting down to it and then through it. */
 function renderDeloadBanner(status) {
   if (!status) return "";
   const active = status.phase === "active";
@@ -7955,18 +7992,14 @@ function renderDeloadBanner(status) {
     : T("deload.inDays", { n: status.away });
   const sub = active
     ? (status.left === 0 ? T("deload.lastDay") : T("deload.toGo", { days: TN("day", status.left), end: fmtShort(status.d.end) }))
-    : T("deload.tapHow", { from: fmtShort(status.d.start), to: fmtShort(status.d.end) });
+    : `${fmtShort(status.d.start)} → ${fmtShort(status.d.end)}`;
 
-  return `<div class="pb-card" style="border-color:rgba(233,185,73,.4);background:rgba(233,185,73,.07)">
-    <button data-action="toggle-deload" style="width:100%;display:flex;gap:10px;align-items:center;padding:12px 14px;text-align:left">
-      ${icon("moon", 18, 'style="color:var(--gold);flex-shrink:0"')}
-      <div style="flex:1;min-width:0">
-        <div style="font-weight:700;font-size:13.5px;color:var(--gold)">${title}</div>
-        <div style="font-size:12px;color:var(--muted)">${sub}</div>
-      </div>
-      ${icon("chevron-down", 16, `style="color:var(--gold);transform:${ui.deloadOpen ? "rotate(180deg)" : "none"}"`)}
-    </button>
-    ${ui.deloadOpen ? `<div style="padding:0 14px 14px;font-size:13px;line-height:1.55;color:var(--muted)">${T("deload.what")}</div>` : ""}
+  return `<div class="pb-card" style="display:flex;gap:10px;align-items:center;padding:12px 14px;border-color:rgba(233,185,73,.4);background:rgba(233,185,73,.07)">
+    ${icon("moon", 18, 'style="color:var(--gold);flex-shrink:0"')}
+    <div style="flex:1;min-width:0">
+      <div style="font-weight:700;font-size:13.5px;color:var(--gold)">${title}</div>
+      <div style="font-size:12px;color:var(--muted)">${sub}</div>
+    </div>
   </div>`;
 }
 
@@ -8044,6 +8077,8 @@ function renderHome(settings, currentWeek, unit) {
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:2px;flex-shrink:0">
+        ${/* the guide, where it is seen the moment the app opens (THE GUIDE) */""}
+        <button data-action="open-guide" aria-label="${esc(T("guide.title"))}" title="${esc(T("guide.title"))}" style="color:var(--muted);padding:8px">${icon("help", 22)}</button>
         ${refreshBtn(22, 8)}
         <button data-action="open-body" title="${T("a11y.bodyBtn")}" style="color:var(--muted);padding:8px">${icon("ruler", 22)}</button>
         <button data-action="open-profile" style="color:var(--muted);padding:8px">${icon("settings", 22)}</button>
@@ -8063,46 +8098,18 @@ function renderHome(settings, currentWeek, unit) {
       ${icon("plus", 20, 'stroke-width="2.6"')} ${T("home.start")}
     </button>
 
+    ${guideCardShown() ? `<div class="pb-card" style="margin-top:12px;display:flex;align-items:center;gap:4px;padding:4px 6px 4px 14px">
+      ${icon("info", 17, 'style="color:var(--gold);flex-shrink:0"')}
+      <button data-action="open-guide" style="flex:1;min-width:0;text-align:left;padding:11px 8px;color:var(--text);font-weight:600;font-size:14px">${T("guide.card")}</button>
+      <button data-action="guide-card-hide" aria-label="${esc(T("a11y.close"))}" style="color:var(--faint);padding:8px;flex-shrink:0">${icon("x", 17)}</button>
+    </div>` : ""}
+
     ${renderUnfinishedCard(unfinished)}
     ${renderTodayPlan(state.log, unfinished)}
 
     ${deloadBanner ? `<div style="margin-top:12px">${deloadBanner}</div>` : ""}
 
     ${renderPinnedModule()}
-
-    <div style="margin-top:22px">
-      ${sectionTitle(T("home.howThisWorks"))}
-
-      <!-- These are a REFERENCE, not a tour: each one answers a question the
-           app cannot answer by being tapped. A rule that decides what happens
-           to someone's data (what counts, what is dropped, what a preset
-           saves, where the numbers live) belongs here. Narration of the
-           interface does not: nobody needs to be told that + adds an
-           exercise, and the same detail volunteered mid-set is noise. -->
-      ${accordion("howto", T("acc.howto.title"), icon("info", 16, 'style="color:var(--blue)"'), T("acc.howto.body"))}
-      ${accordion("counts", T("acc.counts.title"), icon("list-checks", 16, 'style="color:var(--red)"'), T("acc.counts.body"))}
-      ${accordion("plan", T("acc.plan.title"), icon("calendar-check", 16, 'style="color:var(--gold)"'), T("acc.plan.body"))}
-      ${accordion("beating", T("acc.progress.title"), icon("trophy", 16, 'style="color:var(--gold)"'), T("acc.progress.body", { unit }))}
-      ${accordion("onerm", T("acc.rm.title"), icon("trending-up", 16, 'style="color:var(--green)"'), T("acc.rm.body", { unit }))}
-      ${accordion("volume", T("acc.volume.title"), icon("calendar-days", 16, 'style="color:var(--steel)"'), T("acc.volume.body", { icon: icon("target", 11) }))}
-      ${accordion("presets", T("acc.presets.title"), icon("layers", 16, 'style="color:var(--gold)"'), T("acc.presets.body"))}
-      ${accordion("library", T("acc.library.title"), icon("book-open", 16, 'style="color:#a07ec2"'), T("acc.library.body"))}
-      ${accordion("timers", T("acc.timers.title"), icon("bell-ring", 16, 'style="color:var(--blue)"'), T("acc.timers.body"))}
-      ${/* Chat earns a place here by the same test as everything else on
-            this list: where a message physically lives, that it is NOT in
-            a backup, that signing out takes it off the phone and who is
-            able to find you are none of them answerable by tapping the
-            screen. What the buttons do is, so none of that is in the
-            copy. It sits directly above "where your data lives", which is
-            the entry it qualifies. */""}
-      ${accordion("chat", T("acc.chat.title"), icon("message-circle", 16, 'style="color:var(--gold)"'), T("acc.chat.body"))}
-      ${/* what a shared picture carries, and that it is made on the phone and
-            uploaded nowhere, is a question tapping cannot answer */""}
-      ${accordion("share", T("acc.share.title"), icon("share", 16, 'style="color:var(--steel)"'), T("acc.share.body"))}
-      ${accordion("cardio", T("acc.cardio.title"), icon("timer", 16, 'style="color:#a07ec2"'), T("acc.cardio.body"))}
-      ${accordion("units", T("acc.units.title"), icon("ruler", 16, 'style="color:var(--steel)"'), T("acc.units.body"))}
-      ${accordion("data", T("acc.data.title"), icon("settings", 16, 'style="color:var(--muted)"'), T("acc.data.body"))}
-    </div>
 
     <div style="height:8px"></div>
   </div>`;
@@ -8276,8 +8283,7 @@ function notesGridHTML() {
     return `<div style="padding:34px 20px;text-align:center;color:var(--faint);font-size:13px;line-height:1.6">${icon(ic, 34, 'style="display:block;margin:0 auto 10px"')}${T(key)}</div>`;
   }
   if (v === "trash" && !q) {
-    return `<div style="display:flex;align-items:center;gap:10px;margin:0 2px 10px">
-        <span style="flex:1;font-size:11.5px;color:var(--faint);line-height:1.45">${T("notes.trashHint")}</span>
+    return `<div style="display:flex;justify-content:flex-end;margin:0 2px 10px">
         <button data-action="notes-empty-trash" class="pb-btn pb-ghost" style="padding:7px 12px;font-size:12px;color:var(--red);flex-shrink:0">${T("notes.emptyTrash")}</button>
       </div>${grid(list)}`;
   }
@@ -9233,10 +9239,6 @@ function renderVolume(log, library, settings, currentWeek) {
     </div>
 
     <div class="pb-card" style="padding:4px 14px">${rows}</div>
-
-    <div style="font-size:11.5px;color:var(--faint);margin:10px 4px 0;line-height:1.5">
-      ${T(rolling ? "vol.helpRolling" : "vol.help", { icon: icon("target", 11) })}
-    </div>
     <div style="height:6px"></div>
   </div>`;
 }
@@ -9301,7 +9303,7 @@ function renderProgress(log, library, goals, badges, settings, unit) {
     : [];
   /* every dot carries the entry that made it, so tapping one can open the
      session behind the number instead of just showing it again */
-  const chartData = series.map((e) => ({ x: fmtShort(e.date), y: e.m, e, badge: badges[e.id]?.badge || null }));
+  const chartData = series.map((e) => ({ x: fmtShort(e.date), y: e.m, e, badge: badges[e.id]?.badge || null, deload: !!deloadOn(state.deloads, e.date) }));
 
   /* the same bars, counted in whichever seven days the app is set to */
   const rolling = rollingWeeks();
@@ -9332,7 +9334,7 @@ function renderProgress(log, library, goals, badges, settings, unit) {
     ? `<div class="pb-card pb-scroll" data-scrollkey="prog-detail" style="margin-bottom:20px;max-height:210px;overflow-y:auto">
         ${[...series].reverse().map((e) => `<button data-action="chart-pick" data-scope="main" data-id="${e.id}" style="width:100%;text-align:left;display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:1px solid var(--border-soft);font-size:13px;color:var(--text);background:${ui.chartSel.main === e.id ? "rgba(233,185,73,.08)" : "transparent"}">
           <span style="color:var(--muted);width:84px;flex-shrink:0">${fmtShort(e.date)}</span>
-          <span style="flex:1;min-width:0;color:var(--faint);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${entrySummary(e, unit)}</span>
+          <span style="flex:1;min-width:0;color:var(--faint);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${deloadOn(state.deloads, e.date) ? T("vol.legendDeload") + " · " : ""}${entrySummary(e, unit)}</span>
           <span class="pb-num" style="font-weight:700;font-size:15.5px;color:${badges[e.id]?.badge === "pr" ? "var(--gold)" : "var(--text)"}">${metricShow(kindOf(e), e.m)}</span>
         </button>`).join("")}
       </div>`
@@ -9368,9 +9370,7 @@ function renderProgress(log, library, goals, badges, settings, unit) {
         ? `${chartToolbar(false, "main")}
            <div data-linechart="main" style="position:relative;width:100%;height:210px;touch-action:pan-y"></div>
            <div data-linedetail="main">${renderPointDetail("main")}</div>`
-        : `<div style="height:130px;display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:13px;text-align:center;padding:0 24px;line-height:1.5">
-            ${sel ? T("prog.chartHint") : T("prog.chartHintAny")}
-          </div>`}
+        : ""}
     </div>
 
     ${detail}
@@ -9667,9 +9667,7 @@ function renderProgStandards(log, library, unit) {
   const ready = stdReady(f);
   const mode = stdMode(f, ex);
 
-  const liftHint = ex && ex.reps ? T("std.repsHint")
-    : f.liftFromLog ? T("std.liftFromLog")
-    : ex ? T("std.liftHint") : "";
+  const liftHint = f.liftFromLog ? T("std.liftFromLog") : "";
 
   /* THE SET ROUTE'S PAYOFF, and the only reason the switch is worth a row of
      the form: the max is on screen the moment both boxes are filled in, so
@@ -9713,12 +9711,10 @@ function renderProgStandards(log, library, unit) {
 
     <div class="pb-label" style="margin-bottom:6px">${T("std.sex")}</div>
     ${segControl("std-sex", f.sex, [["male", T("std.male")], ["female", T("std.female")]])}
-    ${f.sex ? "" : `<div style="font-size:11.5px;color:var(--faint);margin:-8px 0 12px">${T("std.sexHint")}</div>`}
 
     ${field(T("std.bodyweight", { unit }),
       `<input class="pb-input" ${NUM} data-bind="std.bw" value="${esc(f.bw)}" placeholder="—">`,
-      `<span id="stdBwHint">${f.bwFrom ? T("std.bwFrom", { date: fmtShort(f.bwFrom) })
-        : f.bw ? "" : T("std.bwNone")}</span>`)}
+      `<span id="stdBwHint">${f.bwFrom ? T("std.bwFrom", { date: fmtShort(f.bwFrom) }) : ""}</span>`)}
 
     ${ex && ex.reps ? "" : `<div class="pb-label" style="margin-bottom:6px">${T("std.mode")}</div>
       ${segControl("std-mode", mode, [["1rm", T("std.mode1rm")], ["set", T("std.modeSet")]])}`}
@@ -9730,17 +9726,11 @@ function renderProgStandards(log, library, unit) {
     </button>
   </div>`;
 
-  const intro = `<div style="font-size:13px;color:var(--muted);line-height:1.55;margin:0 2px 14px">${T("std.intro")}</div>`;
   const footer = `<div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 4px 10px">${T("std.footer")}</div>`;
 
   if (!res)
     return `<div>
-      ${intro}
       ${form}
-      <div class="pb-card" style="padding:24px;text-align:center;color:var(--faint);font-size:13px;line-height:1.6">
-        ${icon("medal", 26, 'style="margin:0 auto 10px;display:block"')}
-        ${T("std.empty")}
-      </div>
       ${footer}
       <div style="height:14px"></div>
     </div>`;
@@ -9761,7 +9751,6 @@ function renderProgStandards(log, library, unit) {
   }).join("");
 
   return `<div>
-    ${intro}
     ${form}
 
     <div data-stdresult class="pb-card" style="padding:16px 15px;margin-bottom:16px;border-color:${lvl ? color : "var(--border)"}">
@@ -9882,7 +9871,7 @@ function chartToolbarInner(full, scope = "main") {
     ${btn("chart-zoom-in", "zoom-in", T("chart.zoomIn"))}
     ${btn("chart-zoom-out", "zoom-out", T("chart.zoomOut"))}
     ${zoomed ? btn("chart-reset", "rotate-ccw", T("chart.reset")) : ""}
-    <div style="flex:1;min-width:0;font-size:10.5px;color:var(--faint);text-align:right;line-height:1.3">${T(full ? "chart.hintFull" : "chart.hint")}</div>
+    <div style="flex:1"></div>
     ${btn(full ? "chart-exit-full" : "chart-full", full ? "minimize-2" : "maximize-2", full ? T("chart.exitFull") : T("chart.full"))}
   </div>`;
 }
@@ -9894,8 +9883,7 @@ function renderPointDetail(scope = "main") {
   if (!line) return "";
   if (scope === "body") return renderBodyPointDetail(line);
   const p = line.data.find((d) => d.e.id === ui.chartSel[scope]);
-  if (!p)
-    return `<div style="font-size:11.5px;color:var(--faint);line-height:1.5;padding:6px 10px 2px;text-align:center">${T("chart.tapHint")}</div>`;
+  if (!p) return "";
 
   const e = p.e;
   const eUnit = unitOf(e);
@@ -9904,6 +9892,7 @@ function renderPointDetail(scope = "main") {
   return `<div class="pb-card2" style="margin:6px 4px 2px;padding:12px 13px">
     <div style="display:flex;align-items:baseline;gap:8px">
       <div style="font-weight:700;font-size:14px;flex:1;min-width:0">${fmtDate(e.date, { weekday: "short", day: "numeric", month: "short", year: "numeric" })}</div>
+      ${p.deload ? chip(T("vol.legendDeload"), "var(--gold)") : ""}
       ${p.badge && BADGE_SHORT[p.badge] ? chip(BADGE_SHORT[p.badge], p.badge === "pr" ? "var(--gold)" : "") : ""}
       <div class="pb-num" style="font-weight:700;font-size:19px;color:var(--gold);flex-shrink:0">${metricShow(line.kind, p.y)}<span style="font-size:10.5px;color:var(--muted);font-weight:600"> ${line.unit}</span></div>
     </div>
@@ -9940,8 +9929,7 @@ function renderPointDetail(scope = "main") {
    measured, its note, and the way into it to correct a number. */
 function renderBodyPointDetail(line) {
   const i = line.data.findIndex((d) => d.e.id === ui.chartSel.body);
-  if (i < 0)
-    return `<div style="font-size:11.5px;color:var(--faint);line-height:1.5;padding:6px 10px 2px;text-align:center">${T("body.chartTap")}</div>`;
+  if (i < 0) return "";
   const p = line.data[i], r = p.e, prev = line.data[i - 1];
   const unit = state.settings.units;
   const u = line.unit ? " " + line.unit : "";
@@ -10115,8 +10103,7 @@ function renderCalc(head = "") {
   const form = `<div class="pb-card" style="padding:14px;margin-bottom:16px">
     ${field(labelWith(T("calc.lift"), unitSelect(unit, "calcUnit")),
       `<input class="pb-input" ${NUM} data-bind="calc.weight" value="${esc(f.weight)}" placeholder="—">`)}
-    ${field(T("calc.reps"), `<input class="pb-input" ${NUM} data-bind="calc.reps" value="${esc(f.reps)}" placeholder="—">`,
-      T("calc.repsHint"))}
+    ${field(T("calc.reps"), `<input class="pb-input" ${NUM} data-bind="calc.reps" value="${esc(f.reps)}" placeholder="—">`)}
     <button id="calcRunBtn" data-action="calc-run" ${ready ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:14px 0;font-size:15.5px;opacity:${ready ? 1 : 0.45}">
       ${icon("equal", 17)} ${T("calc.run")}
     </button>
@@ -10125,12 +10112,7 @@ function renderCalc(head = "") {
   if (!res)
     return `<div class="" style="padding:14px 16px 0">
       ${head}
-      <div style="font-size:13px;color:var(--muted);line-height:1.55;margin:0 2px 14px">${T("calc.intro")}</div>
       ${form}
-      <div class="pb-card" style="padding:24px;text-align:center;color:var(--faint);font-size:13px;line-height:1.6">
-        ${icon("calculator", 26, 'style="margin:0 auto 10px;display:block"')}
-        ${T("calc.empty")}
-      </div>
       <div style="height:14px"></div>
     </div>`;
 
@@ -10159,7 +10141,6 @@ function renderCalc(head = "") {
 
   return `<div class="" style="padding:14px 16px 0">
     ${head}
-    <div style="font-size:13px;color:var(--muted);line-height:1.55;margin:0 2px 14px">${T("calc.intro")}</div>
     ${form}
 
     <div class="pb-card" style="padding:16px 15px;margin-bottom:18px;border-color:rgba(233,185,73,.45);background:rgba(233,185,73,.06)">
@@ -10178,7 +10159,6 @@ function renderCalc(head = "") {
     ${sectionTitle(T("calc.repTitle"))}
     ${calcTable([T("calc.colRepsPlain"), T("calc.colWeight"), T("calc.colPctPlain")], repRows)}
 
-    <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 4px 10px">${T("calc.footer")}</div>
     <div style="height:14px"></div>
   </div>`;
 }
@@ -10271,7 +10251,6 @@ function renderChat() {
       <div class="pb-card" style="padding:22px 18px;text-align:center">
         ${icon("message-circle", 28, 'style="margin:0 auto 12px;display:block;color:var(--gold)"')}
         <div style="font-weight:700;font-size:15px;margin-bottom:8px">${T("chat.needAccount")}</div>
-        <div style="font-size:12.5px;color:var(--muted);line-height:1.6;margin-bottom:16px">${T("chat.needAccountWhy")}</div>
         <button data-action="open-account" class="pb-btn pb-gold" style="width:100%;padding:12px 0;font-size:14.5px">
           ${icon("log-in", 15)} ${T("chat.signIn")}
         </button>
@@ -10354,7 +10333,7 @@ function chatBodyHTML() {
             : local ? icon("clock", 12, 'style="color:var(--faint);flex-shrink:0"')
             : mine ? icon("corner-up-right", 12, 'style="color:var(--faint);flex-shrink:0"') : ""}
           ${CHAT_THING_ICON[pkind] ? icon(CHAT_THING_ICON[pkind], 12, `style="color:${CHAT_THING_INK[pkind]};flex-shrink:0"`) : ""}
-          <span style="flex:1;min-width:0;font-size:12px;color:${unread ? "var(--muted)" : "var(--faint)"};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${preview ? esc(preview.replace(/\n+/g, " ")) : `<i>${T(chatIsSelf(t) ? "chat.selfHint" : "chat.noMessages")}</i>`}</span>
+          <span style="flex:1;min-width:0;font-size:12px;color:${unread ? "var(--muted)" : "var(--faint)"};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${preview ? esc(preview.replace(/\n+/g, " ")) : `<i>${T("chat.noMessages")}</i>`}</span>
           ${t.muted ? icon("bell-off", 12, 'style="color:var(--faint);flex-shrink:0"') : ""}
           ${unread ? `<span style="flex-shrink:0;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--gold);color:var(--gold-ink);font-size:10.5px;font-weight:700;display:flex;align-items:center;justify-content:center">${unread > 99 ? "99+" : unread}</span>` : ""}
         </span>
@@ -10379,7 +10358,6 @@ function chatBodyHTML() {
       ${chatAvatarOf({ kind: "self" })}
       <span style="flex:1;min-width:0">
         <span style="display:block;font-weight:600;font-size:14px;color:var(--text)">${T("chat.selfStart")}</span>
-        <span style="display:block;font-size:11.5px;color:var(--faint);margin-top:2px;line-height:1.4">${T("chat.selfHint")}</span>
       </span>
     </button>`;
   return `${chatNotifyDoor()}${self}${threads.length ? rows : `<div class="pb-card" style="padding:26px 20px;text-align:center;color:var(--muted);font-size:13px;line-height:1.6">
@@ -10451,7 +10429,7 @@ function chatResultsHTML() {
       ${chatAvatar(u.username)}
       <span style="flex:1;min-width:0">
         <span style="display:block;font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(u.username)}</span>
-        <span style="display:block;font-size:11.5px;color:var(--faint);margin-top:2px">${have ? T("chat.alreadyHave") : T("chat.tapToStart")}</span>
+        ${have ? `<span style="display:block;font-size:11.5px;color:var(--faint);margin-top:2px">${T("chat.alreadyHave")}</span>` : ""}
       </span>
       ${icon(have ? "message-circle" : "message-circle-plus", 18, 'style="color:var(--gold);flex-shrink:0"')}
     </button>`;
@@ -10616,7 +10594,7 @@ function chatThreadBodyHTML(f) {
     ? `<div style="padding:40px 0;text-align:center;font-size:12.5px;color:var(--faint)">${T("sync.working")}</div>`
     : !msgs.length
       ? `<div style="padding:40px 20px;text-align:center;font-size:12.5px;color:var(--faint);line-height:1.6">${chatIsSelf(t)
-        ? `${icon("bookmark", 22, 'style="display:block;margin:0 auto 10px;color:var(--gold)"')}${T("chat.selfEmpty")}`
+        ? T("chat.noMessages")
         : T("chat.sayHi", { name: esc(name) })}</div>`
       : `${f.hasMore ? `<div style="text-align:center;margin:4px 0 12px"><button data-action="chat-earlier" data-id="${esc(f.threadId)}" ${f.paging ? "disabled" : ""} class="pb-btn pb-ghost" style="padding:7px 14px;font-size:12px">${f.paging ? T("sync.working") : T("chat.earlier")}</button></div>` : ""}${bubbles}`;
 }
@@ -10643,14 +10621,11 @@ function renderChatMenu() {
   const name = chatName(t);
   const other = (t.members || [])[0];
 
-  const row = (action, ic, label, hint, ink = "var(--text)") =>
+  const row = (action, ic, label, ink = "var(--text)") =>
     `<button data-action="${action}" data-id="${esc(id)}" ${other ? `data-u="${esc(other.userId)}" data-n="${esc(other.username || "")}"` : ""}
       class="pb-btn pb-ghost" style="width:100%;padding:12px 14px;margin-bottom:8px;justify-content:flex-start;gap:10px;text-align:left;color:${ink}">
       ${icon(ic, 16)}
-      <span style="flex:1;min-width:0">
-        <span style="display:block;font-size:13.5px;font-weight:600">${label}</span>
-        <span style="display:block;font-size:11px;color:var(--faint);font-weight:400;margin-top:2px;white-space:normal;line-height:1.4">${hint}</span>
-      </span>
+      <span style="flex:1;min-width:0;font-size:13.5px;font-weight:600">${label}</span>
     </button>`;
 
   /* With yourself there is nobody to block, nothing ever rings to mute, and
@@ -10659,17 +10634,17 @@ function renderChatMenu() {
      again with nothing in it. */
   if (chatIsSelf(t)) {
     return sheet(esc(name), "chatMenu", `
-      ${row("chat-wipe", "eraser", T("chat.wipe"), T("chat.wipeHint"), "var(--red)")}
+      ${row("chat-wipe", "eraser", T("chat.wipe"), "var(--red)")}
     `, 130);
   }
 
   return sheet(esc(name), "chatMenu", `
     ${row("chat-mute", t.muted ? "bell" : "bell-off",
-      T(t.muted ? "chat.unmute" : "chat.mute"), T(t.muted ? "chat.unmuteHint" : "chat.muteHint"))}
+      T(t.muted ? "chat.unmute" : "chat.mute"))}
     ${!other ? ""
-      : other.blocked ? row("chat-unblock", "user-check", T("chat.unblock", { name: esc(other.username || name) }), T("chat.unblockHint"))
-      : row("chat-block", "user-x", T("chat.block", { name: esc(other.username || name) }), T("chat.blockHint"), "var(--red)")}
-    ${row("chat-leave", "trash-2", T("chat.leave"), T("chat.leaveHint"), "var(--red)")}
+      : other.blocked ? row("chat-unblock", "user-check", T("chat.unblock", { name: esc(other.username || name) }))
+      : row("chat-block", "user-x", T("chat.block", { name: esc(other.username || name) }), "var(--red)")}
+    ${row("chat-leave", "trash-2", T("chat.leave"), "var(--red)")}
   `, 130);
 }
 
@@ -10694,7 +10669,6 @@ function renderChatBlocks() {
       </div>`;
     }).join("");
   return sheet(T("chat.blockedTitle"), "chatBlocks", `
-    <div style="font-size:12px;color:var(--faint);line-height:1.5;margin-bottom:12px">${T("chat.blockedHint")}</div>
     ${body}
   `, 130);
 }
@@ -10929,7 +10903,7 @@ async function chatBuildThing(kind, ref) {
     const ex = findEx(ref);
     const b = hist.best, k = hist.kind, units = state.settings.units;
     const set = k === "cardio" ? { minutes: b.minutes, intensity: b.intensity } : (bestSet(workSets(b), k) || {});
-    const series = chatThin(hist.chart.map((pt) => [pt.e.date, Math.round(pt.y * 10) / 10]));
+    const series = chatThin(hist.chart.filter((pt) => !pt.deload).map((pt) => [pt.e.date, Math.round(pt.y * 10) / 10]));
     const value = Math.round(b.m * 10) / 10;
     const snap = ex ? await chatSnapOf(ex, ups) : { name: ref };
     return {
@@ -11286,7 +11260,7 @@ function renderChatView() {
           </div>
         </div>`
       : `<button data-action="chat-import" class="pb-btn pb-gold" style="width:100%;padding:15px 0;font-size:15.5px;border-radius:14px">${icon("plus", 18, 'stroke-width="2.6"')} ${T("chat.addEx")}</button>
-         <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:8px 2px 18px">${T("chat.addExHint", { group: esc(snapGroupLabel(snap) || T("group.Uncategorized")) })}</div>`;
+         <div style="height:18px"></div>`;
 
     return shell(T("chat.kind.exercise"), `
       ${from}
@@ -11348,7 +11322,7 @@ function renderChatView() {
     const imp = chatImportedHere(m.messageId)
       ? done(T("chat.addedPreset"), "chat-open-presets", `${icon("layers", 15)} ${T("chat.openPresets")}`)
       : `<button data-action="chat-import" class="pb-btn pb-gold" style="width:100%;padding:14px 0;font-size:15px;border-radius:14px">${icon("bookmark-plus", 17)} ${T(isPreset ? "chat.addPreset" : "chat.saveAsPreset")}</button>
-         <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:8px 2px 18px">${missing ? T("chat.addPresetHintNew", { n: TN("exercise", missing) }) : T("chat.addPresetHint")}</div>`;
+         ${missing ? `<div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:8px 2px 18px">${T("chat.addPresetHintNew", { n: TN("exercise", missing) })}</div>` : '<div style="height:18px"></div>'}`;
 
     return shell(T("chat.kind." + m.kind), `
       ${from}
@@ -11373,7 +11347,7 @@ function renderChatView() {
     const imp = chatImportedHere(m.messageId)
       ? done(T("chat.addedNote"), "chat-open-notes", `${icon("sticky-note", 15)} ${T("chat.openNotes")}`)
       : `<button data-action="chat-import" class="pb-btn pb-gold" style="width:100%;padding:14px 0;font-size:15px;border-radius:14px">${icon("sticky-note", 17)} ${T("chat.addNote")}</button>
-         <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:8px 2px 18px">${T("chat.addNoteHint")}</div>`;
+         <div style="height:18px"></div>`;
     return shell(T("chat.kind.note"), `
       ${from}
       ${imp}
@@ -11427,7 +11401,7 @@ function renderChatView() {
          ${want < today ? `<div style="font-size:11.5px;color:var(--red);line-height:1.5;margin:0 2px 12px">${T("chat.planPast")}</div>`
            : clash ? `<div style="font-size:11.5px;color:var(--red);line-height:1.5;margin:0 2px 12px">${T("chat.planClash", { date: fmtShort(want) })}</div>` : ""}
          <button data-action="chat-import" ${clash || want < today ? "disabled" : ""} class="pb-btn pb-gold" style="width:100%;padding:14px 0;font-size:15px;border-radius:14px;opacity:${clash || want < today ? 0.45 : 1}">${icon("calendar-plus", 17)} ${T("chat.addPlan")}</button>
-         <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:8px 2px 18px">${missing ? T("chat.addPlanHintNew", { n: TN("exercise", missing) }) : T("chat.addPlanHint")}</div>`;
+         ${missing ? `<div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:8px 2px 18px">${T("chat.addPlanHintNew", { n: TN("exercise", missing) })}</div>` : '<div style="height:18px"></div>'}`;
 
     return shell(T("chat.kind.plan"), `
       ${from}
@@ -11468,7 +11442,6 @@ function renderChatView() {
         ${stat(T("chat.sessions"), String(pNum(p.sessions) ?? "—"))}
         ${gain != null ? stat(T("chat.sinceFirst"), (gain > 0 ? "+" : "") + esc(metricShow(k, trimNum(gain))), esc(unit), gain > 0 ? "var(--green)" : "") : ""}
       </div>
-      <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 2px">${T("chat.recordHint")}</div>
     `);
   }
 
@@ -11722,7 +11695,6 @@ function renderChatAttach() {
       <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-bottom:12px">
         ${photo}${tile("exercise")}${tile("preset")}${tile("workout")}${tile("plan")}${tile("record")}${tile("rank")}${tile("note")}
       </div>
-      <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:0 2px">${T("chat.attachHint")}</div>
     `, 78);
   }
 
@@ -11756,21 +11728,18 @@ function renderChatMsgMenu() {
   const preview = chatIsThing(m)
     ? `<span style="display:flex;align-items:center;gap:8px">${icon(CHAT_THING_ICON[m.kind], 15, `style="color:${CHAT_THING_INK[m.kind]};flex-shrink:0"`)}<span>${esc(m.body || "")}</span></span>`
     : esc(String(m.body || "").slice(0, 280)).replace(/\n/g, "<br>");
-  const row = (action, ic, label, hint, ink) => `<button data-action="${action}"
+  const row = (action, ic, label, ink) => `<button data-action="${action}"
       class="pb-btn pb-ghost" style="width:100%;padding:12px 14px;margin-bottom:8px;justify-content:flex-start;gap:10px;text-align:left;color:${ink}">
       ${icon(ic, 16)}
-      <span style="flex:1;min-width:0">
-        <span style="display:block;font-size:13.5px;font-weight:600">${label}</span>
-        ${hint ? `<span style="display:block;font-size:11px;color:var(--faint);font-weight:400;margin-top:2px;white-space:normal;line-height:1.4">${hint}</span>` : ""}
-      </span>
+      <span style="flex:1;min-width:0;font-size:13.5px;font-weight:600">${label}</span>
     </button>`;
   /* "for everyone" means nothing with nobody else in the chat: it is a delete */
   const self = chatIsSelf(chatThreadOf(threadId));
   return sheet(T("chat.msgTitle"), "chatMsgMenu", `
     <div class="pb-card2" style="padding:10px 12px;margin-bottom:12px;font-size:12.5px;color:var(--muted);line-height:1.45;max-height:96px;overflow:hidden;word-break:break-word">${preview}</div>
-    ${acts.includes("copy") ? row("chat-copy", "copy", T("chat.copy"), "", "var(--text)") : ""}
-    ${acts.includes("unsend") ? row("chat-unsend", "trash-2", T(self ? "chat.selfDelete" : "chat.unsend"), T(self ? "chat.selfDeleteHint" : "chat.unsendHint"), "var(--red)") : ""}
-    ${acts.includes("discard") ? row("chat-discard", "trash-2", T("chat.discard"), T("chat.discardHint"), "var(--red)") : ""}
+    ${acts.includes("copy") ? row("chat-copy", "copy", T("chat.copy"), "var(--text)") : ""}
+    ${acts.includes("unsend") ? row("chat-unsend", "trash-2", T(self ? "chat.selfDelete" : "chat.unsend"), "var(--red)") : ""}
+    ${acts.includes("discard") ? row("chat-discard", "trash-2", T("chat.discard"), "var(--red)") : ""}
   `, 132);
 }
 
@@ -11865,8 +11834,7 @@ function renderShareTo() {
       <div class="pb-card" style="padding:16px 14px;margin-bottom:12px;text-align:center;border-color:${failed ? "rgba(208,90,80,.45)" : "rgba(106,164,101,.45)"}">
         ${icon(failed ? "alert-circle" : "check-circle-2", 26, `style="display:block;margin:0 auto 8px;color:${failed ? "var(--red)" : "var(--green)"}"`)}
         <div style="font-weight:700;font-size:14.5px">${failed ? T("chat.shareFailed") : T("chat.shareSent", { name: esc(chatName(t)) })}</div>
-        ${failed ? `<div style="font-size:12px;color:var(--muted);margin-top:6px;line-height:1.5">${esc(failed)}</div>`
-          : chatIsSelf(t) ? `<div style="font-size:12px;color:var(--muted);margin-top:6px;line-height:1.5">${T("chat.shareSentSelf")}</div>` : ""}
+        ${failed ? `<div style="font-size:12px;color:var(--muted);margin-top:6px;line-height:1.5">${esc(failed)}</div>` : ""}
       </div>
       <div style="display:flex;gap:8px">
         <button data-action="overlay-close" data-target="shareTo" class="pb-btn pb-ghost" style="flex:1;padding:12px 0;font-size:13.5px">${T("common.done")}</button>
@@ -11886,7 +11854,6 @@ function renderShareTo() {
         ${chatAvatarOf(t, 34)}
         <span style="flex:1;min-width:0">
           <span style="display:block;font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(chatName(t))}</span>
-          ${chatIsSelf(t) ? `<span style="display:block;font-size:11px;color:var(--faint);margin-top:1px">${T("chat.selfShareHint")}</span>` : ""}
         </span>
         ${sh.busy === t.threadId ? `<span style="font-size:11.5px;color:var(--faint)">${T("chat.sending")}</span>` : icon("send", 15, 'style="color:var(--gold);flex-shrink:0"')}
       </button>`).join("")}</div>
@@ -11894,7 +11861,6 @@ function renderShareTo() {
 
   return sheet(T("chat.shareTitle"), "shareTo", `
     ${pick}
-    <div style="font-size:12px;color:var(--muted);line-height:1.5;margin:0 2px 12px">${T("chat.shareHint." + sh.kind)}</div>
     ${list}
   `, 128);
 }
@@ -12532,9 +12498,6 @@ function renderGroupSheet(library) {
         </button>
       </div>`).join("")}
     </div>
-    <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 2px">
-      ${T("groups.reorderHint", { icon: icon("grip-vertical", 11) })}
-    </div>
   `, 100);
 }
 
@@ -12806,8 +12769,7 @@ function renderGroupForm() {
   const used = f.orig ? groupUseCount(f.orig, state.library) : 0;
 
   return sheet(isNew ? T("groups.new") : T("groups.edit"), "groupForm", `
-    ${field(T("groups.name"), `<input class="pb-input" data-bind="group.name" value="${esc(f.name)}" placeholder="—" data-autofocus>`,
-      isNew ? T("groups.nameHintNew") : T("groups.nameHintEdit", { n: TN("exercise", used) }))}
+    ${field(T("groups.name"), `<input class="pb-input" data-bind="group.name" value="${esc(f.name)}" placeholder="—" data-autofocus>`)}
 
     ${field(T("groups.colour"), `
       <div style="display:flex;flex-wrap:wrap;gap:8px">
@@ -12818,14 +12780,12 @@ function renderGroupForm() {
         </label>
       </div>`)}
 
-    ${field(T("kind.groupLabel"), kindPicker("group-kind", f.kind || DEFAULT_KIND),
-      f.orig ? T("kind.groupHintEdit") : T("kind.groupHintNew"))}
+    ${field(T("kind.groupLabel"), kindPicker("group-kind", f.kind || DEFAULT_KIND))}
 
     <div class="pb-card2" style="padding:12px 14px;display:flex;align-items:center;gap:11px;margin-bottom:16px">
       <span style="width:26px;height:26px;border-radius:9px;background:${f.color};flex-shrink:0;border:1px solid var(--border)"></span>
       <div style="flex:1;min-width:0">
         <div id="groupPreviewName" style="font-weight:600;font-size:14px">${name ? esc(name) : T("groups.previewName")}</div>
-        <div style="font-size:11.5px;color:var(--faint)">${T("groups.previewHint")}</div>
       </div>
       <span style="width:4px;height:26px;border-radius:2px;background:${f.color};flex-shrink:0"></span>
     </div>
@@ -12837,7 +12797,7 @@ function renderGroupForm() {
       ${icon("trash-2", 15)} ${T("groups.deleteBtn")}
     </button>
     <div style="font-size:11.5px;color:var(--faint);margin-top:8px;line-height:1.5">
-      ${used ? T("groups.deleteUsed", { n: TN("exercise", used) }) : T("groups.deleteEmpty")}
+      ${used ? TN("groups.deleteUsed", used) : T("groups.deleteEmpty")}
     </div>` : ""}
   `, 110);
 }
@@ -12893,7 +12853,6 @@ function renderExercisesLibrary(library) {
           <button data-action="dismiss-new" data-name="${esc(x.name)}" title="${T("lib.dismissNew")}" style="flex-shrink:0;padding:4px 2px 4px 6px;color:var(--faint)">${icon("x", 14)}</button>
         </div>`).join("")}
       </div>
-      ${T("lib.missingHint")}
     </div>` : ""}
 
     ${ordering ? "" : `<button data-action="add-exercise" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:14px;margin-bottom:12px;border-style:dashed;border-color:var(--border)">
@@ -12901,10 +12860,7 @@ function renderExercisesLibrary(library) {
     </button>`}
 
     ${canOrder ? reorderBar("lib-reorder", ordering, T("preset.reorder")) : ""}
-    <div id="libList">${renderLibraryList(library)}</div>
-    <div style="font-size:12px;color:var(--faint);line-height:1.55;margin:0 4px 10px">
-      ${ordering ? T("lib.reorderHint", { icon: icon("grip-vertical", 11) }) : T("lib.footer")}
-    </div>`;
+    <div id="libList">${renderLibraryList(library)}</div>`;
 }
 
 /* ─────────────────────────── PRESETS ──────────────────────────────────
@@ -12983,9 +12939,6 @@ function renderPresetOrder(presets) {
       esc(p.name),
       TN("move", (p.exercises || []).length) + (p.pinned ? " · " + T("preset.pinned") : ""),
       p.pinned ? icon("pin", 13, 'style="color:var(--gold);flex-shrink:0;margin-right:13px"') : "")).join("")}
-  </div>
-  <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 4px 10px">
-    ${T("preset.reorderHint", { icon: icon("grip-vertical", 11) })}
   </div>`;
 }
 
@@ -13001,10 +12954,7 @@ function renderPresets() {
   /* the search sits above the reorder toggle, as the library's does, and
      turning reorder on clears it: a search result has no order to change */
   return (presets.length > 1 ? searchField("presetq", ui.presetQ, T("preset.search")) + reorderBar("preset-reorder", false, T("preset.reorder")) : "") +
-    `<div id="presetList">${presetListHTML()}</div>
-    <div style="font-size:12px;color:var(--faint);line-height:1.55;margin:2px 4px 10px">
-      ${T("preset.footer", { icon: icon("pin", 11) })}
-    </div>`;
+    `<div id="presetList">${presetListHTML()}</div>`;
 }
 
 /* the preset cards under the Library's search, patched in place as it is typed */
@@ -13038,7 +12988,7 @@ function renderPresetView() {
   const canSave = !!(p.name && p.name.trim());
   return sheet(T("preset.editTitle"), "presetView", `
     ${field(T("preset.nameLabel"), `<input class="pb-input" data-bind="presetView.name" value="${esc(p.name)}" placeholder="—">`)}
-    ${field(T("preset.descLabel"), `<input class="pb-input" data-bind="presetView.description" value="${esc(p.description)}" placeholder="—">`, T("preset.descHintEdit"))}
+    ${field(T("preset.descLabel"), `<input class="pb-input" data-bind="presetView.description" value="${esc(p.description)}" placeholder="—">`)}
     ${sectionTitle(T("preset.exercisesN", { n: TN("move", exs.length) }))}
     <div class="pb-card" style="overflow:hidden;margin-bottom:16px">
       ${exs.length ? exs.map((ex, i) => `<div style="display:flex;align-items:center;gap:10px;padding:11px 14px;border-bottom:${i < exs.length - 1 ? "1px solid var(--border-soft)" : "none"}">
@@ -13067,11 +13017,8 @@ function renderPresetForm() {
   const exs = draft ? draft.entries : [];
   const canSave = !!(f.name && f.name.trim()) && exs.length > 0;
   return sheet(T("preset.saveTitle"), "presetForm", `
-    <div style="font-size:13px;color:var(--muted);line-height:1.55;margin-bottom:14px">
-      ${T("preset.saveIntro", { n: TN("exercise", exs.length) })}
-    </div>
     ${field(T("preset.nameRequired"), `<input class="pb-input" data-bind="preset.name" value="${esc(f.name)}" placeholder="—" data-autofocus>`)}
-    ${field(T("preset.descLabel"), `<input class="pb-input" data-bind="preset.description" value="${esc(f.description)}" placeholder="—">`, T("preset.descHintNew"))}
+    ${field(T("preset.descLabel"), `<input class="pb-input" data-bind="preset.description" value="${esc(f.description)}" placeholder="—">`)}
     ${sectionTitle(T("preset.included", { n: TN("move", exs.length) }))}
     <div class="pb-card" style="overflow:hidden;margin-bottom:16px">
       ${exs.map((e, i) => `<div style="display:flex;align-items:center;gap:10px;padding:10px 14px;border-bottom:${i < exs.length - 1 ? "1px solid var(--border-soft)" : "none"}">
@@ -13225,7 +13172,7 @@ function exerciseHistory(name, log) {
     const badge = run == null ? "first" : e.m > run ? "pr" : e.m === run ? "match" : "below";
     run = run == null ? e.m : Math.max(run, e.m);
     if (!best || e.m > best.m) best = e;
-    return { x: fmtShort(e.date), y: e.m, e, badge };
+    return { x: fmtShort(e.date), y: e.m, e, badge, deload: !!deloadOn(state.deloads, e.date) };
   });
 
   /* day by day, newest first, which is the direction a history is read in.
@@ -13271,16 +13218,11 @@ function exWindowViewBody(ex, hist) {
            <button data-action="dismiss-new" data-name="${esc(ex.name)}" class="pb-chip" style="color:var(--faint);gap:5px">${icon("check", 11)} ${T("ex.dismiss")}</button>`
         : ""}
     </div>
-    ${needsDetails(ex) ? `<div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:-8px 0 16px">
-      ${T("ex.newExplain")}
-    </div>` : ""}
 
     ${ex.missing ? "" : `<button data-action="log-exercise" data-name="${esc(ex.name)}" class="pb-btn pb-gold" style="width:100%;padding:15px 0;font-size:16px;border-radius:14px">
       ${icon("plus", 19, 'stroke-width="2.6"')} ${T("ex.logBtn")}
     </button>
-    <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:8px 2px 18px">
-      ${ui.workoutSheet ? T("ex.logHintOpen") : T("ex.logHint")}
-    </div>`}
+    <div style="height:18px"></div>`}
 
     ${ex.image
       ? photoOpen(`<img src="${esc(ex.image)}" alt="${esc(exLabelOf(ex))}" style="width:100%;max-height:300px;object-fit:cover;border-radius:14px;border:1px solid var(--border);display:block">`,
@@ -13355,7 +13297,7 @@ function exWindowStandard(ex) {
   const sEx = slug ? stdOf(slug) : null;
   const best = sEx ? stdBestSetFor(ex, sEx) : null;
   const ready = !!best;
-  const bestLine = !sEx ? T("std.exNoLink")
+  const bestLine = !sEx ? ""
     : !best ? T("std.exNoSets")
     : sEx.reps ? T("std.exBestReps", { n: TN("rep", +best.reps), date: fmtShort(best.date) })
     : T("std.exBestSet", { reps: esc(best.reps), weight: esc(trimNum(best.weight, 2)), unit: best.unit, date: fmtShort(best.date) });
@@ -13365,7 +13307,7 @@ function exWindowStandard(ex) {
     <button data-action="ex-std-check" ${ready ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:14px 0;font-size:15.5px;border-radius:13px;opacity:${ready ? 1 : 0.4}">
       ${icon("gauge", 17)} ${T("std.exCheck")}
     </button>
-    <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:8px 2px 10px">${bestLine}</div>
+    ${bestLine ? `<div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:8px 2px 10px">${bestLine}</div>` : `<div style="height:10px"></div>`}
     <button data-action="ex-std-link" class="pb-btn pb-ghost" style="width:100%;justify-content:flex-start;gap:9px;padding:11px 13px;margin-bottom:18px;text-align:left">
       ${icon(sEx ? "link-2" : "link-2-off", 15, `style="color:${sEx ? "var(--gold)" : "var(--faint)"};flex-shrink:0"`)}
       <span style="flex:1;min-width:0">
@@ -13472,7 +13414,7 @@ function exWindowVariations(ex) {
       ${icon("git-branch", 15)} ${T("ex.addVariation")}
     </button>
     ${attachBtn}
-    <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:10px 2px 18px">${T("ex.variationHint")}</div>`;
+    <div style="height:18px"></div>`;
   }
 
   const family = [...(root ? [root] : []), ...kids];
@@ -13508,9 +13450,7 @@ function exWindowVariations(ex) {
           "",
           `data-root="${esc(rootId)}"`)).join("")}
       </div>
-      <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 2px 18px">
-        ${T("ex.variationReorderHint", { icon: icon("grip-vertical", 11) })}
-      </div>`;
+      <div style="height:18px"></div>`;
   }
 
   const row = (x, i, n) => {
@@ -13534,7 +13474,7 @@ function exWindowVariations(ex) {
     </button>
     ${attachBtn}
     ${detachBtn}
-    <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:10px 2px 18px">${T("ex.variationHistoryNote")}</div>`;
+    <div style="height:18px"></div>`;
 }
 
 /* ── PICKING THE LIFT THIS ONE BELONGS UNDER ──────────────────────────
@@ -13600,7 +13540,6 @@ function renderAttachVariation() {
       </div>
       <div class="pb-scroll" data-scrollkey="attachPick" style="flex:1;overflow-y:auto;padding:12px 16px calc(30px + var(--pb-sab))">
         <div id="attachList">${attachBasesHTML()}</div>
-        <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:12px 2px 0">${T("ex.attachHint")}</div>
       </div>
     `, "exWinAttach");
   }
@@ -13616,7 +13555,7 @@ function renderAttachVariation() {
     </div>
     <div class="pb-scroll" data-scrollkey="attachName" style="flex:1;overflow-y:auto;padding:16px 16px calc(40px + var(--pb-sab))">
       ${sectionTitle(T("ex.variationOf", { name: esc(exLabelOf(root)) }))}
-      ${field(T("ex.variationName"), `<input class="pb-input" data-bind="attach.short" value="${esc(a.short || "")}" placeholder="${esc(T("ex.variationPlaceholder"))}" data-autofocus>`, T("ex.variationNameHint"))}
+      ${field(T("ex.variationName"), `<input class="pb-input" data-bind="attach.short" value="${esc(a.short || "")}" placeholder="${esc(T("ex.variationPlaceholder"))}" data-autofocus>`)}
       <div class="pb-card" style="padding:13px 14px;margin-bottom:10px">
         <div class="pb-label" style="margin-bottom:6px">${T("ex.attachPreview")}</div>
         <div id="attachPreview" style="font-weight:700;font-size:15px">${esc(exLabelOf(root))} · ${esc(short || T("ex.variationName"))}</div>
@@ -13628,7 +13567,7 @@ function renderAttachVariation() {
           </div>`).join("")}</div>
         </div>` : ""}
       </div>
-      <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 2px 18px">${T("ex.attachNote")}</div>
+      <div style="height:18px"></div>
     </div>
   `, "exWinAttach");
 }
@@ -13681,6 +13620,7 @@ function exWindowHistory(hist) {
         <div class="pb-num" style="font-weight:600;font-size:13.5px;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
           ${fmtDate(ses.date, { weekday: "short", day: "numeric", month: "short", year: "numeric" })}
         </div>
+        ${deloadOn(state.deloads, ses.date) ? chip(T("vol.legendDeload"), "var(--gold)") : ""}
         ${ses.offKind
           ? chip(T("kind." + (ses.rows[0] && ses.rows[0].kind || DEFAULT_KIND)), "var(--steel)")
           : BADGE_SHORT[ses.badge] ? chip(BADGE_SHORT[ses.badge], ses.badge === "pr" ? "var(--gold)" : "") : ""}
@@ -13706,9 +13646,7 @@ function exWindowHistory(hist) {
   return `
     ${sectionTitle(T("ex.historyTitle"), `<span style="font-size:11px;color:var(--faint)">${TN("session", hist.sessions.length)}</span>`)}
     <div class="pb-card" style="overflow:hidden">${rows}${more}</div>
-    <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:8px 2px 0">
-      ${hist.offKind ? T("kind.offKindNote", { n: TN("session", hist.offKind), kind: T("kind." + hist.kind) }) + " " : ""}${ui.workoutSheet ? T("ex.historyHintOpen") : T("ex.historyHint")}
-    </div>`;
+    ${hist.offKind ? `<div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:8px 2px 0">${TN("kind.offKindNote", hist.offKind, { kind: T("kind." + hist.kind) })}</div>` : ""}`;
 }
 
 function exWindowEditBody(f, library) {
@@ -13751,20 +13689,20 @@ function exWindowEditBody(f, library) {
   const parent = variantParent(f);
   const nameField = f.variantOf
     ? `${sectionTitle(T("ex.variationOf", { name: esc(exLabelOf(parent) || "—") }))}
-       ${field(T("ex.variationName"), `<input class="pb-input" data-bind="exwin.variantName" value="${esc(f.variantName || "")}" placeholder="${esc(T("ex.variationPlaceholder"))}" data-autofocus>`, T("ex.variationNameHint"))}`
+       ${field(T("ex.variationName"), `<input class="pb-input" data-bind="exwin.variantName" value="${esc(f.variantName || "")}" placeholder="${esc(T("ex.variationPlaceholder"))}" data-autofocus>`)}`
     : field(T("ex.nameRequired"), `<input class="pb-input" data-bind="exwin.name" value="${esc(exLabelOf(f))}" placeholder="—">`);
 
   return `
     ${nameField}
-    ${field(T("ex.groupRequired"), musclePicker, T("ex.groupHint"))}
-    ${field(T("kind.exLabel"), kindPicker("exwin-kind", exKind(f), f.muscle ? groupKind(f.muscle) : null), T("kind.exHint"))}
+    ${field(T("ex.groupRequired"), musclePicker)}
+    ${field(T("kind.exLabel"), kindPicker("exwin-kind", exKind(f), f.muscle ? groupKind(f.muscle) : null))}
 
-    ${field(T("ex.photo"), imageBlock, photoAway(f) && !photoComing(f) ? T("ex.photoAwayHint") : T("ex.photoHint"))}
+    ${field(T("ex.photo"), imageBlock, photoAway(f) && !photoComing(f) ? T("ex.photoAwayHint") : "")}
 
     ${field(T("ex.videoLabel"), `<input class="pb-input" type="url" inputmode="url" data-bind="exwin.video" value="${esc(f.video)}" placeholder="—">`,
-      vid ? T("ex.videoOk") : (f.video ? T("ex.videoBad") : T("ex.videoHint")))}
+      vid ? "" : (f.video ? T("ex.videoBad") : ""))}
 
-    ${field(T("ex.details"), `<textarea class="pb-input" rows="4" data-bind="exwin.note" placeholder="—" style="resize:none">${esc(exFieldOf(f, "note"))}</textarea>`, T("ex.detailsHint"))}
+    ${field(T("ex.details"), `<textarea class="pb-input" rows="4" data-bind="exwin.note" placeholder="—" style="resize:none">${esc(exFieldOf(f, "note"))}</textarea>`)}
     ${field(T("ex.equipment"), `<input class="pb-input" data-bind="exwin.equipment" value="${esc(exFieldOf(f, "equipment"))}" placeholder="—">`)}
     ${field(T("ex.alternatives"), `<input class="pb-input" data-bind="exwin.alternatives" value="${esc(exFieldOf(f, "alternatives"))}" placeholder="—">`)}
 
@@ -13823,9 +13761,6 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
           esc(exLabel(e.exercise)),
           entryHasData(e) ? entrySummary(e, unit) : esc(groupLabel(groupOfEntry(e, library))),
           `<span style="width:8px;height:8px;border-radius:4px;flex-shrink:0;margin-right:14px;background:${colorFor(groupOfEntry(e, library))}"></span>`)).join("")}
-      </div>
-      <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 4px 10px">
-        ${T("wo.reorderHint", { icon: icon("grip-vertical", 11) })}
       </div>`
     : draft.entries.map((e, ei) => {
     const b = badges[e.id] || {};
@@ -13903,9 +13838,6 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
 
       ${sectionTitle(planning ? T("plan.exercisesPlanned") : T("wo.exercisesThis"),
         orderToggle("entry-reorder", ui.entryOrder, draft.entries.length > 1))}
-      ${draft.entries.length === 0 ? `<div class="pb-card" style="padding:20px;text-align:center;color:var(--faint);font-size:13px;line-height:1.5;margin-bottom:10px">
-        ${T(planning ? "plan.emptyHint" : "wo.emptyHint")}
-      </div>` : ""}
       ${entries}
 
       ${reordering ? "" : `<button data-action="open-picker" class="pb-btn pb-ghost" style="width:100%;padding:13px 0;border-style:dashed;margin-top:4px">
@@ -13919,16 +13851,13 @@ function renderWorkoutSheet(draft, library, log, settings, unit) {
             what the day turned out to be like is a thing only the day can
             say. */
         planning ? "" : `<div style="margin-top:20px">${field(T("wo.dayNote"),
-          `<textarea class="pb-input" rows="3" data-bind="draft.dayNote" placeholder="${T("wo.dayNotePlaceholder")}" style="resize:none">${esc(draft.dayNote || "")}</textarea>`,
-          T("wo.dayNoteHint"))}</div>`}
+          `<textarea class="pb-input" rows="3" data-bind="draft.dayNote" placeholder="${T("wo.dayNotePlaceholder")}" style="resize:none">${esc(draft.dayNote || "")}</textarea>`)}</div>`}
 
       ${planning ? "" : renderTimerList()}
     </div>
 
     <div data-footer-for="worksheet" style="position:absolute;bottom:0;left:0;right:0;padding:22px 16px calc(18px + var(--pb-sab));background:linear-gradient(transparent, var(--bg) 18px)">
       ${!planning && emptyCount ? `<div style="font-size:11.5px;color:var(--faint);text-align:center;margin-bottom:8px;line-height:1.45">${emptyCount === 1 ? T("wo.stillNeedOne") : T("wo.stillNeed", { n: TN("exercise", emptyCount) })}</div>` : ""}
-      ${planning && draft.entries.length ? `<div style="font-size:11.5px;color:var(--faint);text-align:center;margin-bottom:8px;line-height:1.45">${T("plan.footNote")}</div>` : ""}
-      ${!planning && !draft.editing && draft.entries.length ? `<div style="font-size:11.5px;color:var(--faint);text-align:center;margin-bottom:8px;line-height:1.45">${T("wo.draftNote")}</div>` : ""}
       ${draft.entries.length ? `<button data-action="save-as-preset" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;font-size:14.5px;margin-bottom:8px">
         ${icon("bookmark-plus", 16)} ${T("preset.saveTitle")}
       </button>` : ""}
@@ -14130,6 +14059,9 @@ function picProgressData(name, range) {
     const from = addDays(todayStr(), -days);
     pts = pts.filter((p) => p.e.date >= from);
   }
+  /* off the line here as on the graph, so a deload is never the dip in a
+     picture nor the "from" its progress is measured from */
+  pts = pts.filter((p) => !p.deload);
   if (!pts.length) return { empty: true, why: TP("pic.noneInRange") };
   const first = pts[0], last = pts[pts.length - 1];
   const top = pts.reduce((a, p) => (p.y > a.y ? p : a), pts[0]);
@@ -15184,17 +15116,17 @@ function picDetails() {
   const sw = [];
   const strengthLift = () => { const k = readKind(s.lift); return !k || k === "strength"; };
   if (s.mode === "day" || s.mode === "month" || (s.mode === "progress" && strengthLift()))
-    sw.push(picSwitch("weights", T("pic.sw.weights"), T("pic.sw.weightsHint")));
+    sw.push(picSwitch("weights", T("pic.sw.weights")));
   if (s.mode === "day" || s.mode === "month") sw.push(picSwitch("tiles", T("pic.sw.tiles")));
   if (s.mode === "progress") sw.push(picSwitch("chart", T("pic.sw.chart")));
   if (s.mode === "max" && ["strength", "cardio"].includes(readKind(s.lift) || DEFAULT_KIND)) sw.push(picSwitch("setLine", T("pic.sw.setLine")));
   if (s.mode === "set") sw.push(picSwitch("e1rm", T("pic.sw.e1rm")));
-  if (s.mode === "records" && s.value === "max") sw.push(picSwitch("total", T("pic.sw.total"), T("pic.sw.totalHint")));
+  if (s.mode === "records" && s.value === "max") sw.push(picSwitch("total", T("pic.sw.total")));
   if (s.mode !== "month") sw.push(picSwitch("dates", T("pic.sw.date")));
   if (s.mode !== "max" && s.mode !== "records") sw.push(picSwitch("prs", T("pic.sw.prs")));
   /* the name goes beside the sentence, never into it: T() would read an
      underscore in a username as the start of italics */
-  sw.push(picSwitch("name", T("pic.sw.name"), picWho() ? `${T("pic.sw.nameHint")} <b style="color:var(--muted)">${esc(picWho())}</b>` : T("pic.sw.nameNone")));
+  sw.push(picSwitch("name", T("pic.sw.name"), picWho() ? `${T("pic.sw.nameHint")} <b style="color:var(--muted)">${esc(picWho())}</b>` : ""));
   return sw.join("");
 }
 
@@ -15205,7 +15137,6 @@ function renderPicStudio() {
   const modes = PIC_MODES.map((m) => [m, T("pic.mode." + m), { day: "clipboard-list", progress: "trending-up", max: "weight", set: "dumbbell", records: "trophy", month: "calendar-days" }[m]]);
   const liftPhoto = s.mode !== "day" && s.mode !== "month" && s.mode !== "records"
     ? picSafeSrc(((state.library || []).find((x) => x.name === s.lift) || {}).image) : null;
-  const overPhoto = s.theme === "photo" || s.theme === "clear";
 
   return fullScreen(112, `
     <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px;border-bottom:1px solid var(--border-soft)">
@@ -15237,8 +15168,7 @@ function renderPicStudio() {
         ${s.photo ? `<div style="display:flex;align-items:center;gap:10px;margin:12px 2px 0">
           <span style="font-size:12.5px;color:var(--muted);flex-shrink:0">${T("pic.dim")}</span>
           <input class="pb-range" type="range" min="0" max="80" step="5" value="${s.dim}" data-bind="pic.dim" aria-label="${T("pic.dim")}" style="flex:1;min-width:0">
-        </div>` : `<div style="font-size:11.5px;color:var(--faint);line-height:1.45;margin:8px 2px 0">${T("pic.photoHint")}</div>`}` : ""}
-      ${s.theme === "clear" ? `<div style="font-size:11.5px;color:var(--faint);line-height:1.45;margin:8px 2px 0">${T("pic.clearHint")}</div>` : ""}
+        </div>` : ""}` : ""}
 
       ${picLabel(T("pic.accent"))}
       ${picAccentRow()}
@@ -15247,7 +15177,6 @@ function renderPicStudio() {
       ${picChoice("pic-align", s.align, [["left", T("pic.align.left"), "align-left"], ["center", T("pic.align.center"), "align-center"]])}
       <div style="height:8px"></div>
       ${picChoice("pic-pos", s.pos, [["top", T("pic.pos.top")], ["middle", T("pic.pos.middle")], ["bottom", T("pic.pos.bottom")]])}
-      ${overPhoto ? "" : `<div style="font-size:11.5px;color:var(--faint);line-height:1.45;margin:8px 2px 0">${T("pic.posHint")}</div>`}
 
       ${picLabel(T("pic.headline"))}
       <input class="pb-input" data-bind="pic.headline" maxlength="40" value="${esc(s.headline)}" placeholder="${T("pic.headlinePlaceholder")}" aria-label="${T("pic.headline")}">
@@ -15258,7 +15187,6 @@ function renderPicStudio() {
       ${picLabel(T("pic.brand"))}
       ${picChoice("pic-brand", s.brand, [["full", T("pic.brand.full")], ["minimal", T("pic.brand.minimal")]])}
 
-      <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:16px 2px 0">${T("pic.hint")}</div>
     </div>
 
     <div data-footer-for="pic" style="position:absolute;bottom:0;left:0;right:0;padding:22px 16px calc(18px + var(--pb-sab));background:linear-gradient(transparent, var(--bg) 18px);display:flex;gap:8px">
@@ -15495,7 +15423,6 @@ function renderPickerList(library) {
       <button data-action="quick-add-muscle" data-g="${esc(UNCATEGORIZED)}" class="pb-btn pb-ghost" style="width:100%;padding:10px 0;font-size:13px;margin-top:10px;border-style:dashed;color:var(--muted)">
         ${icon("skip-forward", 14)} ${T("pick.skipMuscle")}
       </button>
-      <div style="font-size:11.5px;color:var(--faint);margin-top:10px">${T("pick.quickHint")}</div>
     </div>`;
   }
   /* A family is listed the way the Library lists it: each variation straight
@@ -15563,7 +15490,7 @@ function renderPresetPickerList() {
         ${icon("plus", 16)} ${exs.length === 1 ? T("preset.addOne") : T("preset.addAll", { n: exs.length })}
       </button>
     </div>`;
-  }).join("") + `<div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:2px 4px 0">${T("preset.pickerFooter")}</div>`;
+  }).join("");
 }
 
 function renderExercisePicker(library) {
@@ -15633,7 +15560,7 @@ function entryComputed() {
     const base = isDraft
       ? [...priorLog, ...(draft ? draft.entries.map((e) => ({ ...e, date: draft.date })) : [])].filter((e) => e.id !== f.id)
       : state.log.filter((e) => e.id !== f.id);
-    const date = f.date || (isDraft && draft ? draft.date : null) || todayStr();
+    const date = entryDate(f, isDraft);
     const k = kindOf(f);
     /* scored, not merely earlier: a lift unticked back to not-done is a row
        with no numbers on it, and letting one BE the last session would hand
@@ -15646,9 +15573,12 @@ function entryComputed() {
     const top = (rows) => rows.reduce((m, x) => (m == null || x.m > m ? x.m : m), null);
     bestMetric = top(scored);
     /* two entries of one lift on one day are one session's work, so the last
-       session is the best of that DAY, the same reading lastOuting takes */
-    lastDate = scored.length ? scored[scored.length - 1].date : null;
-    lastMetric = lastDate == null ? null : top(scored.filter((x) => x.date === lastDate));
+       session is the best of that DAY, the same reading lastOuting takes,
+       and never a day of another deload, the same rule earlierOutings keeps */
+    const other = fromOtherDeload(date);
+    const forLast = scored.filter((x) => !other(x));
+    lastDate = forLast.length ? forLast[forLast.length - 1].date : null;
+    lastMetric = lastDate == null ? null : top(forLast.filter((x) => x.date === lastDate));
   }
   /* ── NOTHING IN IT IS A THING YOU CAN SAVE ──────────────────────────
      This used to refuse a brand-new entry with no numbers on it, on the
@@ -15802,7 +15732,7 @@ function renderSetList(f, unit, planning, isDraft) {
        whether this slot went better than it did last time. */
     const t = warm ? null : targets[workAt[i]];
     const prev = lastRes && !warm ? lastRes.prev[i] : null;
-    const v = prev ? setProgress(s, prev, k) : null;
+    const v = prev ? lastRes.verdicts[i] : null;
     const pv = t ? setVerdict(s, t, k) : null;
     const refShort = (r) => k === "bodyweight" ? T("unit.nReps", { n: esc(r.reps) })
       : k === "hold" ? fmtHold(r.secs)
@@ -15853,7 +15783,6 @@ function renderSetList(f, unit, planning, isDraft) {
   const status = res
     ? `<span style="font-size:11px;color:${res.done >= res.total ? "var(--green)" : "var(--steel)"}">${T("plan.doneOf", { n: res.done, total: res.total })}</span>`
     : won ? `<span style="font-size:11px;color:var(--gold)">${won}</span>`
-    : list.length && !reordering ? `<span style="font-size:11px;color:var(--faint)">${T("sets.tapToEdit")}</span>`
     : "";
 
   const counted = planning ? list.filter(has).length : filled.length;
@@ -15876,18 +15805,15 @@ function renderSetList(f, unit, planning, isDraft) {
           learnt); a warm-up can come at any point, and is not offered
           while writing a plan, which names the work. */
       kinds ? `<div style="display:flex;gap:8px;margin-bottom:10px">
-      ${planning ? "" : `<button data-action="add-warm" class="pb-btn pb-ghost" title="${T("sets.addWarmHint")}" style="flex:1;padding:11px 0;font-size:13.5px;border-style:dashed;color:var(--muted)">
+      ${planning ? "" : `<button data-action="add-warm" class="pb-btn pb-ghost" style="flex:1;padding:11px 0;font-size:13.5px;border-style:dashed;color:var(--muted)">
         ${icon("flame", 15)} ${T("sets.addWarm")}
       </button>`}
-      <button data-action="add-drop" class="pb-btn pb-ghost" title="${T("sets.addDropHint")}" ${canDrop ? "" : "disabled"} style="flex:1;padding:11px 0;font-size:13.5px;border-style:dashed;color:var(--steel);opacity:${canDrop ? 1 : 0.45}">
+      <button data-action="add-drop" class="pb-btn pb-ghost" ${canDrop ? "" : "disabled"} style="flex:1;padding:11px 0;font-size:13.5px;border-style:dashed;color:var(--steel);opacity:${canDrop ? 1 : 0.45}">
         ${icon("chevrons-down", 15)} ${T("sets.addDrop")}
       </button>
     </div>` : ""}`}
     ${reordering
-      ? `<div class="pb-card" style="overflow:hidden;margin-bottom:8px">${dragRows}</div>
-         <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 4px 10px">
-           ${T("sets.reorderHint", { icon: icon("grip-vertical", 11) })}
-         </div>`
+      ? `<div class="pb-card" style="overflow:hidden;margin-bottom:8px">${dragRows}</div>`
       : list.length || ghosts ? rows + ghosts
       : `<div class="pb-card" style="padding:20px;text-align:center;color:var(--faint);font-size:13px;line-height:1.55;margin-bottom:10px">
       ${T(planning ? "plan.setsNone" : "sets.none")}
@@ -15954,11 +15880,15 @@ function renderSuggestion(form, unit) {
 
   const wrap = (body) => `<div class="pb-card2" style="padding:12px 13px;margin-bottom:14px">${body}</div>`;
 
-  if (s.kind === "first")
-    return wrap(`<div style="display:flex;gap:9px;align-items:flex-start">
-      ${icon("flag", 15, 'style="color:var(--blue);flex-shrink:0;margin-top:1px"')}
-      <div style="flex:1;font-size:12.5px;color:var(--muted);line-height:1.5">${T("sug.first")}</div>
-    </div>`);
+  if (s.kind === "first") return "";
+
+  /* numbers only: the range, and the set it is 60-70% of */
+  if (s.kind === "deload")
+    return s.lo == null ? "" : wrap(`<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:6px">
+      <div class="pb-label" style="flex:1;min-width:0">${T("vol.legendDeload")}</div>
+      <div style="font-size:11px;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${T("sug.lastTime", { set: `${s.prev.reps} × ${sugWeight(s.prev.weight)} ${s.unit}`, date: fmtShort(s.prev.date) })}</div>
+    </div>
+    <div class="pb-num" style="font-size:20px;font-weight:700">${s.lo === s.hi ? sugWeight(s.lo) : `${sugWeight(s.lo)}–${sugWeight(s.hi)}`}<span style="font-size:12px;color:var(--muted);font-weight:600"> ${s.unit} · 60–70%</span></div>`);
 
   const cardio = s.kind === "cardio";
   const eUnit = cardio ? "" : s.unit;
@@ -15990,10 +15920,6 @@ function renderSuggestion(form, unit) {
   const bouts = cardio && inBouts(f);
   return wrap(head + `<div style="display:flex;gap:8px">
       ${s.options.map((o) => sugOption(o, o.kind === s.smaller, eUnit, bouts ? "" : "sug-use")).join("")}
-    </div>
-    <div style="font-size:11px;color:var(--faint);margin-top:9px;line-height:1.45">
-      ${T(bouts ? "sug.hintBouts" : s.options.length > 1 ? (s.smaller ? "sug.hint" : "sug.hintTied") : "sug.hintOne",
-          { n: metricWithUnit(mk, s.prev.m, unit) })}
     </div>`);
 }
 
@@ -16072,8 +15998,6 @@ function renderPlanTarget(f, unit) {
     ? `<div style="font-size:12px;color:${beat ? "var(--gold)" : "var(--green)"};line-height:1.5;margin-top:8px">
         ${beat ? T("plan.allDoneBeat", { n: res.beat }) : res.under ? T("plan.allDoneSome") : T("plan.allDone")}
       </div>`
-    : !res || res.done === 0
-    ? `<div style="font-size:12px;color:var(--faint);line-height:1.5;margin-top:8px">${T(cardio ? "plan.cardioHint" : "plan.setsHint")}</div>`
     : "";
 
   const load = cardio && (!res || !res.done) && !inBouts(f)
@@ -16145,7 +16069,6 @@ function renderTargetForm() {
       <button data-action="target-add" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;border-style:dashed;margin-bottom:12px">${icon("plus", 16)} ${T("sets.add")}</button>`;
 
   return sheet(T("target.title"), "targetForm", `
-    <div style="font-size:12px;color:var(--muted);line-height:1.5;margin-bottom:14px">${T(k === "cardio" ? "target.hintCardio" : "target.hint")}</div>
     ${body}
     ${canCopy ? `<button data-action="target-last" class="pb-btn pb-ghost" style="width:100%;padding:11px 0;margin-bottom:10px">${icon("history", 15)} ${T("target.copyLast")}</button>` : ""}
     <button data-action="target-save" class="pb-btn pb-gold" style="width:100%;padding:14px 0;font-size:15px">${icon("target", 17)} ${T("target.save")}</button>
@@ -16287,8 +16210,7 @@ function renderEntryFields(form, unit) {
       ${renderLastTime(form)}
       ${inputs}
       ${superRow}
-      ${field(T("entry.notes"), `<textarea class="pb-input" rows="2" data-bind="entry.notes" placeholder="—" style="resize:none">${esc(f.notes)}</textarea>`,
-        cardio ? "" : T("entry.notesHint"))}
+      ${field(T("entry.notes"), `<textarea class="pb-input" rows="2" data-bind="entry.notes" placeholder="—" style="resize:none">${esc(f.notes)}</textarea>`)}
 
       <!-- live computed row: the sheet's Est. 1RM, against last time and against the best ever -->
       <div class="pb-card2" style="padding:12px 14px;display:flex;align-items:flex-end;gap:12px;margin-top:4px">
@@ -16303,9 +16225,6 @@ function renderEntryFields(form, unit) {
       ${kindOf(f) === "strength" && eUnit !== unit ? `<div style="font-size:11.5px;color:var(--faint);margin:8px 2px 0;line-height:1.5">
         ${T("entry.converted", { from: eUnit, to: unit })}
       </div>` : ""}
-      ${cardio ? "" : `<div style="font-size:11.5px;color:var(--faint);margin:8px 2px 0;line-height:1.5">
-        ${T("entry.highestNote")}
-      </div>`}
 
       ${planning ? "" : renderTimerList()}
     </div>
@@ -16380,7 +16299,8 @@ function lastSetMetric(f, isDraft, index, set) {
      "nothing to compare with", `ran` says which of the two reasons it is */
   if (!r) return { m: null, date: prev.date, index: at, ran: false };
   const m = setScore(r, kindOf(f));
-  return m == null ? null : { m, date: prev.date, index: at, ran: true };
+  /* `quiet` on a deload day: the set is named, no verdict is drawn */
+  return m == null ? null : { m, date: prev.date, index: at, ran: true, quiet: !!deloadFor(f, isDraft) };
 }
 
 /* The ceiling: the best single set this lift has ever been worth, in the
@@ -16391,7 +16311,7 @@ function bestEverMetric(f, isDraft) {
   if (!isSetKind(k)) return null;
   const fu = unitOf(f);
   let m = null, date = null;
-  for (const e of earlierOutings(f, isDraft))
+  for (const e of earlierOutings(f, isDraft, true))
     for (const r of outingRows([e]).rows) {
       if (r.kind !== k || r.warm) continue;
       /* recomputed rather than read off r.m, which is scored in the unit
@@ -16418,7 +16338,7 @@ function vsLastLine(m, ref) {
      rather than left as a gap, or the card looks like it failed to load */
   if (!ref.ran) return `<span style="color:var(--faint)">${T("vsSet.none", { i, date: fmtShort(ref.date) })}</span>`;
   const base = `<span style="color:var(--faint)">${T("vsSet.base", { i, n: metricShow(k, ref.m), date: fmtShort(ref.date) })}</span>`;
-  if (m == null) return base;
+  if (m == null || ref.quiet) return base;
   const d = Math.round((m - ref.m) * 10) / 10;
   const v = d > 0 ? "beat" : d < 0 ? "under" : "hit";
   const word = d === 0 ? T("vsSet.same", { i }) : T(d > 0 ? "vsSet.over" : "vsSet.under", { n: metricShow(k, Math.abs(d)), i });
@@ -16532,7 +16452,6 @@ function renderSetForm(form, unit) {
         ${icon("chevrons-down", 16, `style="color:${isDrop(s) ? "var(--steel)" : "var(--faint)"};flex-shrink:0"`)}
         <span style="flex:1;min-width:0">
           <span style="display:block;font-size:13.5px;font-weight:600;color:${isDrop(s) ? "var(--text)" : "var(--muted)"}">${T("sets.dropFrom", { n: setNumbers(above)[index - 1] })}</span>
-          <span style="display:block;font-size:11px;color:var(--faint)">${T("sets.dropFromHint")}</span>
         </span>
         <span style="width:18px;height:18px;border-radius:6px;flex-shrink:0;border:1px solid ${isDrop(s) ? "var(--steel)" : "var(--border)"};background:${isDrop(s) ? "var(--steel)" : "transparent"};display:flex;align-items:center;justify-content:center;color:var(--bg)">${isDrop(s) ? icon("check", 12) : ""}</span>
       </button>`
@@ -16545,7 +16464,7 @@ function renderSetForm(form, unit) {
     ${dropRow}
     ${inputs}
     ${target}
-    ${field(T("entry.rpe"), `<input class="pb-input" ${NUM} enterkeyhint="done" data-bind="set.rpe" value="${esc(s.rpe)}" placeholder="—">`, T("setForm.rpeHint"))}
+    ${field(T("entry.rpe"), `<input class="pb-input" ${NUM} enterkeyhint="done" data-bind="set.rpe" value="${esc(s.rpe)}" placeholder="—">`)}
 
     ${warm ? "" : `<div class="pb-card2" style="padding:11px 14px;margin-bottom:14px">
       <div style="display:flex;align-items:flex-start;gap:12px">
@@ -16710,9 +16629,6 @@ function renderBody(body, unit) {
 
     ${list}
 
-    <div style="font-size:12px;color:var(--faint);line-height:1.55;margin:0 4px 14px">
-      ${T("body.footer")}
-    </div>
     <div style="height:14px"></div>
   </div>`;
 }
@@ -16741,13 +16657,11 @@ function renderBodyTrend(body, unit) {
   return `<div style="margin-bottom:16px">
     ${sectionTitle(T("body.trend"), `<span style="font-size:11px;color:var(--faint)">${esc(bodyMetricLabel(metric, unit))}</span>`)}
     ${chips}
-    <div class="pb-card" style="padding:14px 8px 8px">
-      ${series.length >= 2
-        ? `${chartToolbar(false, "body")}
-           <div data-linechart="body" style="position:relative;width:100%;height:200px;touch-action:pan-y"></div>
-           <div data-linedetail="body">${renderPointDetail("body")}</div>`
-        : `<div style="height:110px;display:flex;align-items:center;justify-content:center;color:var(--faint);font-size:13px;text-align:center;padding:0 24px;line-height:1.5">${T("body.chartTwo")}</div>`}
-    </div>
+    ${series.length >= 2 ? `<div class="pb-card" style="padding:14px 8px 8px">
+      ${chartToolbar(false, "body")}
+      <div data-linechart="body" style="position:relative;width:100%;height:200px;touch-action:pan-y"></div>
+      <div data-linedetail="body">${renderPointDetail("body")}</div>
+    </div>` : ""}
   </div>`;
 }
 
@@ -17014,7 +16928,6 @@ function renderNotifyWindow() {
       ${icon(ic, 17, `style="color:${live ? "var(--gold)" : "var(--faint)"};flex-shrink:0"`)}
       <span style="flex:1;min-width:0">
         <span style="display:block;font-weight:600;font-size:14px">${T("notify.kind." + kind)}</span>
-        <span style="display:block;font-size:11.5px;color:var(--faint);line-height:1.45;margin-top:2px">${T("notify.kindHint." + kind)}</span>
       </span>
       ${switchPill(live)}
     </button>`;
@@ -17047,7 +16960,7 @@ function renderNotifyWindow() {
     </button>
   </div>
   ${d.msg ? `<div style="display:flex;gap:8px;align-items:flex-start;font-size:12px;line-height:1.5;margin:4px 2px 10px;color:${d.ok ? "var(--green)" : "var(--red)"}">${icon(d.ok ? "check" : "alert-circle", 14, 'style="flex-shrink:0;margin-top:2px"')}<span>${esc(d.msg)}</span></div>` : ""}
-  <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 2px 18px">${T("notify.checkHint")}</div>`;
+  <div style="height:18px"></div>`;
 
   return fullScreen(116, `
     <div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px;border-bottom:1px solid var(--border-soft)">
@@ -17061,13 +16974,10 @@ function renderNotifyWindow() {
         ${kindRow("timer", "timer")}
         ${kindRow("chat", "message-circle", true)}
       </div>
-      ${st === "off" ? `<div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin:0 2px 18px">${T("notify.kindsOff")}</div>` : on ? "" : `<div style="height:10px"></div>`}
+      ${on ? "" : `<div style="height:10px"></div>`}
       ${sectionTitle(T("notify.checkTitle"))}
       ${checks}
       ${tests}
-      <div style="display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--faint);line-height:1.5;margin:4px 2px 0">
-        ${icon("shield-check", 14, 'style="flex-shrink:0"')} ${T("notify.footer")}
-      </div>
     </div>
   `, "notifyWin");
 }
@@ -17709,9 +17619,6 @@ function timersBody() {
       ${icon("plus", 17)} ${T("timers.new")}
     </button>
 
-    <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:0 4px 10px">
-      ${T("timers.footer", { icon: icon("pin", 11) })}
-    </div>
     <div style="height:8px"></div>
   </div>`;
 }
@@ -17734,7 +17641,7 @@ function renderTimerList() {
 
   const right = pinned.length > 1
     ? orderToggle("timer-reorder", ui.timerOrder, true)
-    : `<span style="font-size:11px;color:var(--faint)">${T("timers.listHint")}</span>`;
+    : "";
 
   return `<div style="margin-top:22px">
     ${sectionTitle(T("timers.listTitle"), right)}
@@ -17755,7 +17662,7 @@ function renderTimerForm(form) {
   const total = Math.max(0, (+t.min || 0) * 60 + (+t.sec || 0));
   const ok = total > 0;
   return sheet(isNew ? T("timers.new") : T("timers.edit"), "timerForm", `
-    ${field(T("timers.nameLabel"), `<input class="pb-input" data-bind="timer.name" value="${esc(timerLabel(t) || t.name)}" placeholder="—" ${isNew ? "data-autofocus" : ""}>`, T("timers.nameHint"))}
+    ${field(T("timers.nameLabel"), `<input class="pb-input" data-bind="timer.name" value="${esc(timerLabel(t) || t.name)}" placeholder="—" ${isNew ? "data-autofocus" : ""}>`)}
     <div style="display:flex;gap:10px">
       <div style="flex:1">${field(T("timers.minutes"), `<input class="pb-input" ${NUM} data-bind="timer.min" value="${esc(t.min)}" placeholder="—">`)}</div>
       <div style="flex:1">${field(T("timers.seconds"), `<input class="pb-input" ${NUM} data-bind="timer.sec" value="${esc(t.sec)}" placeholder="—">`)}</div>
@@ -17802,14 +17709,14 @@ function renderSoundPicker(t) {
   }).join("");
 
   return `
-    ${field(T("timers.sound"), `<div style="display:flex;flex-wrap:wrap;gap:7px">${chips}</div>`, T("timers.soundHint"))}
+    ${field(T("timers.sound"), `<div style="display:flex;flex-wrap:wrap;gap:7px">${chips}</div>`)}
     ${field(labelWith(T("timers.volume")), `<div style="display:flex;align-items:center;gap:11px">
       <span data-volicon="on" style="display:${vol === 0 ? "none" : "inline-flex"};color:var(--muted);flex-shrink:0">${icon("volume-2", 17)}</span>
       <span data-volicon="off" style="display:${vol === 0 ? "inline-flex" : "none"};color:var(--faint);flex-shrink:0">${icon("volume-x", 17)}</span>
       <input class="pb-range" type="range" min="0" max="1" step="0.05" value="${vol}" data-bind="timer.volume" aria-label="${T("timers.volume")}" style="flex:1;min-width:0">
       <div id="timerVolPct" class="pb-num" style="width:46px;text-align:right;font-size:14px;font-weight:700;color:${vol === 0 ? "var(--faint)" : "var(--gold)"}">${vol === 0 ? T("timers.muted") : pct + "%"}</div>
       <button data-action="timer-sound-test" title="${T("timers.test")}" aria-label="${T("timers.test")}" class="pb-btn pb-ghost" style="width:36px;height:34px;border-radius:9px;color:var(--muted);flex-shrink:0">${icon("play", 14)}</button>
-    </div>`, T("timers.volumeHint"))}`;
+    </div>`)}`;
 }
 
 /* live total + save-button state while typing a duration */
@@ -17966,7 +17873,6 @@ function renderStopwatch() {
           ${T("sw.lapsEmpty")}
         </div>`}
 
-    <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin:12px 4px 10px">${T("sw.hint")}</div>
     <div style="height:10px"></div>
   </div>`;
 }
@@ -18096,7 +18002,7 @@ function renderProfile(f) {
       </select>`)}
       ${field(T("profile.unit"), `<div style="display:flex;gap:8px">
         ${UNITS.map((u) => `<button data-action="profile-units" data-u="${u}" class="pb-btn" style="flex:1;padding:11px 0;background:${f.units === u ? "var(--gold)" : "var(--surface2)"};color:${f.units === u ? "var(--gold-ink)" : "var(--muted)"};border:1px solid ${f.units === u ? "var(--gold)" : "var(--border)"}">${u}</button>`).join("")}
-      </div>`, T("profile.unitHint"))}
+      </div>`)}
       ${field(T("profile.theme"), `<div style="display:flex;gap:8px">
         ${[["dark", T("profile.dark"), "moon"], ["light", T("profile.light"), "sun"]].map(([t, label, ic]) => {
           const on = (f.theme || "dark") === t;
@@ -18108,8 +18014,8 @@ function renderProfile(f) {
           const on = (f.weekMode || "program") === m;
           return `<button data-action="profile-weekmode" data-m="${m}" class="pb-btn" style="flex:1;padding:11px 0;font-size:13.5px;background:${on ? "var(--gold)" : "var(--surface2)"};color:${on ? "var(--gold-ink)" : "var(--muted)"};border:1px solid ${on ? "var(--gold)" : "var(--border)"}">${icon(ic, 15)} ${label}</button>`;
         }).join("")}
-      </div>`, T((f.weekMode || "program") === "rolling" ? "profile.weekRollingHint" : "profile.weekProgramHint"))}
-      ${field(T("profile.startDate"), `<input type="date" class="pb-input" data-bind="profile.startDate" value="${esc(f.startDate)}">`, T("profile.startDateHint"))}
+      </div>`)}
+      ${field(T("profile.startDate"), `<input type="date" class="pb-input" data-bind="profile.startDate" value="${esc(f.startDate)}">`)}
 
       <div class="pb-hairline" style="margin:18px 0"></div>
       ${sectionTitle(T("push.section"))}
@@ -18127,7 +18033,7 @@ function renderProfile(f) {
             <span style="flex:1;min-width:0;font-weight:600;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${T("notify.short." + st)}</span>
             ${icon("chevron-right", 15, 'style="color:var(--faint);flex-shrink:0"')}
           </button>
-          <div style="font-size:11.5px;color:var(--faint);margin:0 2px 16px;line-height:1.5">${T("notify.settingsHint")}</div>`;
+          <div style="height:16px"></div>`;
         })()}
 
       <div class="pb-hairline" style="margin:18px 0"></div>
@@ -18165,16 +18071,11 @@ function renderProfile(f) {
         <span style="flex:1"></span>
         ${icon("chevron-right", 15, 'style="color:var(--faint)"')}
       </button>
-      <div style="font-size:11.5px;color:var(--faint);margin-bottom:16px;line-height:1.5">
-        ${T("stor.entryHint")}
-      </div>
+      <div style="height:16px"></div>
 
       <button data-action="reset-all" class="pb-btn" style="width:100%;padding:13px 0;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3)">
         ${icon("trash-2", 16)} ${T("profile.reset")}
       </button>
-      <div style="font-size:11.5px;color:var(--faint);margin-top:10px;line-height:1.5">
-        ${T("profile.dataHint")}
-      </div>
       <div style="font-size:12.5px;color:var(--faint);margin-top:20px;line-height:1.6;text-align:center">
         ${legalLink("privacy", "terms.privacy")} · ${legalLink("terms", "terms.terms")}
       </div>
@@ -18421,9 +18322,8 @@ function badgeSection(id) {
   return `${head}
     <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px">
       <span data-badge-preview style="display:flex">${badgeHTML(look, 52)}</span>
-      <div style="font-size:12px;color:var(--muted);line-height:1.5">${T("badge.pinHint")}</div>
     </div>
-    ${field(T("badge.text"), `<input class="pb-input" data-bind="badgeText" value="${esc(pin.text || "")}" placeholder="${esc(badgeInitials(v.name))}" maxlength="12" autocomplete="off" autocorrect="off" spellcheck="false">`, T("badge.textHint"))}
+    ${field(T("badge.text"), `<input class="pb-input" data-bind="badgeText" value="${esc(pin.text || "")}" placeholder="${esc(badgeInitials(v.name))}" maxlength="12" autocomplete="off" autocorrect="off" spellcheck="false">`)}
     <div class="pb-label" style="margin-bottom:8px">${T("badge.color")}</div>
     <div style="display:flex;flex-wrap:wrap;gap:9px;margin-bottom:16px">${GROUP_SWATCHES.map((c, n) => `<button data-action="badge-color" data-c="${c}" aria-label="${esc(T("badge.colorN", { n: n + 1 }))}" aria-pressed="${look.color === c}" style="width:32px;height:32px;border-radius:16px;background:${c};${look.color === c ? "box-shadow:0 0 0 2px var(--surface),0 0 0 4px var(--text)" : ""}"></button>`).join("")}
       ${/* any other colour, as a muscle group's: the well wears it once chosen */
@@ -18517,7 +18417,6 @@ function renderProfilesWindow() {
     </div>
     <div class="pb-scroll" data-scrollkey="profilesWin" style="flex:1;overflow-y:auto;padding:16px 16px calc(40px + var(--pb-sab))">
       ${body}
-      <div style="font-size:11.5px;color:var(--faint);line-height:1.55;margin-top:16px">${T("profiles.hint")}</div>
     </div>
   `, "profilesWin");
 }
@@ -18534,10 +18433,8 @@ function renderProfileForm() {
   const adding = f.mode === "add";
   return sheet(T("profiles." + f.mode + "Title"), "profileForm", `
     ${shared ? `<div style="font-size:12px;color:var(--steel);line-height:1.5;margin:-4px 0 12px">${profileShareLine(f.id)}</div>` : ""}
-    ${adding ? field(T("profiles.who"), `<input class="pb-input" data-bind="profileWho" value="${esc(f.who || "")}" placeholder="${esc(T("profiles.whoPh"))}" maxlength="60" data-autofocus>`,
-      T("profiles.whoHint")) : ""}
-    ${field(T("profiles.name"), `<input class="pb-input" data-bind="profileName" value="${esc(f.name)}" placeholder="${esc((adding && (f.who || "").trim()) || T("profiles.namePlaceholder"))}"${adding || f.look ? "" : " data-autofocus"}>`,
-      T("profiles.nameHint"))}
+    ${adding ? field(T("profiles.who"), `<input class="pb-input" data-bind="profileWho" value="${esc(f.who || "")}" placeholder="${esc(T("profiles.whoPh"))}" maxlength="60" data-autofocus>`) : ""}
+    ${field(T("profiles.name"), `<input class="pb-input" data-bind="profileName" value="${esc(f.name)}" placeholder="${esc((adding && (f.who || "").trim()) || T("profiles.namePlaceholder"))}"${adding || f.look ? "" : " data-autofocus"}>`)}
     <button data-action="profile-form-save" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
       ${icon("check", 16)} ${T(f.mode === "rename" ? "common.saveChanges" : "profiles." + f.mode + "Btn")}
     </button>
@@ -18589,7 +18486,6 @@ function renderSyncSheet() {
         <button data-action="sync-copy-code" class="pb-btn pb-ghost" style="width:100%;padding:10px 0;margin-top:11px;font-size:13px">
           ${icon(f.copied ? "check" : "copy", 14)} ${T(f.copied ? "sync.copied" : "sync.copy")}
         </button>
-        <div style="font-size:11px;color:var(--faint);margin-top:9px;line-height:1.5">${T("sync.codeHint")}</div>
       </div>`
     : "";
 
@@ -18640,7 +18536,7 @@ function renderSyncSheet() {
         <button data-action="sync-make-code" data-level="read" ${ui.syncBusy ? "disabled" : ""} class="pb-btn pb-ghost" style="flex:1;padding:11px 0;font-size:13px">${icon("eye", 14)} ${T("sync.makeRead")}</button>
         <button data-action="sync-make-code" data-level="write" ${ui.syncBusy ? "disabled" : ""} class="pb-btn pb-ghost" style="flex:1;padding:11px 0;font-size:13px">${icon("pencil", 14)} ${T("sync.makeWrite")}</button>
       </div>
-      <div style="font-size:11.5px;color:var(--faint);margin-bottom:16px;line-height:1.55">${T("sync.makeHint")}</div>
+      <div style="height:16px"></div>
       ${sectionTitle(T("sync.peopleTitle"))}
       ${grants}`;
   }
@@ -18689,13 +18585,13 @@ function renderAccountSheet() {
     ${sectionTitle(T("acct.yourProfiles"))}
     ${mine.length ? rows(mine) : `<div style="font-size:12.5px;color:var(--faint);margin:0 2px 14px">${T("profiles.noneYours")}</div>`}
     ${theirs.length ? sectionTitle(T("profiles.sharedTitle")) + rows(theirs) : ""}
-    <div style="font-size:11.5px;color:var(--faint);margin-bottom:16px;line-height:1.55">${T("acct.listHint")}</div>
+    <div style="height:16px"></div>
     <div class="pb-card2" style="display:flex;align-items:center;gap:12px;padding:12px 14px">
       ${icon("key", 18, 'style="flex-shrink:0;color:var(--gold)"')}
       <div style="flex:1;min-width:0">
         <div style="font-size:13.5px;font-weight:600">${T("acct.recovery")}</div>
         <div style="font-size:12px;line-height:1.45;margin-top:2px;color:${ui.recoveryLeft === 0 ? "var(--red)" : "var(--muted)"}">${
-          ui.recoveryLeft == null ? T("acct.recoveryHint") : ui.recoveryLeft ? T("acct.recoveryLeft", { n: ui.recoveryLeft }) : T("acct.recoveryNone")}</div>
+          ui.recoveryLeft == null ? "" : ui.recoveryLeft ? T("acct.recoveryLeft", { n: ui.recoveryLeft }) : T("acct.recoveryNone")}</div>
       </div>
       <button data-action="codes-make-open" class="pb-btn pb-ghost" style="flex-shrink:0;padding:8px 12px;font-size:12.5px">${T("acct.recoveryMake")}</button>
     </div>
@@ -18703,7 +18599,6 @@ function renderAccountSheet() {
     <button data-action="acct-signout" ${ui.signingOut ? "disabled" : ""} class="pb-btn" style="width:100%;padding:12px 0;background:rgba(208,90,80,.1);color:var(--red);border:1px solid rgba(208,90,80,.3);opacity:${ui.signingOut ? 0.45 : 1}">
       ${icon("log-out", 15)} ${T(ui.signingOut ? "acct.signingOut" : "acct.signOut")}
     </button>
-    <div style="font-size:11.5px;color:var(--faint);margin-top:10px;line-height:1.55">${T("acct.signOutHint")}</div>
     <button data-action="acct-signout-others" class="pb-btn" style="width:100%;padding:11px 0;margin-top:14px;font-size:13px;background:transparent;color:var(--steel);border:1px solid var(--border)">
       ${icon("monitor-smartphone", 14)} ${T("acct.signOutOthers")}
     </button>
@@ -18921,6 +18816,68 @@ function renderLegal() {
   `, "legal");
 }
 
+/* ── THE GUIDE ─────────────────────────────────────────────────────────
+   The one place the app explains itself, and only to somebody who asks:
+   Settings opens it, and so does a card on Home while a profile has
+   nothing logged, until that card is closed on this phone. No screen
+   carries a hint instead (docs/writing.md). A topic is a window of its own
+   over the list, so back closes the topic and then the guide. The buttons
+   a topic names come from the app's own strings (`guideVars`), so a
+   renamed button is renamed in the guide too. */
+const GUIDE = [
+  ["basics", "home"], ["logging", "clipboard-list"], ["plans", "calendar-check"], ["progress", "trending-up"],
+  ["volume", "calendar-days"], ["library", "book-open"], ["timers", "timer"], ["people", "users"], ["data", "cloud"],
+];
+const guideVars = () => ({
+  home: T("nav.home"), log: T("nav.log"), timer: T("nav.timer"), progress: T("nav.progress"), chat: T("nav.chat"), library: T("nav.library"),
+  settings: T("profile.title"), body: T("title.body"), start: T("home.start"), calendar: T("log.calendar"),
+  addEx: T("wo.addExercise"), addSet: T("sets.add"), warm: T("sets.addWarm"), planDay: T("plan.planDay"),
+  presets: T("lib.presets"), savePreset: T("preset.saveTitle"), deload: T("cal.planDeload"), target: T("vol.target"),
+  period: T("profile.weekMode"), notify: T("push.section"), stopwatch: T("timers.segStopwatch"),
+  rm: T("prog.segCalc"), standards: T("prog.segStandards"), goal: T("prog.goal"),
+  groups: T("groups.title"), uncat: T("group.Uncategorized"),
+  strength: T("kind.strength"), bw: T("kind.bodyweight"), hold: T("kind.hold"), cardio: T("kind.cardio"),
+  profiles: T("profiles.title"), sharing: T("share.entry"), account: T("acct.title"),
+  export: T("profile.export"), import: T("profile.import"), csv: T("csv.export"), storage: T("stor.title"),
+  reset: T("profile.reset"), delAcct: T("acct.delete"),
+});
+const guideHead = (action, ic, label, title) => `<div style="display:flex;align-items:center;gap:10px;padding:var(--pb-header-pt) 16px 10px;border-bottom:1px solid var(--border-soft)">
+      <button data-action="${action}" aria-label="${esc(label)}" style="color:var(--muted);padding:4px">${icon(ic, 21)}</button>
+      <div class="pb-num" style="font-size:19px;font-weight:700;flex:1;min-width:0">${title}</div>
+    </div>`;
+function renderGuide() {
+  return fullScreen(124, `
+    ${guideHead("guide-close", "x", T("a11y.close"), T("guide.title"))}
+    <div class="pb-scroll" data-scrollkey="guide" style="flex:1;overflow-y:auto;padding:16px 16px calc(40px + var(--pb-sab))">
+      ${GUIDE.map(([id, ic]) => `<button data-action="guide-topic" data-id="${id}" class="pb-card" style="width:100%;display:flex;align-items:center;gap:11px;padding:13px 14px;margin-bottom:8px;text-align:left;color:var(--text)">
+        ${icon(ic, 18, 'style="color:var(--gold);flex-shrink:0"')}
+        <span style="flex:1;min-width:0;font-weight:600;font-size:14.5px">${T("guide." + id + ".title")}</span>
+        ${icon("chevron-right", 15, 'style="color:var(--faint);flex-shrink:0"')}
+      </button>`).join("")}
+    </div>
+  `, "guide");
+}
+function renderGuideTopic() {
+  const i = GUIDE.findIndex(([id]) => id === ui.guideTopic);
+  if (i < 0) return "";
+  const id = GUIDE[i][0], next = GUIDE[i + 1];
+  return fullScreen(126, `
+    ${guideHead("guide-back", "arrow-left", T("a11y.back"), T("guide." + id + ".title"))}
+    <div class="pb-scroll" data-scrollkey="guide-${id}" style="flex:1;overflow-y:auto;padding:16px 16px calc(40px + var(--pb-sab))">
+      ${T("guide." + id + ".body", guideVars()).split("\n\n").map((p) => `<p style="margin:0 0 14px;font-size:14px;line-height:1.6;color:var(--muted)">${p}</p>`).join("")}
+      ${next ? `<button data-action="guide-topic" data-id="${next[0]}" class="pb-btn pb-ghost" style="width:100%;padding:12px 0;margin-top:6px;font-size:13.5px">${T("guide.next", { title: T("guide." + next[0] + ".title") })} ${icon("chevron-right", 15)}</button>` : ""}
+    </div>
+  `, "guideTopic");
+}
+/* Home's door to it: a profile with nothing logged, on a phone where the
+   card has not been closed (closed once, it stays closed for every profile
+   on this phone: by then the guide is known to be in Settings) */
+const GUIDE_CARD_OFF = "zenofit:guideCardOff";
+function guideCardShown() {
+  if ((state.log || []).length || syncReadOnly()) return false;
+  try { return !localStorage.getItem(GUIDE_CARD_OFF); } catch { return true; }
+}
+
 /* "I am 13 or older and accept…", as a checkbox the links can sit beside
    (a link inside the button would be a control inside a control) */
 const agreeBox = (action, on) => `<div style="display:flex;gap:10px;align-items:flex-start;margin:2px 0 12px">
@@ -18968,13 +18925,11 @@ function renderJoinSheet() {
   const ok = (f.code || "").replace(/-/g, "").length === 10 && !f.busy;
   return sheet(T("sync.joinTitle"), "joinSheet", `
     ${field(T("sync.joinLabel"),
-      `<input class="pb-input pb-num" data-bind="joinCode" value="${esc(f.code)}" placeholder="XXXX-XXXX-XX" maxlength="12" inputmode="text" autocapitalize="characters" autocorrect="off" autocomplete="off" spellcheck="false" style="letter-spacing:.14em;font-weight:700;text-transform:uppercase" data-autofocus>`,
-      T("sync.joinHint"))}
+      `<input class="pb-input pb-num" data-bind="joinCode" value="${esc(f.code)}" placeholder="XXXX-XXXX-XX" maxlength="12" inputmode="text" autocapitalize="characters" autocorrect="off" autocomplete="off" spellcheck="false" style="letter-spacing:.14em;font-weight:700;text-transform:uppercase" data-autofocus>`)}
     ${f.error ? `<div style="font-size:12.5px;color:var(--red);margin:-4px 0 12px;line-height:1.5">${esc(f.error)}</div>` : ""}
     <button data-action="join-go" ${ok ? "" : "disabled"} class="pb-btn pb-gold" style="width:100%;padding:13px 0;font-size:15px;opacity:${ok ? 1 : 0.45}">
       ${icon("cloud-download", 16)} ${T(f.busy ? "sync.joining" : "sync.joinBtn")}
     </button>
-    <div style="font-size:11.5px;color:var(--faint);margin-top:12px;line-height:1.55">${T("sync.joinBody")}</div>
   `, 122);
 }
 
@@ -18985,6 +18940,7 @@ function renderJoinSheet() {
    while it's already open never re-slides it. */
 function fullScreen(z, children, key) {
   const enter = key && !_lastOverlayKeys.has(key) ? " pb-sheet" : "";
+  if (key && !enter) _fsHeld = true;
   /* a window ends at the keyboard (`--pb-kb`): its list and its footer
      shrink above it instead of running on underneath */
   return `<div class="${enter}" data-overlay="${key || ""}" data-layer="fs" style="position:absolute;inset:0;z-index:${z};background:var(--bg);display:flex;flex-direction:column;padding-bottom:var(--pb-kb)">${children}</div>`;
@@ -19330,14 +19286,18 @@ function paintLineChart(wrap) {
 
   /* line + dots, clipped to the plot so a zoom can't spill over the axis */
   svg += `<g clip-path="url(#${cid})">`;
-  svg += `<path d="${monotonePath(pts)}" fill="none" stroke="${cGold}" stroke-width="2.4"/>`;
+  /* a deload session is a dot, never part of the line: it was light on
+     purpose, and running the line through it drew a crash that wasn't one */
+  svg += `<path d="${monotonePath(pts.filter((p) => !data[p.i].deload))}" fill="none" stroke="${cGold}" stroke-width="2.4"/>`;
   const sel = data.findIndex((d) => d.e.id === ui.chartSel[scope]);
   /* dots thin out when zoomed all the way out on a long history, but the
      selected one is always drawn */
   const dSkip = plotW / Math.max(1, span) < 7 ? Math.ceil(7 / Math.max(0.5, plotW / Math.max(1, span))) : 1;
   for (let i = i0; i <= i1; i++) {
     if (i !== sel && dSkip > 1 && i % dSkip !== 0) continue;
-    svg += `<circle cx="${pts[i].x}" cy="${pts[i].y}" r="${data[i].badge === "pr" ? 4.4 : 3.5}" fill="${cGold}" stroke="${cDot}" stroke-width="1.5"/>`;
+    svg += data[i].deload
+      ? `<circle cx="${pts[i].x}" cy="${pts[i].y}" r="3.5" fill="${cDot}" stroke="${cGold}" stroke-width="1.5" opacity=".55"/>`
+      : `<circle cx="${pts[i].x}" cy="${pts[i].y}" r="${data[i].badge === "pr" ? 4.4 : 3.5}" fill="${cGold}" stroke="${cDot}" stroke-width="1.5"/>`;
   }
   if (sel >= 0) {
     const p = pts[sel];
@@ -19718,7 +19678,6 @@ function renderPlanResult() {
       ${s.bonus ? `<div style="font-size:12px;color:var(--muted);margin-top:5px">${T("plan.resultBonus", { n: s.bonus })}</div>` : ""}
     </div>
     ${lifts ? `<div class="pb-card2" style="padding:2px 13px 0;margin-bottom:14px">${lifts}</div>` : ""}
-    <div style="font-size:11.5px;color:var(--faint);line-height:1.5;margin-bottom:14px">${T("plan.resultFoot")}</div>
     <button data-action="plan-result-close" class="pb-btn pb-gold" style="width:100%;padding:14px 0;font-size:15px">
       ${icon("check", 17)} ${T("common.done")}
     </button>
@@ -20393,6 +20352,11 @@ const actions = {
   },
   "legal-lang": (el) => { if (ui.legal) { ui.legal = { ...ui.legal, lang: el.dataset.id }; render(); } },
   "legal-close": () => { ui.legal = null; render(); },
+  "open-guide": () => { ui.guide = true; render(); },
+  "guide-close": () => { ui.guide = false; ui.guideTopic = null; render(); },
+  "guide-topic": (el) => { ui.guide = true; ui.guideTopic = el.dataset.id; render(); },
+  "guide-back": () => { ui.guideTopic = null; render(); },
+  "guide-card-hide": () => { try { localStorage.setItem(GUIDE_CARD_OFF, "1"); } catch { /* shown again next time */ } render(); },
 
   "login-agree": () => {
     ui.login = { ...ui.login, agree: !ui.login.agree, error: null };
@@ -20814,16 +20778,6 @@ const actions = {
      otherwise. */
   "new-workout": () => { ui.tab = "log"; ui.logSeg = "history"; resetTransient(); ui.workoutSheet = sheetForDay(todayStr()); render(); },
   "fab": () => { ui.workoutSheet = sheetForDay(todayStr()); render(); },
-  "toggle-deload": () => { ui.deloadOpen = !ui.deloadOpen; render(); },
-  "toggle-accordion": (el) => {
-    const id = el.dataset.id;
-    ui.accordions[id] = !ui.accordions[id];
-    /* animate the existing card in place, since a full render() would rebuild the
-       whole page and cause the flicker the user reported. */
-    const card = el.closest(".pb-acc");
-    if (card) setAccordion(card, ui.accordions[id]);
-    else render();
-  },
   "timer-seg": (el) => { ui.timerSeg = el.dataset.id; render(); },
   "log-seg": (el) => {
     ui.logSeg = el.dataset.id;
@@ -21464,7 +21418,7 @@ const actions = {
     const name = f.orig;
     const used = groupUseCount(name, state.library);
     const msg = used
-      ? T("groups.confirmDeleteUsed", { name: groupLabel(name), n: TN("exercise", used) })
+      ? TN("groups.confirmDeleteUsed", used, { name: groupLabel(name) })
       : T("groups.confirmDelete", { name: groupLabel(name) });
     if (!confirm(msg)) return;
 
@@ -21778,7 +21732,7 @@ const actions = {
     /* Its variations are separate lifts with their own history, so they are
        never taken down with it. They keep their own stored names and simply
        stop being shown as a family, which the confirm says before it asks. */
-    if (!confirm(kids.length ? T("ex.confirmDeleteParent", { n: TN("variation", kids.length) }) : T("ex.confirmDelete"))) return;
+    if (!confirm(kids.length ? TN("ex.confirmDeleteParent", kids.length) : T("ex.confirmDelete"))) return;
     ui.exWin = null; ui.exWinEdit = false; ui.exWinDraft = null;
     patch({
       library: state.library
@@ -22921,7 +22875,7 @@ const actions = {
    on the next pull.
 
    What is on the list is navigation and looking: tabs, sheets opening and
-   closing, filters, the chart, the calculator, the accordion, the storage
+   closing, filters, the chart, the calculator, the storage
    check, and the sync sheet itself, because Leave has to stay reachable
    from inside a profile you cannot write to.
 
@@ -22971,7 +22925,7 @@ const READ_OK = new Set([
   /* notifications belong to the phone, like the timers: nothing in them is
      training and nothing in them is written to `state` */
   "notify-open", "notify-close", "notify-set", "notify-kind", "notify-test", "notify-test-timer",
-  "cal-day", "cal-next", "cal-prev", "vol-next", "vol-prev", "toggle-accordion",
+  "cal-day", "cal-next", "cal-prev", "vol-next", "vol-prev",
   "open-exercise-window", "exwin-close", "exwin-cancel", "open-log-day", "log-day",
   "open-picker", "close-picker", "overlay-close", "close-worksheet", "close-entry",
   "close-body", "open-body", "body-metric", "close-storage", "open-storage", "storage-export", "storage-share",
@@ -22986,6 +22940,7 @@ const READ_OK = new Set([
      training's on screen */
   "login-agree", "terms-agree", "terms-accept", "terms-signout", "health-agree", "health-withdraw",
   "legal-open", "legal-lang", "legal-close",
+  "open-guide", "guide-close", "guide-topic", "guide-back", "guide-card-hide",
   "pin-menu", "pin-menu-close", "pin-switch", "pin-menu-own", "pin-menu-more", "profile-pin", "badge-color", "badge-icon", "badge-shape", "badge-style",
   /* the account is not the training on screen, and a read-only profile
      being open must not stand between somebody and deleting their account */
@@ -23256,8 +23211,7 @@ function handleBind(el) {
     const setHint = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
     if (key === "lift" && f.liftFromLog) {
       f.liftFromLog = false;
-      const ex = stdOf(f.slug);
-      setHint("stdLiftHint", ex && ex.reps ? T("std.repsHint") : T("std.liftHint"));
+      setHint("stdLiftHint", "");
     }
     /* A typed bodyweight is true as of TODAY, which is what keeps it from
        being taken straight back by a check-in already on record while still

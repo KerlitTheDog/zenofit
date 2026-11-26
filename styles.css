@@ -443,16 +443,6 @@ input[type="date"].pb-input::-webkit-date-and-time-value{
 .pb-trans{ pointer-events:none; }
 .pb-scroll::-webkit-scrollbar{ width:0; height:0; }
 
-/* smooth accordion expand / collapse. the body's height is animated between 0
-   and its measured content height by setAccordion() in JS, which is rock-solid
-   across browsers; the class just carries the open/closed styling. */
-.pb-acc-body{ height:0; overflow:hidden; transition:height .28s cubic-bezier(.4,0,.2,1); }
-.pb-acc.is-open .pb-acc-body{ height:auto; }
-.pb-acc-inner{ opacity:0; transition:opacity .22s ease; }
-.pb-acc.is-open .pb-acc-inner{ opacity:1; }
-.pb-acc-chevron{ display:inline-flex; flex-shrink:0; transition:transform .25s cubic-bezier(.4,0,.2,1); }
-.pb-acc.is-open .pb-acc-chevron{ transform:rotate(180deg); }
-
 /* The drag handle has to own the gesture: without touch-action:none the
    browser claims a vertical drag for scrolling and the row never moves. */
 .pb-drag{ touch-action:none; cursor:grab; }
@@ -489,7 +479,6 @@ input[type="date"].pb-input::-webkit-date-and-time-value{
 
 @media (prefers-reduced-motion: reduce){
   .pb-sheet,.pb-drop{ animation:none; }
-  .pb-acc-body,.pb-acc-inner,.pb-acc-chevron{ transition:none; }
   .pb-timer-done{ animation:none; box-shadow:0 0 0 3px rgba(233,185,73,.18); }
   /* the tap still has to show it landed, so the icon dims instead of turning */
   .pb-spin{ animation:none; opacity:.45; }
